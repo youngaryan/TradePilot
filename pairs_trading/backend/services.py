@@ -22,6 +22,7 @@ from ..apps.cli import (
     run_stat_arb_pipeline,
 )
 from ..operations.paper_trading import run_paper_batch
+from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
 from .schemas import BacktestRunRequest
 
@@ -76,6 +77,7 @@ class PaperRunJobRunner:
         self.jobs: dict[str, PaperRunJob] = {}
         self.jobs_dir = settings.paper_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
         self._load_jobs()
 
     def submit(self, command: PaperRunCommand) -> dict[str, Any]:
@@ -136,7 +138,14 @@ class PaperRunJobRunner:
         if command.deployment_config is None:
             return command.deployment_config_path or self.settings.default_paper_config
         path = self.jobs_dir / f"{job_id}_deployment.json"
-        path.write_text(json.dumps(json_ready(command.deployment_config), indent=2), encoding="utf-8")
+        config = json_ready(command.deployment_config)
+        path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        self.metadata_store.save_deployment_config(
+            config_id=job_id,
+            source="paper_inline",
+            config=config,
+            path=path,
+        )
         return path
 
     @staticmethod
@@ -236,25 +245,45 @@ class PaperRunJobRunner:
         )
 
     def _save_locked(self, job: PaperRunJob) -> None:
+        payload = json_ready(job.to_dict())
         path = self.jobs_dir / f"{job.id}.json"
         tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(json_ready(job.to_dict()), indent=2), encoding="utf-8")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp_path.replace(path)
+        self.metadata_store.upsert_job(kind="paper", payload=payload)
 
     def _load_jobs(self) -> None:
+        for payload in self.metadata_store.list_jobs(kind="paper"):
+            try:
+                job = PaperRunJob(**payload)
+            except Exception:
+                continue
+            self._load_job_instance(job)
+
         for path in sorted(self.jobs_dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 job = PaperRunJob(**payload)
             except Exception:
                 continue
-            if job.status in {"queued", "running"}:
-                job.status = "interrupted"
-                job.stage = "interrupted"
-                job.progress = 1.0
-                job.message = "The backend restarted before this paper run finished. Please rerun it."
-                job.finished_at_utc = job.finished_at_utc or _utc_now_iso()
-            self.jobs[job.id] = job
+            if job.id in self.jobs:
+                continue
+            self._load_job_instance(job)
+
+    def _load_job_instance(self, job: PaperRunJob) -> None:
+        changed = False
+        if job.status in {"queued", "running"}:
+            job.status = "interrupted"
+            job.stage = "interrupted"
+            job.progress = 1.0
+            job.message = "The backend restarted before this paper run finished. Please rerun it."
+            job.finished_at_utc = job.finished_at_utc or _utc_now_iso()
+            changed = True
+        self.jobs[job.id] = job
+        if changed:
+            self._save_locked(job)
+        else:
+            self.metadata_store.upsert_job(kind="paper", payload=json_ready(job.to_dict()))
 
     def _trim_locked(self) -> None:
         if len(self.jobs) <= self.max_history:
@@ -266,6 +295,7 @@ class PaperRunJobRunner:
                 (self.jobs_dir / f"{job.id}.json").unlink()
             except FileNotFoundError:
                 pass
+            self.metadata_store.delete_job(kind="paper", job_id=job.id)
 
 
 def _utc_now_iso() -> str:
@@ -407,6 +437,7 @@ class BacktestJobRunner:
         self.jobs: dict[str, BacktestJob] = {}
         self.jobs_dir = settings.backtest_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
         self._load_jobs()
 
     def submit(self, request: BacktestRunRequest) -> dict[str, Any]:
@@ -473,6 +504,14 @@ class BacktestJobRunner:
         )
         try:
             result = BacktestService(self.settings).run_backtest(request, progress=progress)
+            summary = result.get("summary", {})
+            experiment_id = str(summary.get("experiment_id") or job_id)
+            self.metadata_store.save_experiment_run(
+                experiment_id=experiment_id,
+                kind="backtest",
+                summary=json_ready(summary),
+                artifact_dir=result.get("artifact_dir"),
+            )
         except Exception as exc:  # pragma: no cover - exercised through API tests
             self._set_status(
                 job_id,
@@ -518,27 +557,48 @@ class BacktestJobRunner:
                 (self.jobs_dir / f"{job.id}.json").unlink()
             except FileNotFoundError:
                 pass
+            self.metadata_store.delete_job(kind="backtest", job_id=job.id)
 
     def _save_locked(self, job: BacktestJob) -> None:
+        payload = json_ready(job.to_dict())
         path = self.jobs_dir / f"{job.id}.json"
         tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(json_ready(job.to_dict()), indent=2), encoding="utf-8")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp_path.replace(path)
+        self.metadata_store.upsert_job(kind="backtest", payload=payload)
 
     def _load_jobs(self) -> None:
+        for payload in self.metadata_store.list_jobs(kind="backtest"):
+            try:
+                job = BacktestJob(**payload)
+            except Exception:
+                continue
+            self._load_job_instance(job)
+
         for path in sorted(self.jobs_dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 job = BacktestJob(**payload)
             except Exception:
                 continue
-            if job.status in {"queued", "running"}:
-                job.status = "interrupted"
-                job.stage = "interrupted"
-                job.progress = 1.0
-                job.message = "The backend restarted before this job finished. Please rerun it."
-                job.finished_at_utc = job.finished_at_utc or _utc_now_iso()
-            self.jobs[job.id] = job
+            if job.id in self.jobs:
+                continue
+            self._load_job_instance(job)
+
+    def _load_job_instance(self, job: BacktestJob) -> None:
+        changed = False
+        if job.status in {"queued", "running"}:
+            job.status = "interrupted"
+            job.stage = "interrupted"
+            job.progress = 1.0
+            job.message = "The backend restarted before this job finished. Please rerun it."
+            job.finished_at_utc = job.finished_at_utc or _utc_now_iso()
+            changed = True
+        self.jobs[job.id] = job
+        if changed:
+            self._save_locked(job)
+        else:
+            self.metadata_store.upsert_job(kind="backtest", payload=json_ready(job.to_dict()))
 
 
 class BacktestService:
@@ -550,8 +610,8 @@ class BacktestService:
             raise ValueError("Choose a pipeline before launching a backtest.")
         if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
-        if request.pipeline == "edgar_event" and not request.event_file and not request.use_sec_companyfacts:
-            raise ValueError("EDGAR event backtests require an event file or SEC company facts settings.")
+        if request.pipeline == "edgar_event" and not request.event_file and not request.use_sec_companyfacts and not request.include_sec_filings:
+            raise ValueError("EDGAR event backtests require an event file, SEC company facts, or official SEC filings.")
         if request.pipeline == "stat_arb" and request.symbols and request.sector_map_path is None:
             # The stat-arb runner can use its default sector map, but user-supplied symbols would be ignored.
             raise ValueError("Stat-arb symbol lists require a sector map path so sectors are explicit.")
@@ -681,6 +741,8 @@ class BacktestService:
                 event_file=str(request.event_file) if request.event_file else None,
                 edgar_user_agent=request.edgar_user_agent,
                 use_sec_companyfacts=request.use_sec_companyfacts,
+                include_sec_filings=request.include_sec_filings,
+                sec_filing_forms=request.sec_filing_forms,
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
@@ -751,6 +813,7 @@ class BacktestService:
 class PaperService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
 
     def latest_batch_summary_path(self) -> Path | None:
         root = self.settings.paper_artifact_root
@@ -801,6 +864,13 @@ class PaperService:
                 price_cache_dir=str(self.settings.price_cache_dir),
                 sentiment_cache_dir=str(self.settings.sentiment_cache_dir),
                 event_cache_dir=str(self.settings.event_cache_dir),
+            )
+            paper_run_id = f"{summary.get('run_timestamp_utc') or _utc_now_iso()}_{asof_date or 'today'}_{len(completed_dates) + 1}"
+            self.metadata_store.save_experiment_run(
+                experiment_id=paper_run_id,
+                kind="paper",
+                summary=json_ready(summary),
+                artifact_dir=summary.get("artifact_dir"),
             )
             latest_payload = self.build_dashboard_payload(batch_summary_path=summary.get("artifact_dir") and Path(summary["artifact_dir"]) / "paper_batch_summary.json")
             completed_dates.append(asof_date)

@@ -51,6 +51,11 @@ class BacktestRunRequest(BaseModel):
     sector_map_path: Path | None = Field(default=None, description="Sector map path for stat-arb runs.")
     event_file: Path | None = Field(default=None, description="Event file path for event-driven runs.")
     use_sec_companyfacts: bool = Field(default=False, description="Use SEC company facts for event-driven runs.")
+    include_sec_filings: bool = Field(default=False, description="Include official SEC filing events such as 8-K, 10-Q, and 10-K.")
+    sec_filing_forms: list[str] = Field(
+        default_factory=lambda: ["8-K", "10-Q", "10-K"],
+        description="Official SEC filing forms to include when include_sec_filings is enabled.",
+    )
     edgar_user_agent: str | None = Field(default=None, description="SEC EDGAR user-agent when SEC data is enabled.")
     train_bars: int = Field(default=252, ge=20)
     test_bars: int = Field(default=63, ge=5)

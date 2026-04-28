@@ -8,6 +8,7 @@ from .routers.backtests import build_backtest_router
 from .routers.health import router as health_router
 from .routers.paper import build_paper_router
 from .routers.strategies import router as strategies_router
+from .routers.system import build_system_router
 
 
 def create_app(settings: BackendSettings | None = None) -> FastAPI:
@@ -28,6 +29,7 @@ def create_app(settings: BackendSettings | None = None) -> FastAPI:
     app.include_router(strategies_router, prefix="/api")
     app.include_router(build_backtest_router(app_settings), prefix="/api")
     app.include_router(build_paper_router(app_settings), prefix="/api")
+    app.include_router(build_system_router(app_settings), prefix="/api")
     return app
 
 

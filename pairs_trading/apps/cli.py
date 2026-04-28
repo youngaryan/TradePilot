@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 import pandas as pd
 
 from ..core.portfolio import PortfolioManager
-from ..data.events import CachedEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider
+from ..data.events import CachedEventProvider, CompositeEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
 from ..data.market import CachedParquetProvider, YahooFinanceProvider
 from ..data.news import (
     AlphaVantageNewsProvider,
@@ -202,24 +202,50 @@ def load_events(
     event_cache_dir: str,
     edgar_user_agent: str | None,
     use_sec_companyfacts: bool,
+    include_sec_filings: bool = False,
+    sec_filing_forms: list[str] | None = None,
 ) -> pd.DataFrame | None:
+    providers = []
     if event_file:
-        provider = LocalEventFileProvider(event_file)
+        providers.append(LocalEventFileProvider(event_file))
+
+    if not use_sec_companyfacts and not include_sec_filings:
+        if not providers:
+            return None
+        provider = providers[0] if len(providers) == 1 else CompositeEventProvider(providers)
         return provider.get_events(tickers=tickers, start=start, end=end)
 
-    if not use_sec_companyfacts:
+    if (use_sec_companyfacts or include_sec_filings) and not edgar_user_agent:
+        raise ValueError("SEC EDGAR event loading requires --edgar-user-agent when official SEC event sources are enabled.")
+
+    sec_cache_dir = Path(event_cache_dir) / "sec"
+    if use_sec_companyfacts:
+        providers.append(
+            CachedEventProvider(
+                upstream=SecCompanyFactsEventProvider(
+                    user_agent=edgar_user_agent or "",
+                    cache_dir=sec_cache_dir,
+                ),
+                cache_dir=Path(event_cache_dir) / "companyfacts_events",
+            )
+        )
+
+    if include_sec_filings:
+        providers.append(
+            CachedEventProvider(
+                upstream=SecCompanyFilingsEventProvider(
+                    user_agent=edgar_user_agent or "",
+                    cache_dir=sec_cache_dir,
+                    forms=sec_filing_forms,
+                ),
+                cache_dir=Path(event_cache_dir) / "filing_events",
+            )
+        )
+
+    if not providers:
         return None
 
-    if not edgar_user_agent:
-        raise ValueError("SEC EDGAR event loading requires --edgar-user-agent when --use-sec-companyfacts is set.")
-
-    provider = CachedEventProvider(
-        upstream=SecCompanyFactsEventProvider(
-            user_agent=edgar_user_agent,
-            cache_dir=Path(event_cache_dir) / "sec",
-        ),
-        cache_dir=event_cache_dir,
-    )
+    provider = providers[0] if len(providers) == 1 else CompositeEventProvider(providers)
     return provider.get_events(tickers=tickers, start=start, end=end)
 
 
@@ -970,6 +996,8 @@ def run_event_driven_pipeline(
     event_file: str | None = None,
     edgar_user_agent: str | None = None,
     use_sec_companyfacts: bool = False,
+    include_sec_filings: bool = False,
+    sec_filing_forms: list[str] | None = None,
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
@@ -993,9 +1021,11 @@ def run_event_driven_pipeline(
         event_cache_dir=event_cache_dir,
         edgar_user_agent=edgar_user_agent,
         use_sec_companyfacts=use_sec_companyfacts,
+        include_sec_filings=include_sec_filings,
+        sec_filing_forms=sec_filing_forms,
     )
     if events is None:
-        raise ValueError("Event-driven backtests require --event-file or --use-sec-companyfacts with --edgar-user-agent.")
+        raise ValueError("Event-driven backtests require --event-file, --use-sec-companyfacts, or --include-sec-filings with --edgar-user-agent.")
 
     pipeline = EventDrivenPipeline(
         events=events,
@@ -1089,6 +1119,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-finbert-only", action="store_true", help="Require FinBERT to already exist locally.")
     parser.add_argument("--event-file", help="CSV or parquet of standardized event data.")
     parser.add_argument("--use-sec-companyfacts", action="store_true", help="Build EDGAR events from SEC company facts.")
+    parser.add_argument("--include-sec-filings", action="store_true", help="Add official SEC filing events such as 8-K earnings releases, 10-Qs, and 10-Ks.")
+    parser.add_argument("--sec-filing-forms", nargs="*", help="SEC filing forms to include for official event timestamps, e.g. 8-K 10-Q 10-K.")
     parser.add_argument("--edgar-user-agent", help="User-Agent string for SEC requests, e.g. 'YourName [email@example.com]'.")
     parser.add_argument("--artifact-root", default="artifacts/experiments", help="Experiment artifact directory.")
     parser.add_argument("--price-cache-dir", default="data/cache", help="Price parquet cache directory.")
@@ -1207,6 +1239,8 @@ def main() -> None:
             event_file=args.event_file,
             edgar_user_agent=args.edgar_user_agent,
             use_sec_companyfacts=args.use_sec_companyfacts,
+            include_sec_filings=args.include_sec_filings,
+            sec_filing_forms=args.sec_filing_forms,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,

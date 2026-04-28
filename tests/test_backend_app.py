@@ -64,6 +64,8 @@ class BackendAppTests(unittest.TestCase):
                 paper_state_dir=state_dir,
                 paper_artifact_root=workspace / "runs",
                 paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=workspace / "missing.json",
             )
         )
@@ -76,6 +78,7 @@ class BackendAppTests(unittest.TestCase):
         catalog = client.get("/api/strategies/catalog")
         catalog_item = client.get("/api/strategies/catalog/ema_cross")
         paper_jobs = client.get("/api/paper/jobs")
+        metadata = client.get("/api/system/metadata")
 
         self.assertEqual(health.status_code, 200)
         self.assertEqual(summary.status_code, 200)
@@ -88,6 +91,8 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(catalog_item.status_code, 200)
         self.assertEqual(catalog_item.json()["id"], "ema_cross")
         self.assertEqual(paper_jobs.status_code, 200)
+        self.assertEqual(metadata.status_code, 200)
+        self.assertEqual(metadata.json()["counts"]["jobs"], 0)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ class BackendBacktestTests(unittest.TestCase):
                 paper_artifact_root=workspace / "paper_runs",
                 backtest_artifact_root=workspace / "backtest_experiments",
                 backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
                 price_cache_dir=workspace / "cache",
                 default_paper_config=workspace / "missing.json",
             )
@@ -94,6 +95,11 @@ class BackendBacktestTests(unittest.TestCase):
         jobs = client.get("/api/backtests/jobs")
         self.assertEqual(jobs.status_code, 200)
         self.assertEqual(jobs.json()[0]["id"], job_id)
+        from pairs_trading.platform import SQLiteMetadataStore
+
+        metadata = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+        self.assertEqual(metadata.get_job(kind="backtest", job_id=job_id)["status"], "completed")
+        self.assertEqual(metadata.list_experiment_runs(kind="backtest")[0]["summary"]["sharpe"], 1.2)
 
     def test_paper_run_job_routes_submit_and_complete(self) -> None:
         from pairs_trading.backend.app import create_app
@@ -108,6 +114,7 @@ class BackendBacktestTests(unittest.TestCase):
                 paper_state_dir=workspace / "state",
                 paper_artifact_root=workspace / "paper_runs",
                 paper_job_state_dir=workspace / "paper_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=config_path,
                 price_cache_dir=workspace / "cache",
             )
@@ -142,6 +149,10 @@ class BackendBacktestTests(unittest.TestCase):
             self.assertEqual(job_payload["stage"], "completed")
             self.assertTrue((workspace / "paper_jobs" / f"{job_id}.json").exists())
             run_paper.assert_called_once()
+            from pairs_trading.platform import SQLiteMetadataStore
+
+            metadata = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+            self.assertEqual(metadata.get_job(kind="paper", job_id=job_id)["status"], "completed")
 
         jobs = client.get("/api/paper/jobs")
         self.assertEqual(jobs.status_code, 200)
@@ -157,6 +168,7 @@ class BackendBacktestTests(unittest.TestCase):
                 paper_state_dir=workspace / "state",
                 paper_artifact_root=workspace / "paper_runs",
                 paper_job_state_dir=workspace / "paper_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=workspace / "not_used.json",
                 price_cache_dir=workspace / "cache",
             )
@@ -233,6 +245,10 @@ class BackendBacktestTests(unittest.TestCase):
             self.assertEqual(len(saved_config["strategies"]), 2)
             self.assertEqual(saved_config["strategies"][1]["news_provider_names"], ["local"])
             self.assertEqual(run_paper.call_count, 2)
+            from pairs_trading.platform import SQLiteMetadataStore
+
+            metadata = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+            self.assertEqual(metadata.get_deployment_config(config_id=job_id)["config"]["strategies"][1]["name"], "stat_arb_agent")
 
 
 if __name__ == "__main__":

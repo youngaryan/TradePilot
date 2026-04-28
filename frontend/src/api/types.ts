@@ -113,6 +113,8 @@ export interface PaperAgentConfig {
   sector_map_path?: string | null;
   event_file?: string | null;
   use_sec_companyfacts?: boolean;
+  include_sec_filings?: boolean;
+  sec_filing_forms?: string[];
   edgar_user_agent?: string | null;
   daily_sentiment_file?: string | null;
   news_provider_names?: string[];
@@ -137,6 +139,15 @@ export interface PaperRunRequest {
 export interface HealthResponse {
   status: string;
   service: string;
+}
+
+export interface SystemMetadata {
+  metadata_db_path: string;
+  counts: {
+    jobs: number;
+    deployment_configs: number;
+    experiment_runs: number;
+  };
 }
 
 export interface StrategyCatalogItem {
@@ -178,6 +189,8 @@ export interface BacktestRunRequest {
   sector_map_path?: string | null;
   event_file?: string | null;
   use_sec_companyfacts?: boolean;
+  include_sec_filings?: boolean;
+  sec_filing_forms?: string[];
   edgar_user_agent?: string | null;
   train_bars: number;
   test_bars: number;

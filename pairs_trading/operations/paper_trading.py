@@ -75,6 +75,8 @@ class PaperStrategySpec:
     news_topics: tuple[str, ...] = field(default_factory=tuple)
     event_file: str | None = None
     use_sec_companyfacts: bool = False
+    include_sec_filings: bool = False
+    sec_filing_forms: tuple[str, ...] = field(default_factory=lambda: ("8-K", "10-Q", "10-K"))
     edgar_user_agent: str | None = None
     interval: str = "1d"
     lookback_bars: int | None = None
@@ -97,6 +99,8 @@ class PaperStrategySpec:
             news_topics=_coerce_str_tuple(payload.get("news_topics")),
             event_file=payload.get("event_file"),
             use_sec_companyfacts=bool(payload.get("use_sec_companyfacts", False)),
+            include_sec_filings=bool(payload.get("include_sec_filings", False)),
+            sec_filing_forms=_coerce_str_tuple(payload.get("sec_filing_forms")) or ("8-K", "10-Q", "10-K"),
             edgar_user_agent=payload.get("edgar_user_agent"),
             interval=str(payload.get("interval", "1d")),
             lookback_bars=None if payload.get("lookback_bars") is None else int(payload["lookback_bars"]),
@@ -516,9 +520,11 @@ class PaperTradingService:
             event_cache_dir=self.event_cache_dir,
             edgar_user_agent=spec.edgar_user_agent,
             use_sec_companyfacts=spec.use_sec_companyfacts,
+            include_sec_filings=spec.include_sec_filings,
+            sec_filing_forms=list(spec.sec_filing_forms),
         )
         if events is None:
-            raise ValueError(f"{spec.name} requires 'event_file' or SEC company facts settings for paper deployment.")
+            raise ValueError(f"{spec.name} requires 'event_file', SEC company facts, or official SEC filings for paper deployment.")
 
         pipeline = EventDrivenPipeline(
             events=events,

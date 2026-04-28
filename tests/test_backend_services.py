@@ -64,6 +64,7 @@ class BackendServiceTests(unittest.TestCase):
             BackendSettings(
                 paper_state_dir=state_dir,
                 paper_artifact_root=workspace / "runs",
+                metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=workspace / "missing.json",
             )
         )

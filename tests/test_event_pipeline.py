@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from pairs_trading.data.events import LocalEventFileProvider, SecCompanyFactsEventProvider
+from pairs_trading.data.events import LocalEventFileProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
 from pairs_trading.engines.backtesting import CostModel, WalkForwardBacktester, WalkForwardConfig
 from pairs_trading.pipelines import EventDrivenConfig, EventDrivenPipeline
 from pairs_trading.core.portfolio import PortfolioManager
@@ -69,6 +69,37 @@ class EventProviderTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events.iloc[0]["ticker"], "AAA")
         self.assertGreater(float(events.iloc[0]["event_score"]), 0.0)
+
+    def test_sec_company_filings_provider_builds_official_earnings_events(self) -> None:
+        provider = SecCompanyFilingsEventProvider(
+            user_agent="PairsTradingTest [test@example.com]",
+            cache_dir=fresh_test_dir("artifacts/test_events/sec_filings"),
+        )
+        payload = {
+            "filings": {
+                "recent": {
+                    "accessionNumber": ["0000000001-24-000001", "0000000001-24-000002", "0000000001-24-000003"],
+                    "filingDate": ["2024-02-01", "2024-05-02", "2024-05-03"],
+                    "reportDate": ["2023-12-31", "2024-03-31", "2024-03-31"],
+                    "form": ["10-K", "10-Q", "8-K"],
+                    "primaryDocument": ["aaa-10k.htm", "aaa-10q.htm", "aaa-8k.htm"],
+                    "primaryDocDescription": ["Annual report", "Quarterly report", "Results of Operations and Financial Condition"],
+                    "items": ["", "", "2.02"],
+                }
+            }
+        }
+
+        with patch.object(provider, "_load_ticker_map", return_value={"AAA": "0000000001"}), patch.object(
+            provider,
+            "_load_submission_payload",
+            return_value=payload,
+        ):
+            events = provider.get_events(["AAA"], "2024-01-01", "2024-12-31")
+
+        self.assertEqual(len(events), 3)
+        self.assertIn("earnings_release_8k", set(events["event_type"]))
+        self.assertIn("quarterly_earnings_report", set(events["event_type"]))
+        self.assertGreater(float(events["confidence"].max()), 0.0)
 
 
 class EventPipelineTests(unittest.TestCase):

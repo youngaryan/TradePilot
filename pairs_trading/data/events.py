@@ -12,6 +12,17 @@ import numpy as np
 import pandas as pd
 
 
+EVENT_COLUMNS = [
+    "timestamp",
+    "ticker",
+    "event_score",
+    "confidence",
+    "event_type",
+    "source",
+    "form",
+]
+
+
 @dataclass(frozen=True)
 class EventRequest:
     tickers: tuple[str, ...]
@@ -57,6 +68,45 @@ class EventProvider(ABC):
         - source
         - form
         """
+
+
+class CompositeEventProvider(EventProvider):
+    """Combine multiple event sources into one standardized event panel."""
+
+    def __init__(self, providers: Sequence[EventProvider]) -> None:
+        if not providers:
+            raise ValueError("CompositeEventProvider requires at least one provider.")
+        self.providers = list(providers)
+
+    def get_events(
+        self,
+        tickers: Sequence[str],
+        start: str | pd.Timestamp,
+        end: str | pd.Timestamp,
+    ) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        for provider in self.providers:
+            frame = provider.get_events(tickers=tickers, start=start, end=end)
+            if frame.empty:
+                continue
+            frames.append(frame)
+        if not frames:
+            return pd.DataFrame(columns=EVENT_COLUMNS)
+
+        combined = pd.concat(frames, axis=0, ignore_index=True, sort=False)
+        combined["timestamp"] = pd.to_datetime(combined["timestamp"]).dt.tz_localize(None)
+        combined["ticker"] = combined["ticker"].astype(str).str.upper()
+        combined["event_score"] = pd.to_numeric(combined["event_score"], errors="coerce").fillna(0.0)
+        combined["confidence"] = pd.to_numeric(combined.get("confidence", 1.0), errors="coerce").fillna(1.0).clip(0.0, 1.0)
+        for column in ("event_type", "source", "form"):
+            if column not in combined.columns:
+                combined[column] = ""
+            combined[column] = combined[column].fillna("").astype(str)
+        dedup_columns = [column for column in ("timestamp", "ticker", "event_type", "form", "source") if column in combined.columns]
+        return combined.sort_values(["timestamp", "ticker", "confidence"], ascending=[True, True, False]).drop_duplicates(
+            subset=dedup_columns,
+            keep="first",
+        ).reset_index(drop=True)
 
 
 class LocalEventFileProvider(EventProvider):
@@ -387,3 +437,227 @@ class SecCompanyFactsEventProvider(EventProvider):
         end_ts = pd.Timestamp(request.end)
         combined = combined[(combined["timestamp"] >= start_ts) & (combined["timestamp"] <= end_ts)]
         return combined.sort_values(["timestamp", "ticker"]).reset_index(drop=True)
+
+
+class SecCompanyFilingsEventProvider(EventProvider):
+    """
+    Builds official company event timestamps from SEC submissions history.
+
+    This provider captures events that are official and auditable, especially:
+    - 8-K Item 2.02 earnings/results releases,
+    - 10-Q quarterly reports,
+    - 10-K annual reports.
+
+    The scores are deliberately low-conviction event-drift priors. Directional
+    fundamentals still come from company-facts or a separate surprise dataset.
+    """
+
+    TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
+    SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+    SUBMISSIONS_FILE_URL = "https://data.sec.gov/submissions/{name}"
+    DEFAULT_FORMS = ("8-K", "10-Q", "10-K")
+
+    def __init__(
+        self,
+        user_agent: str,
+        cache_dir: str | Path = "data/sec_cache",
+        forms: Sequence[str] | None = None,
+        timeout_seconds: float = 30.0,
+        include_historical_files: bool = True,
+    ) -> None:
+        if not user_agent or "@" not in user_agent:
+            raise ValueError("SEC requests require a descriptive User-Agent with contact information.")
+        self.user_agent = user_agent
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.forms = tuple(dict.fromkeys((forms or self.DEFAULT_FORMS)))
+        self.timeout_seconds = timeout_seconds
+        self.include_historical_files = include_historical_files
+
+    def _fetch_json(self, url: str) -> dict:
+        request = Request(url, headers={"User-Agent": self.user_agent})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            payload = response.read().decode("utf-8")
+        return json.loads(payload)
+
+    def _ticker_map_path(self) -> Path:
+        return self.cache_dir / "company_tickers.json"
+
+    def _load_ticker_map(self) -> dict[str, str]:
+        path = self._ticker_map_path()
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            data = self._fetch_json(self.TICKER_MAP_URL)
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+        mapping: dict[str, str] = {}
+        for record in data.values():
+            ticker = str(record.get("ticker", "")).upper()
+            cik = str(record.get("cik_str", "")).strip()
+            if ticker and cik:
+                mapping[ticker] = cik.zfill(10)
+        return mapping
+
+    def _submissions_path(self, cik: str) -> Path:
+        return self.cache_dir / "submissions" / f"CIK{cik}.json"
+
+    def _submissions_file_path(self, name: str) -> Path:
+        return self.cache_dir / "submissions" / name
+
+    def _load_submission_payload(self, cik: str) -> dict:
+        path = self._submissions_path(cik)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        payload = self._fetch_json(self.SUBMISSIONS_URL.format(cik=cik))
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def _load_submission_file(self, name: str) -> dict:
+        path = self._submissions_file_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        payload = self._fetch_json(self.SUBMISSIONS_FILE_URL.format(name=name))
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    @staticmethod
+    def _columnar_records(filings: dict) -> list[dict[str, object]]:
+        if not filings:
+            return []
+        keys = list(filings.keys())
+        row_count = max((len(value) for value in filings.values() if isinstance(value, list)), default=0)
+        records: list[dict[str, object]] = []
+        for index in range(row_count):
+            record: dict[str, object] = {}
+            for key in keys:
+                values = filings.get(key)
+                if isinstance(values, list) and index < len(values):
+                    record[key] = values[index]
+            records.append(record)
+        return records
+
+    @staticmethod
+    def _filing_url(cik: str, accession_number: str, primary_document: str) -> str:
+        if not accession_number or not primary_document:
+            return ""
+        accession_path = str(accession_number).replace("-", "")
+        return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_path}/{primary_document}"
+
+    @staticmethod
+    def _event_from_record(form: str, items: str, description: str) -> tuple[str, float, float] | None:
+        normalized_form = form.upper().strip()
+        normalized_items = str(items or "").lower()
+        normalized_description = str(description or "").lower()
+        if normalized_form in {"10-Q", "10-Q/A"}:
+            return "quarterly_earnings_report", 0.15, 0.40
+        if normalized_form in {"10-K", "10-K/A"}:
+            return "annual_earnings_report", 0.15, 0.45
+        if normalized_form in {"8-K", "8-K/A"}:
+            is_earnings_release = (
+                "2.02" in normalized_items
+                or "results of operations" in normalized_description
+                or "financial condition" in normalized_description
+                or "earnings" in normalized_description
+            )
+            if is_earnings_release:
+                return "earnings_release_8k", 0.20, 0.35
+            return "material_8k", 0.10, 0.25
+        return None
+
+    @staticmethod
+    def _files_overlap(file_record: dict, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> bool:
+        filing_from = pd.to_datetime(file_record.get("filingFrom"), errors="coerce")
+        filing_to = pd.to_datetime(file_record.get("filingTo"), errors="coerce")
+        if pd.isna(filing_from) or pd.isna(filing_to):
+            return False
+        return filing_from <= end_ts and filing_to >= start_ts
+
+    def _records_for_range(self, payload: dict, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> list[dict[str, object]]:
+        filings = payload.get("filings", {})
+        records = self._columnar_records(filings.get("recent", {}))
+        if not self.include_historical_files:
+            return records
+
+        for file_record in filings.get("files", []) or []:
+            if not isinstance(file_record, dict) or not self._files_overlap(file_record, start_ts, end_ts):
+                continue
+            name = str(file_record.get("name", ""))
+            if not name:
+                continue
+            try:
+                file_payload = self._load_submission_file(name)
+            except Exception:
+                continue
+            records.extend(self._columnar_records(file_payload))
+        return records
+
+    def _build_filing_events(self, ticker: str, cik: str, payload: dict, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> pd.DataFrame:
+        allowed_forms = {form.upper() for form in self.forms}
+        rows: list[dict[str, object]] = []
+        for record in self._records_for_range(payload, start_ts, end_ts):
+            form = str(record.get("form", "")).upper().strip()
+            base_form = form[:-2] if form.endswith("/A") else form
+            if form not in allowed_forms and base_form not in allowed_forms:
+                continue
+            filing_date = pd.to_datetime(record.get("filingDate"), errors="coerce")
+            if pd.isna(filing_date) or filing_date < start_ts or filing_date > end_ts:
+                continue
+            event = self._event_from_record(
+                form=form,
+                items=str(record.get("items", "")),
+                description=str(record.get("primaryDocDescription", "")),
+            )
+            if event is None:
+                continue
+            event_type, event_score, confidence = event
+            accession_number = str(record.get("accessionNumber", ""))
+            primary_document = str(record.get("primaryDocument", ""))
+            rows.append(
+                {
+                    "timestamp": filing_date.tz_localize(None),
+                    "ticker": ticker,
+                    "event_score": event_score,
+                    "confidence": confidence,
+                    "event_type": event_type,
+                    "source": "sec_submissions",
+                    "form": form,
+                    "report_date": record.get("reportDate"),
+                    "accession_number": accession_number,
+                    "primary_document": primary_document,
+                    "items": record.get("items", ""),
+                    "description": record.get("primaryDocDescription", ""),
+                    "url": self._filing_url(cik, accession_number, primary_document),
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame(columns=EVENT_COLUMNS)
+        return pd.DataFrame(rows).sort_values(["timestamp", "ticker", "form"]).reset_index(drop=True)
+
+    def get_events(
+        self,
+        tickers: Sequence[str],
+        start: str | pd.Timestamp,
+        end: str | pd.Timestamp,
+    ) -> pd.DataFrame:
+        request = EventRequest.from_inputs(tickers=tickers, start=start, end=end)
+        ticker_map = self._load_ticker_map()
+        start_ts = pd.Timestamp(request.start)
+        end_ts = pd.Timestamp(request.end)
+
+        events: list[pd.DataFrame] = []
+        for ticker in request.tickers:
+            cik = ticker_map.get(ticker)
+            if cik is None:
+                continue
+            payload = self._load_submission_payload(cik)
+            filing_events = self._build_filing_events(ticker, cik, payload, start_ts, end_ts)
+            if not filing_events.empty:
+                events.append(filing_events)
+
+        if not events:
+            return pd.DataFrame(columns=EVENT_COLUMNS)
+        return pd.concat(events, axis=0, ignore_index=True, sort=False).sort_values(["timestamp", "ticker"]).reset_index(drop=True)

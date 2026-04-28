@@ -46,6 +46,7 @@ Backend endpoints:
 POST /api/paper/run-job
 GET  /api/paper/jobs
 GET  /api/paper/jobs/{job_id}
+GET  /api/system/metadata
 ```
 
 This is still fake-money shadow trading. It is called `live` because it runs against the current configured as-of date and updates persistent ledgers, not because it sends real broker orders.
@@ -78,6 +79,11 @@ Per-run artifacts:
 
 Stable latest dashboard:
 - `artifacts/paper/live_dashboard/index.html`
+
+Durable metadata index:
+- `artifacts/metadata/app.sqlite3`
+
+The JSON files remain easy to inspect manually, while SQLite gives the future worker/API layer a queryable index of jobs, deployment configs, and paper experiment runs.
 
 ## How To Read The Output
 

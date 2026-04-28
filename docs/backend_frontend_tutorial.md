@@ -69,8 +69,10 @@ Application layer:
 
 - `frontend/`: React TypeScript trading operations console.
 - `pairs_trading/backend/`: FastAPI HTTP backend.
+- `pairs_trading/platform/`: shared infrastructure primitives for API, worker, and operations code.
 - `pairs_trading/api/`: read-model builders that shape backend data for the frontend.
 - `pairs_trading/apps/`: command-line entry points.
+- `apps/`: future-facing API, worker, and web deployment facades.
 
 Quant domain layer:
 
@@ -94,6 +96,7 @@ Persistence layer:
 - `artifacts/paper/runs/`: per-run paper summaries and reports.
 - `artifacts/paper/jobs/`: persisted paper job state and inline deployment configs.
 - `artifacts/paper/live_dashboard/`: latest static generated paper dashboard.
+- `artifacts/metadata/app.sqlite3`: durable metadata index for jobs, deployments, and experiment runs.
 
 ## Runtime Flow
 
@@ -144,6 +147,7 @@ The backend entry point is `pairs_trading/backend/app.py`.
 /api/strategies
 /api/backtests
 /api/paper
+/api/system
 ```
 
 The global `app = create_app()` line is why this command works:
@@ -271,6 +275,38 @@ GET  /api/paper/jobs/{job_id}
 
 `POST /api/paper/run-job` is asynchronous. It is what the `Live Trading` page uses when you click `Deploy Agents`.
 
+### System Router
+
+File: `pairs_trading/backend/routers/system.py`
+
+Endpoint:
+
+```text
+GET /api/system/metadata
+```
+
+This exposes the SQLite metadata store path and counts for jobs, deployment configs, and experiment runs. It is the first backend/admin surface for the future worker architecture.
+
+## Platform Persistence
+
+File: `pairs_trading/platform/persistence.py`
+
+`SQLiteMetadataStore` is the first durable metadata primitive for the redesigned modular monolith. Large research data still belongs in parquet/JSON artifacts, but operational metadata now has a queryable store.
+
+It tracks:
+
+- jobs
+- inline deployment configs
+- experiment runs
+
+The backend still writes JSON job files for compatibility, but backtest and paper job runners also mirror job state into SQLite. This makes it easier to add:
+
+- standalone workers
+- admin screens
+- job search/filtering
+- deployment history
+- experiment registries
+
 ## Backend Services
 
 The main service file is `pairs_trading/backend/services.py`.
@@ -374,6 +410,7 @@ The important distinction:
 - `PaperRunJobRunner` owns job lifecycle and polling state.
 - `PaperService` owns paper business logic from the backend point of view.
 - `pairs_trading/operations/paper_trading.py` owns the actual paper execution mechanics.
+- `SQLiteMetadataStore` indexes job, deployment, and run metadata for future workers/admin views.
 
 ## API Read Models
 
@@ -756,6 +793,32 @@ Frontend entry files:
 `App.tsx` renders `PaperDashboard`.
 
 `styles.css` contains the shared visual system, dashboard layout, charts, forms, and responsive behavior.
+
+## App Facades
+
+Top-level `apps/` contains future deployment boundaries without breaking the current package:
+
+- `apps/api/main.py`: exposes `app` from `pairs_trading.backend.app`.
+- `apps/worker/main.py`: inspects the SQLite metadata store and is the starting point for a durable worker.
+- `apps/web/README.md`: documents the future web app boundary while `frontend/` remains the current React app.
+
+Current API command:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn pairs_trading.backend.app:app --reload --host 127.0.0.1 --port 8000
+```
+
+Future-facing equivalent:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Inspect worker metadata:
+
+```powershell
+.\.venv\Scripts\python.exe apps\worker\main.py --kind paper
+```
 
 ## Frontend API Layer
 
@@ -1244,6 +1307,7 @@ POST /api/paper/run
 POST /api/paper/run-job
 GET  /api/paper/jobs
 GET  /api/paper/jobs/{job_id}
+GET  /api/system/metadata
 ```
 
 Frontend API wrapper:

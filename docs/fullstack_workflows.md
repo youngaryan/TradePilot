@@ -35,6 +35,7 @@ GET  http://127.0.0.1:8000/api/backtests/templates
 POST http://127.0.0.1:8000/api/backtests/run
 GET  http://127.0.0.1:8000/api/backtests/jobs
 GET  http://127.0.0.1:8000/api/backtests/jobs/{job_id}
+GET  http://127.0.0.1:8000/api/system/metadata
 ```
 
 FastAPI also serves interactive OpenAPI docs:
@@ -86,6 +87,10 @@ $env:VITE_API_BASE_URL="http://127.0.0.1:8000"
 
 ## Design Boundary
 
+- `apps/api/` exposes a future-facing API deployment facade.
+- `apps/worker/` exposes a future-facing worker facade for durable job processing.
+- `apps/web/` documents the future frontend app boundary while the React app still lives in `frontend/`.
+- `pairs_trading/platform/` owns shared infrastructure primitives such as SQLite metadata persistence.
 - `pairs_trading/api/` produces frontend-ready read models.
 - `pairs_trading/backend/` exposes those read models over HTTP.
 - `frontend/src/api/` owns typed fetch clients and TypeScript API types.

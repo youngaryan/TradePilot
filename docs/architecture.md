@@ -16,7 +16,9 @@ For the full backend/frontend walkthrough, read [backend_frontend_tutorial.md](b
 - `pairs_trading/reporting/`: charts, reports, dashboards, and visualization output.
 - `pairs_trading/api/`: frontend-facing read models. This is where future FastAPI or dashboard endpoints should import from.
 - `pairs_trading/backend/`: FastAPI transport layer. Keep it thin; it should call service/read-model modules instead of owning quant logic.
+- `pairs_trading/platform/`: shared infrastructure primitives such as SQLite metadata storage for jobs, deployments, and experiments.
 - `pairs_trading/apps/`: command-line applications and other runnable entry points.
+- `apps/`: future-facing deployment facades for API, worker, and web app boundaries.
 - `frontend/`: React TypeScript UI. Keep API calls in `frontend/src/api/` and domain UI in `frontend/src/features/`.
 
 ## Frontend Boundary
@@ -49,6 +51,7 @@ POST /api/paper/run
 POST /api/paper/run-job
 GET /api/paper/jobs
 GET /api/paper/jobs/{job_id}
+GET /api/system/metadata
 ```
 
 Keep the backend route layer thin. New frontend screens should usually be backed by a read model in `pairs_trading/api/`, a service in `pairs_trading/backend/services.py` or a nearby service module, and a route adapter in `pairs_trading/backend/routers/`.

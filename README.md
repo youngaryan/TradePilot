@@ -13,7 +13,9 @@ The architecture follows a modular flow:
 - `pairs_trading/reporting/`: research dashboards and paper-trading dashboards
 - `pairs_trading/api/`: frontend-facing read models that can later sit behind FastAPI or another web server
 - `pairs_trading/backend/`: FastAPI HTTP backend for the frontend and future external clients
+- `pairs_trading/platform/`: shared infrastructure primitives such as durable metadata storage
 - `pairs_trading/apps/`: command-line entry points
+- `apps/`: future-facing deployment facades for API, worker, and web apps
 - `frontend/`: Vite React TypeScript operations console
 
 More detail lives in [docs/architecture.md](docs/architecture.md).

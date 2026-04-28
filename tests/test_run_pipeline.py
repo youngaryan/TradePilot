@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from pairs_trading.apps.cli import load_daily_sentiment, load_sector_map, run_directional_pipeline, run_stat_arb_pipeline
+from pairs_trading.apps.cli import load_daily_sentiment, load_events, load_sector_map, run_directional_pipeline, run_stat_arb_pipeline
 from pairs_trading.features.sentiment import RuleBasedFinancialSentimentModel
 from tests.common import fresh_test_dir, synthetic_directional_prices, synthetic_prices_and_sector_map
 
@@ -59,6 +59,48 @@ class RunPipelineHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(loaded["ticker"].tolist(), ["AAA", "AAA"])
+
+    def test_load_events_combines_local_and_official_sec_filings(self) -> None:
+        data_dir = fresh_test_dir("artifacts/test_runner/events")
+        event_path = data_dir / "events.csv"
+        pd.DataFrame(
+            {
+                "timestamp": ["2024-01-02"],
+                "ticker": ["AAA"],
+                "event_score": [0.4],
+                "confidence": [0.8],
+                "event_type": ["manual_event"],
+            }
+        ).to_csv(event_path, index=False)
+
+        sec_events = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(["2024-02-01"]),
+                "ticker": ["AAA"],
+                "event_score": [0.2],
+                "confidence": [0.35],
+                "event_type": ["earnings_release_8k"],
+                "source": ["sec_submissions"],
+                "form": ["8-K"],
+            }
+        )
+
+        with patch("pairs_trading.apps.cli.CachedEventProvider.get_events", return_value=sec_events):
+            events = load_events(
+                tickers=["AAA"],
+                start="2024-01-01",
+                end="2024-12-31",
+                event_file=str(event_path),
+                event_cache_dir=str(data_dir / "cache"),
+                edgar_user_agent="PairsTradingTest [test@example.com]",
+                use_sec_companyfacts=False,
+                include_sec_filings=True,
+                sec_filing_forms=["8-K", "10-Q", "10-K"],
+            )
+
+        self.assertIsNotNone(events)
+        assert events is not None
+        self.assertEqual(set(events["event_type"]), {"manual_event", "earnings_release_8k"})
 
     def test_run_stat_arb_pipeline_with_local_news_provider(self) -> None:
         prices, sector_map = synthetic_prices_and_sector_map()

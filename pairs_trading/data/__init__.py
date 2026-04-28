@@ -1,6 +1,6 @@
 """Market, news, and event data provider interfaces."""
 
-from .events import CachedEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider
+from .events import CachedEventProvider, CompositeEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
 from .market import CachedParquetProvider, MarketDataProvider, YahooFinanceProvider
 from .news import (
     AlphaVantageNewsProvider,
@@ -20,6 +20,7 @@ __all__ = [
     "CachedEventProvider",
     "CachedNewsSentimentProvider",
     "CachedParquetProvider",
+    "CompositeEventProvider",
     "CompositeHeadlineProvider",
     "DailySentimentFileProvider",
     "HeadlineDedupConfig",
@@ -28,6 +29,7 @@ __all__ = [
     "LocalNewsFileProvider",
     "MarketDataProvider",
     "SecCompanyFactsEventProvider",
+    "SecCompanyFilingsEventProvider",
     "YahooFinanceProvider",
     "deduplicate_headlines",
 ]

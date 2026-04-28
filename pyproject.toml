@@ -32,10 +32,11 @@ sentiment = [
 
 [project.scripts]
 pairs-trading = "pairs_trading.apps.cli:main"
+quant-worker = "apps.worker.main:main"
 
 [tool.fastapi]
 entrypoint = "pairs_trading.backend.app:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["pairs_trading*"]
+include = ["pairs_trading*", "apps*"]

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Activity, AlertCircle, BarChart3, BookOpen, Database, FlaskConical, GraduationCap, Layers3, RadioTower, RefreshCw } from "lucide-react";
 
-import { getBacktestTemplates, getHealth, getPaperSummary, getStrategyCatalog } from "../../api/client";
-import type { BacktestTemplate, HealthResponse, PaperDashboardPayload, StrategyCatalogItem } from "../../api/types";
+import { getBacktestTemplates, getHealth, getPaperSummary, getStrategyCatalog, getSystemMetadata } from "../../api/client";
+import type { BacktestTemplate, HealthResponse, PaperDashboardPayload, StrategyCatalogItem, SystemMetadata } from "../../api/types";
+import { MetricTile } from "../../components/MetricTile";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Tabs, type TabItem } from "../../components/Tabs";
 import { BacktestLab } from "./BacktestLab";
@@ -30,6 +31,7 @@ const tabs: TabItem<DashboardView>[] = [
 export function PaperDashboard() {
   const [payload, setPayload] = useState<PaperDashboardPayload | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [systemMetadata, setSystemMetadata] = useState<SystemMetadata | null>(null);
   const [catalog, setCatalog] = useState<StrategyCatalogItem[]>([]);
   const [backtestTemplates, setBacktestTemplates] = useState<BacktestTemplate[]>([]);
   const [activeTab, setActiveTab] = useState<DashboardView>("overview");
@@ -41,16 +43,18 @@ export function PaperDashboard() {
     setIsLoading(true);
     setError(null);
     try {
-      const [healthResponse, paperResponse, catalogResponse, templateResponse] = await Promise.all([
+      const [healthResponse, paperResponse, catalogResponse, templateResponse, metadataResponse] = await Promise.all([
         getHealth(),
         getPaperSummary(),
         getStrategyCatalog(),
-        getBacktestTemplates()
+        getBacktestTemplates(),
+        getSystemMetadata()
       ]);
       setHealth(healthResponse);
       setPayload(paperResponse);
       setCatalog(catalogResponse);
       setBacktestTemplates(templateResponse);
+      setSystemMetadata(metadataResponse);
       setSelectedStrategyName((current) => current ?? paperResponse.strategies[0]?.name ?? null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to load backend data.");
@@ -112,13 +116,26 @@ export function PaperDashboard() {
           {activeTab === "backtests" ? <BacktestLab catalog={catalog} templates={backtestTemplates} /> : null}
 
           {activeTab === "diagnostics" ? (
-            <section className="panel">
-              <div className="panel__header">
-                <h2>Diagnostics</h2>
-                <span>{selectedStrategy?.name ?? "No strategy selected"}</span>
-              </div>
-              <pre className="json-panel">{JSON.stringify(selectedStrategy?.diagnostics ?? payload, null, 2)}</pre>
-            </section>
+            <div className="diagnostics-stack">
+              <section className="panel">
+                <div className="panel__header">
+                  <h2>System Metadata</h2>
+                  <span>{systemMetadata?.metadata_db_path ?? "metadata db unknown"}</span>
+                </div>
+                <div className="mini-grid">
+                  <MetricTile label="Jobs" value={String(systemMetadata?.counts.jobs ?? 0)} />
+                  <MetricTile label="Deployments" value={String(systemMetadata?.counts.deployment_configs ?? 0)} />
+                  <MetricTile label="Experiments" value={String(systemMetadata?.counts.experiment_runs ?? 0)} />
+                </div>
+              </section>
+              <section className="panel">
+                <div className="panel__header">
+                  <h2>Diagnostics</h2>
+                  <span>{selectedStrategy?.name ?? "No strategy selected"}</span>
+                </div>
+                <pre className="json-panel">{JSON.stringify({ system: systemMetadata, strategy: selectedStrategy?.diagnostics ?? payload }, null, 2)}</pre>
+              </section>
+            </div>
           ) : null}
 
           {activeTab === "catalog" ? <StrategyCatalog catalog={catalog} /> : null}
