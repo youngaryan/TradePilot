@@ -14,7 +14,8 @@ from .directional import (
     TimeSeriesMomentumStrategy,
     VolatilityTargetTrendStrategy,
 )
-from .events import EventDriftStrategy
+from .events import EventDriftStrategy, PEADSentimentStrategy
+from .graph_stat_arb import GraphClusterResidualStrategy, GraphClusterTradingConfig
 from .pairs import KalmanPairsStrategy
 from .stat_arb import SectorResidualMeanReversionStrategy
 
@@ -25,6 +26,9 @@ __all__ = [
     "DonchianBreakoutStrategy",
     "EMACrossStrategy",
     "EventDriftStrategy",
+    "PEADSentimentStrategy",
+    "GraphClusterResidualStrategy",
+    "GraphClusterTradingConfig",
     "KalmanPairsStrategy",
     "KeltnerChannelBreakoutStrategy",
     "MACDTrendStrategy",

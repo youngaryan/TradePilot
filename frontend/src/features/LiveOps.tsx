@@ -71,7 +71,7 @@ function businessDayCount(start: string, end: string) {
 }
 
 function catalogLaunchItems(catalog: StrategyCatalogItem[]) {
-  const launchable = catalog.filter((item) => item.family === "Directional" || ["etf_trend", "stat_arb", "edgar_event"].includes(item.id));
+  const launchable = catalog.filter((item) => item.family === "Directional" || ["etf_trend", "stat_arb", "graph_stat_arb", "edgar_event", "pead_sentiment"].includes(item.id));
   return launchable.length ? launchable : [];
 }
 

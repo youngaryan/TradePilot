@@ -38,11 +38,15 @@ from ..pipelines import (
     ETFTrendMomentumPipeline,
     EventDrivenConfig,
     EventDrivenPipeline,
+    GraphStatArbConfig,
+    GraphStatArbPipeline,
+    PEADSentimentConfig,
+    PEADSentimentPipeline,
     SectorStatArbPipeline,
     StatArbConfig,
 )
 from ..reporting.experiment import ExperimentVisualizer
-from ..research import PairScreenConfig
+from ..research import GraphClusterConfig, PairScreenConfig
 from ..features.sentiment import FinBERTSentimentModel, SentimentConfig, build_best_available_sentiment_model
 from ..strategies import (
     AdaptiveRegimeStrategy,
@@ -58,6 +62,7 @@ from ..strategies import (
     StochasticOscillatorStrategy,
     TimeSeriesMomentumStrategy,
     VolatilityTargetTrendStrategy,
+    GraphClusterTradingConfig,
 )
 
 
@@ -99,6 +104,8 @@ DEFAULT_EVENT_SYMBOLS = [
     "JPM",
     "XOM",
 ]
+
+ADVANCED_PIPELINES = ["graph_stat_arb", "pead_sentiment"]
 
 DIRECTIONAL_PIPELINES = [
     "buy_and_hold",
@@ -629,6 +636,47 @@ def _build_event_trial_grid(
     }
 
 
+def _build_pead_trial_grid(
+    *,
+    symbols: list[str],
+    events: pd.DataFrame,
+    daily_sentiment: pd.DataFrame | None,
+    experiment_name: str,
+) -> dict[str, PEADSentimentPipeline]:
+    base_kwargs = {
+        "events": events,
+        "daily_sentiment": daily_sentiment,
+        "portfolio_manager": PortfolioManager(
+            max_leverage=1.25,
+            risk_per_trade=0.05,
+            volatility_window=15,
+            max_strategy_weight=0.25,
+        ),
+    }
+    return {
+        f"{experiment_name}_trial_sentiment_fast": PEADSentimentPipeline(
+            config=PEADSentimentConfig.from_symbols(symbols, holding_period_bars=3, entry_threshold=0.15),
+            name=f"{experiment_name}_trial_sentiment_fast",
+            **base_kwargs,
+        ),
+        f"{experiment_name}_trial_sentiment_base": PEADSentimentPipeline(
+            config=PEADSentimentConfig.from_symbols(symbols, holding_period_bars=5, entry_threshold=0.20),
+            name=f"{experiment_name}_trial_sentiment_base",
+            **base_kwargs,
+        ),
+        f"{experiment_name}_trial_sentiment_strict": PEADSentimentPipeline(
+            config=PEADSentimentConfig.from_symbols(
+                symbols,
+                holding_period_bars=10,
+                entry_threshold=0.25,
+                require_sentiment=daily_sentiment is not None,
+            ),
+            name=f"{experiment_name}_trial_sentiment_strict",
+            **base_kwargs,
+        ),
+    }
+
+
 def run_stat_arb_pipeline(
     sector_map_path: str | None = None,
     start: str = "2018-01-01",
@@ -749,6 +797,102 @@ def run_stat_arb_pipeline(
         experiment_name=experiment_name,
         artifact_root=artifact_root,
         trial_strategies=trial_strategies,
+        validation_config=ValidationConfig(
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+            pbo_partitions=pbo_partitions,
+        ),
+    )
+
+
+def run_graph_stat_arb_pipeline(
+    sector_map_path: str | None = None,
+    start: str = "2018-01-01",
+    end: str = "2026-04-15",
+    interval: str = "1d",
+    experiment_name: str = "graph_stat_arb",
+    price_cache_dir: str = "data/cache",
+    artifact_root: str = "artifacts/experiments",
+    cluster_correlation_floor: float = 0.55,
+    cluster_min_size: int = 3,
+    cluster_max_size: int = 8,
+    cluster_min_history: int = 180,
+    residual_lookback: int = 60,
+    entry_z: float = 1.25,
+    top_n_per_side: int = 2,
+    transaction_cost_bps: float = 3.0,
+    purge_bars: int = 5,
+    embargo_bars: int = 0,
+    pbo_partitions: int = 8,
+) -> dict[str, Any]:
+    sector_map = load_sector_map(sector_map_path)
+    tickers = list(sector_map.keys())
+    price_provider = CachedParquetProvider(
+        upstream=YahooFinanceProvider(),
+        cache_dir=price_cache_dir,
+    )
+    prices = price_provider.get_close_prices(
+        symbols=tickers,
+        start=start,
+        end=end,
+        interval=interval,
+    )
+
+    pipeline = GraphStatArbPipeline(
+        sector_map=sector_map,
+        portfolio_manager=PortfolioManager(
+            max_leverage=1.5,
+            risk_per_trade=0.07,
+            volatility_window=20,
+            max_strategy_weight=0.35,
+        ),
+        config=GraphStatArbConfig(
+            cluster_config=GraphClusterConfig(
+                min_history=cluster_min_history,
+                correlation_floor=cluster_correlation_floor,
+                min_cluster_size=cluster_min_size,
+                max_cluster_size=cluster_max_size,
+            ),
+            trading_config=GraphClusterTradingConfig(
+                residual_lookback=residual_lookback,
+                entry_z=entry_z,
+                top_n_per_side=top_n_per_side,
+                transaction_cost_bps=transaction_cost_bps,
+            ),
+        ),
+        name=experiment_name,
+    )
+
+    walk_forward = WalkForwardConfig(
+        train_bars=504,
+        test_bars=63,
+        step_bars=63,
+        bars_per_year=252,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
+    )
+    cost_model = CostModel(
+        commission_bps=0.5,
+        spread_bps=1.0,
+        slippage_bps=0.75,
+        market_impact_bps=0.75,
+        borrow_bps_annual=40.0,
+        delay_bars=1,
+    )
+    broker = _build_broker(
+        max_gross_leverage=1.5,
+        max_net_leverage=0.75,
+        max_turnover=1.5,
+        cost_model=cost_model,
+    )
+    return _run_pipeline_with_validation(
+        pipeline=pipeline,
+        prices=prices,
+        config=walk_forward,
+        cost_model=cost_model,
+        broker=broker,
+        experiment_name=experiment_name,
+        artifact_root=artifact_root,
         validation_config=ValidationConfig(
             purge_bars=purge_bars,
             embargo_bars=embargo_bars,
@@ -1078,6 +1222,148 @@ def run_event_driven_pipeline(
     )
 
 
+def run_pead_sentiment_pipeline(
+    symbols: list[str] | None = None,
+    start: str = "2018-01-01",
+    end: str = "2026-04-15",
+    interval: str = "1d",
+    experiment_name: str = "pead_sentiment",
+    price_cache_dir: str = "data/cache",
+    event_cache_dir: str = "data/event_cache",
+    sentiment_cache_dir: str = "data/sentiment_cache",
+    artifact_root: str = "artifacts/experiments",
+    event_file: str | None = None,
+    edgar_user_agent: str | None = None,
+    use_sec_companyfacts: bool = False,
+    include_sec_filings: bool = False,
+    sec_filing_forms: list[str] | None = None,
+    news_provider_names: list[str] | None = None,
+    news_files: list[str] | None = None,
+    daily_sentiment_file: str | None = None,
+    use_finbert: bool = False,
+    local_finbert_only: bool = False,
+    news_api_key: str | None = None,
+    alphavantage_api_key: str | None = None,
+    benzinga_api_key: str | None = None,
+    news_topics: list[str] | None = None,
+    holding_period_bars: int = 5,
+    entry_threshold: float = 0.20,
+    event_weight: float = 0.45,
+    sentiment_weight: float = 0.55,
+    sentiment_window_days: int = 2,
+    require_sentiment: bool = False,
+    require_earnings_event: bool = True,
+    purge_bars: int = 5,
+    embargo_bars: int = 0,
+    pbo_partitions: int = 8,
+) -> dict[str, Any]:
+    symbols = list(dict.fromkeys(symbols or DEFAULT_EVENT_SYMBOLS))
+    price_provider = CachedParquetProvider(
+        upstream=YahooFinanceProvider(),
+        cache_dir=price_cache_dir,
+    )
+    prices = price_provider.get_close_prices(
+        symbols=symbols,
+        start=start,
+        end=end,
+        interval=interval,
+    )
+    events = load_events(
+        tickers=symbols,
+        start=start,
+        end=end,
+        event_file=event_file,
+        event_cache_dir=event_cache_dir,
+        edgar_user_agent=edgar_user_agent,
+        use_sec_companyfacts=use_sec_companyfacts,
+        include_sec_filings=include_sec_filings,
+        sec_filing_forms=sec_filing_forms,
+    )
+    if events is None:
+        raise ValueError("PEAD + Sentiment requires --event-file, --use-sec-companyfacts, or --include-sec-filings with --edgar-user-agent.")
+
+    daily_sentiment = load_daily_sentiment(
+        tickers=symbols,
+        start=start,
+        end=end,
+        news_provider_names=news_provider_names,
+        news_files=news_files,
+        daily_sentiment_file=daily_sentiment_file,
+        use_finbert=use_finbert,
+        local_finbert_only=local_finbert_only,
+        sentiment_cache_dir=sentiment_cache_dir,
+        news_api_key=news_api_key,
+        alphavantage_api_key=alphavantage_api_key,
+        benzinga_api_key=benzinga_api_key,
+        news_topics=news_topics,
+    )
+
+    pipeline = PEADSentimentPipeline(
+        events=events,
+        daily_sentiment=daily_sentiment,
+        portfolio_manager=PortfolioManager(
+            max_leverage=1.25,
+            risk_per_trade=0.05,
+            volatility_window=15,
+            max_strategy_weight=0.25,
+        ),
+        config=PEADSentimentConfig.from_symbols(
+            symbols,
+            holding_period_bars=holding_period_bars,
+            entry_threshold=entry_threshold,
+            event_weight=event_weight,
+            sentiment_weight=sentiment_weight,
+            sentiment_window_days=sentiment_window_days,
+            require_sentiment=require_sentiment,
+            require_earnings_event=require_earnings_event,
+        ),
+        name=experiment_name,
+    )
+    walk_forward = WalkForwardConfig(
+        train_bars=504,
+        test_bars=63,
+        step_bars=21,
+        bars_per_year=252,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
+    )
+    cost_model = CostModel(
+        commission_bps=0.5,
+        spread_bps=1.0,
+        slippage_bps=1.0,
+        market_impact_bps=0.75,
+        borrow_bps_annual=30.0,
+        delay_bars=1,
+    )
+    broker = _build_broker(
+        max_gross_leverage=1.25,
+        max_net_leverage=1.0,
+        max_turnover=1.5,
+        cost_model=cost_model,
+    )
+
+    return _run_pipeline_with_validation(
+        pipeline=pipeline,
+        prices=prices,
+        config=walk_forward,
+        cost_model=cost_model,
+        broker=broker,
+        experiment_name=experiment_name,
+        artifact_root=artifact_root,
+        trial_strategies=_build_pead_trial_grid(
+            symbols=symbols,
+            events=events,
+            daily_sentiment=daily_sentiment,
+            experiment_name=experiment_name,
+        ),
+        validation_config=ValidationConfig(
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+            pbo_partitions=pbo_partitions,
+        ),
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the quant walk-forward research pipeline.")
     parser.add_argument(
@@ -1087,7 +1373,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pipeline",
         default="stat_arb",
-        choices=["stat_arb", "etf_trend", "edgar_event", *DIRECTIONAL_PIPELINES],
+        choices=["stat_arb", "etf_trend", "edgar_event", *ADVANCED_PIPELINES, *DIRECTIONAL_PIPELINES],
         help="Research pipeline to run.",
     )
     parser.add_argument("--symbols", nargs="*", help="Symbols for directional, ETF, or event pipelines.")
@@ -1122,6 +1408,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-sec-filings", action="store_true", help="Add official SEC filing events such as 8-K earnings releases, 10-Qs, and 10-Ks.")
     parser.add_argument("--sec-filing-forms", nargs="*", help="SEC filing forms to include for official event timestamps, e.g. 8-K 10-Q 10-K.")
     parser.add_argument("--edgar-user-agent", help="User-Agent string for SEC requests, e.g. 'YourName [email@example.com]'.")
+    parser.add_argument("--pead-holding-period-bars", type=int, default=5, help="Post-event holding period for PEAD + sentiment.")
+    parser.add_argument("--pead-entry-threshold", type=float, default=0.20, help="Combined event/sentiment threshold for PEAD + sentiment.")
+    parser.add_argument("--pead-event-weight", type=float, default=0.45, help="Weight on event/fundamental proxy score in PEAD + sentiment.")
+    parser.add_argument("--pead-sentiment-weight", type=float, default=0.55, help="Weight on daily sentiment score in PEAD + sentiment.")
+    parser.add_argument("--pead-sentiment-window-days", type=int, default=2, help="Lookback window for sentiment around each PEAD event.")
+    parser.add_argument("--pead-require-sentiment", action="store_true", help="Require sentiment coverage before PEAD + sentiment can trade an event.")
+    parser.add_argument("--pead-allow-non-earnings-events", action="store_true", help="Allow PEAD + sentiment to trade non-earnings event types.")
+    parser.add_argument("--cluster-correlation-floor", type=float, default=0.55, help="Minimum return correlation used to connect graph stat-arb clusters.")
+    parser.add_argument("--cluster-min-size", type=int, default=3, help="Minimum graph stat-arb cluster size.")
+    parser.add_argument("--cluster-max-size", type=int, default=8, help="Maximum graph stat-arb cluster size.")
+    parser.add_argument("--cluster-min-history", type=int, default=180, help="Minimum train bars for graph stat-arb clustering.")
+    parser.add_argument("--graph-residual-lookback", type=int, default=60, help="Rolling residual z-score window for graph stat-arb.")
+    parser.add_argument("--graph-entry-z", type=float, default=1.25, help="Residual z-score entry threshold for graph stat-arb.")
+    parser.add_argument("--graph-top-n-per-side", type=int, default=2, help="Max leaders and laggards traded per graph cluster.")
     parser.add_argument("--artifact-root", default="artifacts/experiments", help="Experiment artifact directory.")
     parser.add_argument("--price-cache-dir", default="data/cache", help="Price parquet cache directory.")
     parser.add_argument("--sentiment-cache-dir", default="data/sentiment_cache", help="Sentiment cache directory.")
@@ -1213,6 +1513,27 @@ def main() -> None:
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,
         )
+    elif args.pipeline == "graph_stat_arb":
+        run_output = run_graph_stat_arb_pipeline(
+            sector_map_path=args.sector_map,
+            start=args.start,
+            end=args.end,
+            interval=args.interval,
+            experiment_name=experiment_name,
+            price_cache_dir=args.price_cache_dir,
+            artifact_root=args.artifact_root,
+            cluster_correlation_floor=args.cluster_correlation_floor,
+            cluster_min_size=args.cluster_min_size,
+            cluster_max_size=args.cluster_max_size,
+            cluster_min_history=args.cluster_min_history,
+            residual_lookback=args.graph_residual_lookback,
+            entry_z=args.graph_entry_z,
+            top_n_per_side=args.graph_top_n_per_side,
+            transaction_cost_bps=args.strategy_cost_bps,
+            purge_bars=args.validation_purge_bars,
+            embargo_bars=args.validation_embargo_bars,
+            pbo_partitions=args.validation_pbo_partitions,
+        )
     elif args.pipeline == "etf_trend":
         run_output = run_etf_trend_pipeline(
             symbols=args.symbols,
@@ -1222,6 +1543,42 @@ def main() -> None:
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             artifact_root=args.artifact_root,
+            purge_bars=args.validation_purge_bars,
+            embargo_bars=args.validation_embargo_bars,
+            pbo_partitions=args.validation_pbo_partitions,
+        )
+    elif args.pipeline == "pead_sentiment":
+        run_output = run_pead_sentiment_pipeline(
+            symbols=args.symbols,
+            start=args.start,
+            end=args.end,
+            interval=args.interval,
+            experiment_name=experiment_name,
+            price_cache_dir=args.price_cache_dir,
+            event_cache_dir=args.event_cache_dir,
+            sentiment_cache_dir=args.sentiment_cache_dir,
+            artifact_root=args.artifact_root,
+            event_file=args.event_file,
+            edgar_user_agent=args.edgar_user_agent,
+            use_sec_companyfacts=args.use_sec_companyfacts,
+            include_sec_filings=args.include_sec_filings,
+            sec_filing_forms=args.sec_filing_forms,
+            news_provider_names=args.news_provider,
+            news_files=args.news_file,
+            daily_sentiment_file=args.daily_sentiment_file,
+            use_finbert=args.use_finbert,
+            local_finbert_only=args.local_finbert_only,
+            news_api_key=args.news_api_key,
+            alphavantage_api_key=args.alphavantage_api_key,
+            benzinga_api_key=args.benzinga_api_key,
+            news_topics=args.news_topics,
+            holding_period_bars=args.pead_holding_period_bars,
+            entry_threshold=args.pead_entry_threshold,
+            event_weight=args.pead_event_weight,
+            sentiment_weight=args.pead_sentiment_weight,
+            sentiment_window_days=args.pead_sentiment_window_days,
+            require_sentiment=args.pead_require_sentiment,
+            require_earnings_event=not args.pead_allow_non_earnings_events,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,

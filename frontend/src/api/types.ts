@@ -172,6 +172,8 @@ export interface BacktestTemplate {
   symbols: string[];
   start: string;
   end: string;
+  sector_map_path?: string | null;
+  event_file?: string | null;
   parameters: Record<string, unknown>;
   description: string;
   objective?: string;

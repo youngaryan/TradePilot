@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from typing import Sequence
 
@@ -414,7 +415,12 @@ class SecCompanyFactsEventProvider(EventProvider):
             cik = ticker_map.get(ticker)
             if cik is None:
                 continue
-            payload = self._load_companyfacts(cik)
+            try:
+                payload = self._load_companyfacts(cik)
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+                continue
             company_events = self._build_company_events(ticker, payload)
             if not company_events.empty:
                 events.append(company_events)
@@ -653,7 +659,12 @@ class SecCompanyFilingsEventProvider(EventProvider):
             cik = ticker_map.get(ticker)
             if cik is None:
                 continue
-            payload = self._load_submission_payload(cik)
+            try:
+                payload = self._load_submission_payload(cik)
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+                continue
             filing_events = self._build_filing_events(ticker, cik, payload, start_ts, end_ts)
             if not filing_events.empty:
                 events.append(filing_events)

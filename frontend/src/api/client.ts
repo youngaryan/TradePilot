@@ -17,6 +17,31 @@ function apiPath(path: string) {
   return `${API_BASE_URL}${path}`;
 }
 
+async function responseErrorMessage(response: Response) {
+  const body = await response.text();
+  if (!body) return `Request failed with status ${response.status}`;
+
+  try {
+    const payload = JSON.parse(body) as { detail?: unknown; error?: unknown; message?: unknown };
+    const detail = payload.detail ?? payload.error ?? payload.message;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item === "object" && "msg" in item) return String((item as { msg: unknown }).msg);
+          return JSON.stringify(item);
+        })
+        .join(" ");
+    }
+    if (detail != null) return JSON.stringify(detail);
+  } catch {
+    return body;
+  }
+
+  return body;
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiPath(path), {
     headers: {
@@ -27,8 +52,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || `Request failed with status ${response.status}`);
+    throw new Error(await responseErrorMessage(response));
   }
 
   return response.json() as Promise<T>;

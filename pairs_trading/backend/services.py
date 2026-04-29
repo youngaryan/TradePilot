@@ -19,6 +19,8 @@ from ..apps.cli import (
     run_directional_pipeline,
     run_etf_trend_pipeline,
     run_event_driven_pipeline,
+    run_graph_stat_arb_pipeline,
+    run_pead_sentiment_pipeline,
     run_stat_arb_pipeline,
 )
 from ..operations.paper_trading import run_paper_batch
@@ -608,11 +610,11 @@ class BacktestService:
     def validate_request(self, request: BacktestRunRequest) -> None:
         if not request.pipeline:
             raise ValueError("Choose a pipeline before launching a backtest.")
-        if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event"}) and not request.symbols:
+        if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
-        if request.pipeline == "edgar_event" and not request.event_file and not request.use_sec_companyfacts and not request.include_sec_filings:
-            raise ValueError("EDGAR event backtests require an event file, SEC company facts, or official SEC filings.")
-        if request.pipeline == "stat_arb" and request.symbols and request.sector_map_path is None:
+        if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.use_sec_companyfacts and not request.include_sec_filings:
+            raise ValueError("Event backtests require an event file, SEC company facts, or official SEC filings.")
+        if request.pipeline in {"stat_arb", "graph_stat_arb"} and request.symbols and request.sector_map_path is None:
             # The stat-arb runner can use its default sector map, but user-supplied symbols would be ignored.
             raise ValueError("Stat-arb symbol lists require a sector map path so sectors are explicit.")
         if request.train_bars <= request.purge_bars + 5:
@@ -727,6 +729,31 @@ class BacktestService:
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
 
+        if pipeline == "graph_stat_arb":
+            report("running_graph_stat_arb", "Running graph-cluster residual stat-arb agent.", 0.22)
+            run_output = run_graph_stat_arb_pipeline(
+                sector_map_path=str(request.sector_map_path) if request.sector_map_path else None,
+                start=request.start,
+                end=request.end,
+                interval=request.interval,
+                experiment_name=experiment_name,
+                price_cache_dir=str(self.settings.price_cache_dir),
+                artifact_root=artifact_root,
+                cluster_correlation_floor=float(params.get("cluster_correlation_floor", 0.55)),
+                cluster_min_size=int(params.get("cluster_min_size", 3)),
+                cluster_max_size=int(params.get("cluster_max_size", 8)),
+                cluster_min_history=int(params.get("cluster_min_history", 180)),
+                residual_lookback=int(params.get("residual_lookback", 60)),
+                entry_z=float(params.get("entry_z", 1.25)),
+                top_n_per_side=int(params.get("top_n_per_side", 2)),
+                transaction_cost_bps=float(params.get("transaction_cost_bps", 3.0)),
+                purge_bars=request.purge_bars,
+                embargo_bars=request.embargo_bars,
+                pbo_partitions=request.pbo_partitions,
+            )
+            report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
+            return _result_payload(run_output)
+
         if pipeline == "edgar_event":
             report("running_events", "Running event-driven EDGAR agent.", 0.22)
             run_output = run_event_driven_pipeline(
@@ -743,6 +770,43 @@ class BacktestService:
                 use_sec_companyfacts=request.use_sec_companyfacts,
                 include_sec_filings=request.include_sec_filings,
                 sec_filing_forms=request.sec_filing_forms,
+                purge_bars=request.purge_bars,
+                embargo_bars=request.embargo_bars,
+                pbo_partitions=request.pbo_partitions,
+            )
+            report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
+            return _result_payload(run_output)
+
+        if pipeline == "pead_sentiment":
+            report("running_pead_sentiment", "Running PEAD + sentiment event agent.", 0.22)
+            run_output = run_pead_sentiment_pipeline(
+                symbols=request.symbols,
+                start=request.start,
+                end=request.end,
+                interval=request.interval,
+                experiment_name=experiment_name,
+                price_cache_dir=str(self.settings.price_cache_dir),
+                event_cache_dir=str(self.settings.event_cache_dir),
+                sentiment_cache_dir=str(self.settings.sentiment_cache_dir),
+                artifact_root=artifact_root,
+                event_file=str(request.event_file) if request.event_file else None,
+                edgar_user_agent=request.edgar_user_agent,
+                use_sec_companyfacts=request.use_sec_companyfacts,
+                include_sec_filings=request.include_sec_filings,
+                sec_filing_forms=request.sec_filing_forms,
+                daily_sentiment_file=str(params["daily_sentiment_file"]) if params.get("daily_sentiment_file") else None,
+                news_provider_names=params.get("news_provider_names"),
+                news_files=params.get("news_files"),
+                use_finbert=bool(params.get("use_finbert", False)),
+                local_finbert_only=bool(params.get("local_finbert_only", False)),
+                news_topics=params.get("news_topics"),
+                holding_period_bars=int(params.get("holding_period_bars", 5)),
+                entry_threshold=float(params.get("entry_threshold", 0.20)),
+                event_weight=float(params.get("event_weight", 0.45)),
+                sentiment_weight=float(params.get("sentiment_weight", 0.55)),
+                sentiment_window_days=int(params.get("sentiment_window_days", 2)),
+                require_sentiment=bool(params.get("require_sentiment", False)),
+                require_earnings_event=bool(params.get("require_earnings_event", True)),
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
@@ -806,6 +870,47 @@ class BacktestService:
                 "objective": "Evaluate whether regime switching adds value after validation penalties.",
                 "risk_level": "High",
                 "validation_focus": "Overfitting risk, PBO, and stability across market regimes.",
+            },
+            {
+                "id": "graph_stat_arb_agent",
+                "name": "Graph Stat-Arb Agent",
+                "pipeline": "graph_stat_arb",
+                "symbols": [],
+                "start": "2018-01-01",
+                "end": "2026-04-15",
+                "sector_map_path": "examples/sector_map.sample.json",
+                "parameters": {
+                    "cluster_correlation_floor": 0.55,
+                    "cluster_min_size": 3,
+                    "residual_lookback": 60,
+                    "entry_z": 1.25,
+                    "top_n_per_side": 2,
+                },
+                "description": "Cluster residual stat-arb using graph communities instead of one pair at a time.",
+                "objective": "Test whether MST-style clusters reduce idiosyncratic pair risk.",
+                "risk_level": "High",
+                "validation_focus": "Cluster stability, turnover, leverage, and drawdown in correlation breaks.",
+            },
+            {
+                "id": "pead_sentiment_agent",
+                "name": "PEAD + Sentiment Agent",
+                "pipeline": "pead_sentiment",
+                "symbols": ["AAPL", "MSFT", "NVDA"],
+                "start": "2018-01-01",
+                "end": "2026-04-15",
+                "event_file": "examples/events.sample.csv",
+                "parameters": {
+                    "holding_period_bars": 5,
+                    "entry_threshold": 0.20,
+                    "event_weight": 0.45,
+                    "sentiment_weight": 0.55,
+                    "daily_sentiment_file": "examples/daily_sentiment.sample.csv",
+                    "require_earnings_event": True,
+                },
+                "description": "Post-earnings drift sleeve combining event/fundamental proxies with sentiment.",
+                "objective": "Test whether official events plus positive/negative sentiment create post-event continuation.",
+                "risk_level": "High",
+                "validation_focus": "Look-ahead safety, event timestamp quality, sentiment coverage, and overfit thresholds.",
             },
         ]
 

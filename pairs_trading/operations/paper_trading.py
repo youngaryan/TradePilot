@@ -19,12 +19,17 @@ from ..pipelines import (
     ETFTrendMomentumPipeline,
     EventDrivenConfig,
     EventDrivenPipeline,
+    GraphStatArbConfig,
+    GraphStatArbPipeline,
+    PEADSentimentConfig,
+    PEADSentimentPipeline,
     SectorStatArbPipeline,
     StatArbConfig,
 )
 from ..reporting.paper import PaperDashboardVisualizer
-from ..research import PairScreenConfig
+from ..research import GraphClusterConfig, PairScreenConfig
 from ..features.sentiment import SentimentConfig
+from ..strategies import GraphClusterTradingConfig
 
 
 DIRECTIONAL_PAPER_PIPELINES = {
@@ -331,9 +336,9 @@ class PaperTradingService:
             return int(spec.lookback_bars)
         if spec.pipeline == "etf_trend":
             return 800
-        if spec.pipeline == "stat_arb":
+        if spec.pipeline in {"stat_arb", "graph_stat_arb"}:
             return 620
-        if spec.pipeline == "edgar_event":
+        if spec.pipeline in {"edgar_event", "pead_sentiment"}:
             return 520
         if spec.pipeline == "ma_cross":
             return max(160, int(spec.params.get("slow_window", 80)) + 40)
@@ -556,6 +561,84 @@ class PaperTradingService:
             metadata={"pipeline": spec.pipeline, "event_count": int(len(events))},
         )
 
+    def _build_pead_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
+        cli_module = self._cli_helpers()
+        symbols = list(spec.symbols)
+        if not symbols:
+            raise ValueError(f"{spec.name} requires 'symbols' in the paper deployment config.")
+
+        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+        history_start = self._history_start(asof, self._default_lookback(spec))
+        history_end = self._history_end(asof)
+        events = cli_module.load_events(
+            tickers=symbols,
+            start=history_start,
+            end=history_end,
+            event_file=spec.event_file,
+            event_cache_dir=self.event_cache_dir,
+            edgar_user_agent=spec.edgar_user_agent,
+            use_sec_companyfacts=spec.use_sec_companyfacts,
+            include_sec_filings=spec.include_sec_filings,
+            sec_filing_forms=list(spec.sec_filing_forms),
+        )
+        if events is None:
+            raise ValueError(f"{spec.name} requires 'event_file', SEC company facts, or official SEC filings for PEAD paper deployment.")
+
+        daily_sentiment = cli_module.load_daily_sentiment(
+            tickers=symbols,
+            start=history_start,
+            end=history_end,
+            news_provider_names=list(spec.news_provider_names) or None,
+            news_files=list(spec.news_files) or None,
+            daily_sentiment_file=spec.daily_sentiment_file,
+            use_finbert=spec.use_finbert,
+            local_finbert_only=spec.local_finbert_only,
+            sentiment_cache_dir=self.sentiment_cache_dir,
+            news_api_key=None,
+            alphavantage_api_key=None,
+            benzinga_api_key=None,
+            news_topics=list(spec.news_topics) or None,
+        )
+
+        pipeline = PEADSentimentPipeline(
+            events=events,
+            daily_sentiment=daily_sentiment,
+            portfolio_manager=PortfolioManager(
+                max_leverage=float(spec.params.get("max_leverage", 1.25)),
+                risk_per_trade=float(spec.params.get("risk_per_trade", 0.05)),
+                volatility_window=int(spec.params.get("volatility_window", 15)),
+                max_strategy_weight=float(spec.params.get("max_strategy_weight", 0.25)),
+            ),
+            config=PEADSentimentConfig.from_symbols(
+                symbols,
+                holding_period_bars=int(spec.params.get("holding_period_bars", 5)),
+                entry_threshold=float(spec.params.get("entry_threshold", 0.20)),
+                event_weight=float(spec.params.get("event_weight", 0.45)),
+                sentiment_weight=float(spec.params.get("sentiment_weight", 0.55)),
+                sentiment_window_days=int(spec.params.get("sentiment_window_days", 2)),
+                require_sentiment=bool(spec.params.get("require_sentiment", False)),
+                require_earnings_event=bool(spec.params.get("require_earnings_event", True)),
+                transaction_cost_bps=float(spec.params.get("transaction_cost_bps", 2.5)),
+            ),
+            name=spec.name,
+        )
+        output = pipeline.run_fold(train_data=prices.iloc[:-1], test_data=prices.iloc[-1:])
+        target_weights = self._extract_asset_weights(output)
+        instrument_prices = {symbol: float(prices.iloc[-1][symbol]) for symbol in prices.columns if pd.notna(prices.iloc[-1][symbol])}
+        return PaperSignalSnapshot(
+            strategy_name=spec.name,
+            timestamp=pd.Timestamp(prices.index[-1]).tz_localize(None),
+            mode="asset",
+            target_weights=target_weights,
+            instrument_prices=instrument_prices,
+            diagnostics=output.diagnostics,
+            metadata={
+                "pipeline": spec.pipeline,
+                "event_count": int(len(events)),
+                "sentiment_enabled": daily_sentiment is not None and not daily_sentiment.empty,
+            },
+        )
+
     def _build_stat_arb_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
         cli_module = self._cli_helpers()
         sector_map = cli_module.load_sector_map(spec.sector_map_path)
@@ -638,13 +721,74 @@ class PaperTradingService:
             metadata={"pipeline": spec.pipeline, "synthetic_component_count": int(len(component_outputs))},
         )
 
+    def _build_graph_stat_arb_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
+        cli_module = self._cli_helpers()
+        sector_map = cli_module.load_sector_map(spec.sector_map_path)
+        tickers = list(sector_map.keys())
+        prices = self._price_history(tickers, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+
+        pipeline = GraphStatArbPipeline(
+            sector_map=sector_map,
+            portfolio_manager=PortfolioManager(
+                max_leverage=float(spec.params.get("max_leverage", 1.5)),
+                risk_per_trade=float(spec.params.get("risk_per_trade", 0.07)),
+                volatility_window=int(spec.params.get("volatility_window", 20)),
+                max_strategy_weight=float(spec.params.get("max_strategy_weight", 0.35)),
+            ),
+            config=GraphStatArbConfig(
+                cluster_config=GraphClusterConfig(
+                    min_history=int(spec.params.get("cluster_min_history", 180)),
+                    correlation_floor=float(spec.params.get("cluster_correlation_floor", 0.55)),
+                    min_cluster_size=int(spec.params.get("cluster_min_size", 3)),
+                    max_cluster_size=int(spec.params.get("cluster_max_size", 8)),
+                ),
+                trading_config=GraphClusterTradingConfig(
+                    residual_lookback=int(spec.params.get("residual_lookback", 60)),
+                    entry_z=float(spec.params.get("entry_z", 1.25)),
+                    top_n_per_side=int(spec.params.get("top_n_per_side", 2)),
+                    transaction_cost_bps=float(spec.params.get("transaction_cost_bps", 3.0)),
+                ),
+                max_clusters=int(spec.params.get("max_clusters", 8)),
+            ),
+            name=spec.name,
+        )
+
+        train_data = prices.iloc[:-1]
+        test_data = prices.iloc[-1:]
+        portfolio_output = pipeline.run_fold(train_data=train_data, test_data=test_data)
+        component_outputs, _ = pipeline.build_component_outputs(train_data=train_data, test_data=test_data)
+        latest_portfolio = portfolio_output.frame.iloc[-1] if not portfolio_output.frame.empty else pd.Series(dtype=float)
+        target_weights = {
+            component_name: float(pd.to_numeric(latest_portfolio.get(f"weight_{component_name}", 0.0), errors="coerce"))
+            for component_name in component_outputs
+            if abs(float(pd.to_numeric(latest_portfolio.get(f"weight_{component_name}", 0.0), errors="coerce"))) > 1e-10
+        }
+        synthetic_returns = {
+            component_name: float(pd.to_numeric(output.frame["unit_return"].iloc[-1], errors="coerce"))
+            for component_name, output in component_outputs.items()
+            if not output.frame.empty
+        }
+        return PaperSignalSnapshot(
+            strategy_name=spec.name,
+            timestamp=pd.Timestamp(test_data.index[-1]).tz_localize(None),
+            mode="synthetic",
+            target_weights=target_weights,
+            instrument_prices=synthetic_returns,
+            diagnostics=portfolio_output.diagnostics,
+            metadata={"pipeline": spec.pipeline, "synthetic_component_count": int(len(component_outputs))},
+        )
+
     def build_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
         if spec.pipeline == "etf_trend":
             return self._build_etf_snapshot(spec, asof=asof)
         if spec.pipeline == "stat_arb":
             return self._build_stat_arb_snapshot(spec, asof=asof)
+        if spec.pipeline == "graph_stat_arb":
+            return self._build_graph_stat_arb_snapshot(spec, asof=asof)
         if spec.pipeline == "edgar_event":
             return self._build_event_snapshot(spec, asof=asof)
+        if spec.pipeline == "pead_sentiment":
+            return self._build_pead_snapshot(spec, asof=asof)
         if spec.pipeline in DIRECTIONAL_PAPER_PIPELINES:
             return self._build_directional_snapshot(spec, asof=asof)
         raise ValueError(f"Unsupported paper pipeline: {spec.pipeline}")

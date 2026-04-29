@@ -36,18 +36,50 @@ const defaultRequest: BacktestRunRequest = {
   }
 };
 
+const SECTOR_MAP_PIPELINES = new Set(["stat_arb", "graph_stat_arb"]);
+const EVENT_PIPELINES = new Set(["edgar_event", "pead_sentiment"]);
+
+type PipelineExample = {
+  symbols?: unknown;
+  params?: unknown;
+  sector_map_path?: unknown;
+  event_file?: unknown;
+  name?: unknown;
+};
+
+function asStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function asParameterObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 function metricValue(summary: Record<string, unknown>, key: string, formatter: (value: unknown) => string) {
   return formatter(summary[key]);
 }
 
 function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
+  const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(template.pipeline);
+  const isEventPipeline = EVENT_PIPELINES.has(template.pipeline);
   return {
     ...defaultRequest,
     pipeline: template.pipeline,
-    symbols: template.symbols,
+    symbols: isSectorMapPipeline ? [] : template.symbols,
     start: template.start,
     end: template.end,
     experiment_name: template.id,
+    sector_map_path: isSectorMapPipeline ? template.sector_map_path ?? "examples/sector_map.sample.json" : null,
+    event_file: isEventPipeline ? template.event_file ?? "examples/events.sample.csv" : null,
+    use_sec_companyfacts: false,
+    include_sec_filings: false,
+    edgar_user_agent: null,
     parameters: template.parameters
   };
 }
@@ -72,11 +104,66 @@ export function BacktestLab({
     () => catalog.find((item) => item.pipeline === request.pipeline || item.id === request.pipeline),
     [catalog, request.pipeline]
   );
+  const usesSectorMap = SECTOR_MAP_PIPELINES.has(request.pipeline);
+  const usesEventInputs = EVENT_PIPELINES.has(request.pipeline);
+  const usesSentimentInputs = request.pipeline === "pead_sentiment";
+  const parsedParameters = useMemo(() => {
+    try {
+      return parseJsonObject(parametersText, "Backtest parameters");
+    } catch {
+      return request.parameters;
+    }
+  }, [parametersText, request.parameters]);
 
   function applyTemplate(template: BacktestTemplate) {
     const next = templateToRequest(template);
     setRequest(next);
     setParametersText(JSON.stringify(next.parameters, null, 2));
+    setError(null);
+  }
+
+  function applyPipeline(pipeline: string) {
+    const item = catalog.find((strategy) => strategy.pipeline === pipeline || strategy.id === pipeline);
+    const example = (item?.paper_config_example ?? {}) as PipelineExample;
+    const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(pipeline);
+    const isEventPipeline = EVENT_PIPELINES.has(pipeline);
+    const params = asParameterObject(example.params) ?? {};
+    const next: BacktestRunRequest = {
+      ...request,
+      pipeline,
+      symbols: isSectorMapPipeline ? [] : asStringArray(example.symbols) ?? request.symbols,
+      sector_map_path: isSectorMapPipeline ? asOptionalString(example.sector_map_path) ?? request.sector_map_path ?? "examples/sector_map.sample.json" : null,
+      event_file: isEventPipeline ? asOptionalString(example.event_file) ?? request.event_file ?? "examples/events.sample.csv" : null,
+      use_sec_companyfacts: false,
+      include_sec_filings: false,
+      edgar_user_agent: isEventPipeline ? request.edgar_user_agent : null,
+      experiment_name: asOptionalString(example.name) ?? `${pipeline}_ui`,
+      parameters: params
+    };
+    setRequest(next);
+    setParametersText(JSON.stringify(params, null, 2));
+    setError(null);
+  }
+
+  function updateParameter(key: string, value: unknown) {
+    const nextParameters = {
+      ...parsedParameters,
+      [key]: value
+    };
+    if (value === "" || value === null) {
+      delete nextParameters[key];
+    }
+    setRequest({ ...request, parameters: nextParameters });
+    setParametersText(JSON.stringify(nextParameters, null, 2));
+  }
+
+  function stringParameter(key: string) {
+    const value = parsedParameters[key];
+    return value === undefined || value === null ? "" : String(value);
+  }
+
+  function booleanParameter(key: string) {
+    return Boolean(parsedParameters[key]);
   }
 
   async function refreshJobs() {
@@ -85,6 +172,21 @@ export function BacktestLab({
 
   async function launch() {
     setError(null);
+    let parameters: Record<string, unknown>;
+    try {
+      parameters = parseJsonObject(parametersText, "Backtest parameters");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Backtest parameters: invalid JSON");
+      return;
+    }
+    if (usesSectorMap && !request.sector_map_path) {
+      setError("Graph/stat-arb pipelines use a sector-map universe. Set Sector map to examples/sector_map.sample.json or choose the Graph Stat-Arb template.");
+      return;
+    }
+    if (usesEventInputs && !request.event_file && !request.include_sec_filings && !request.use_sec_companyfacts) {
+      setError("Event pipelines need an event file or an official SEC source. For the PEAD demo use examples/events.sample.csv.");
+      return;
+    }
     if ((request.include_sec_filings || request.use_sec_companyfacts) && !String(request.edgar_user_agent ?? "").includes("@")) {
       setError("Official SEC event backtests need an SEC user agent with a contact email.");
       return;
@@ -93,7 +195,8 @@ export function BacktestLab({
     try {
       const job = await startBacktest({
         ...request,
-        parameters: parseJsonObject(parametersText, "Backtest parameters")
+        symbols: usesSectorMap ? [] : request.symbols,
+        parameters
       });
       setActiveJob(job);
       await refreshJobs();
@@ -148,7 +251,7 @@ export function BacktestLab({
           <div className="form-grid">
             <label>
               Pipeline
-              <select value={request.pipeline} onChange={(event) => setRequest({ ...request, pipeline: event.target.value })}>
+              <select value={request.pipeline} onChange={(event) => applyPipeline(event.target.value)}>
                 {catalog.map((item) => (
                   <option key={item.id} value={item.pipeline}>
                     {item.name}
@@ -158,7 +261,13 @@ export function BacktestLab({
             </label>
             <label>
               Symbols
-              <input value={request.symbols.join(" ")} onChange={(event) => setRequest({ ...request, symbols: splitSymbols(event.target.value) })} />
+              <input
+                value={usesSectorMap ? "" : request.symbols.join(" ")}
+                disabled={usesSectorMap}
+                onChange={(event) => setRequest({ ...request, symbols: splitSymbols(event.target.value) })}
+                placeholder={usesSectorMap ? "Loaded from the sector map" : "SPY QQQ TLT GLD"}
+              />
+              {usesSectorMap ? <small>This pipeline trades every ticker in the sector map, not the Symbols box.</small> : null}
             </label>
             <label>
               Start
@@ -168,16 +277,23 @@ export function BacktestLab({
               End
               <input value={request.end} onChange={(event) => setRequest({ ...request, end: event.target.value })} />
             </label>
-            <label>
-              Sector map
-              <input value={request.sector_map_path ?? ""} onChange={(event) => setRequest({ ...request, sector_map_path: event.target.value || null })} placeholder="examples/sector_map.sample.json" />
-            </label>
-            <label>
-              Event file
-              <input value={request.event_file ?? ""} onChange={(event) => setRequest({ ...request, event_file: event.target.value || null })} placeholder="examples/events.sample.csv" />
-            </label>
+            {usesSectorMap ? (
+              <label>
+                Sector map
+                <input value={request.sector_map_path ?? ""} onChange={(event) => setRequest({ ...request, sector_map_path: event.target.value || null })} placeholder="examples/sector_map.sample.json" />
+                <small>Required so graph/stat-arb sectors are explicit and auditable.</small>
+              </label>
+            ) : null}
+            {usesEventInputs ? (
+              <label>
+                Event file
+                <input value={request.event_file ?? ""} onChange={(event) => setRequest({ ...request, event_file: event.target.value || null })} placeholder="examples/events.sample.csv" />
+                <small>Use the sample file for local PEAD testing, or enable official SEC sources below.</small>
+              </label>
+            ) : null}
           </div>
 
+          {usesEventInputs ? (
           <div className="sentiment-panel official-events-panel">
             <label className="checkbox-line">
               <input
@@ -227,6 +343,45 @@ export function BacktestLab({
               </div>
             ) : null}
           </div>
+          ) : null}
+
+          {usesSentimentInputs ? (
+            <div className="sentiment-panel official-events-panel">
+              <strong>PEAD sentiment overlay</strong>
+              <p>
+                PEAD v1 can run from event scores alone. Add daily sentiment when you have a CSV/parquet with
+                date, ticker, sentiment_score, sentiment_abs, confidence, article_count, and probability columns.
+              </p>
+              <div className="form-grid">
+                <label>
+                  Daily sentiment file
+                  <input
+                    value={stringParameter("daily_sentiment_file")}
+                    onChange={(event) => updateParameter("daily_sentiment_file", event.target.value || null)}
+                    placeholder="examples/daily_sentiment.sample.csv"
+                  />
+                  <small>Optional. Leave blank to test event-score-only PEAD.</small>
+                </label>
+                <label>
+                  Sentiment window days
+                  <input
+                    type="number"
+                    value={stringParameter("sentiment_window_days") || "2"}
+                    onChange={(event) => updateParameter("sentiment_window_days", Number(event.target.value))}
+                  />
+                  <small>How many prior calendar days of sentiment are blended into each event.</small>
+                </label>
+              </div>
+              <label className="checkbox-line">
+                <input
+                  type="checkbox"
+                  checked={booleanParameter("require_sentiment")}
+                  onChange={(event) => updateParameter("require_sentiment", event.target.checked)}
+                />
+                Require sentiment coverage before PEAD can trade
+              </label>
+            </div>
+          ) : null}
 
           <div className="form-grid form-grid--tight">
             <label>

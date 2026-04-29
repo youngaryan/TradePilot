@@ -16,7 +16,9 @@ class StrategyCatalogTests(unittest.TestCase):
 
         self.assertIn("etf_trend", ids)
         self.assertIn("stat_arb", ids)
+        self.assertIn("graph_stat_arb", ids)
         self.assertIn("edgar_event", ids)
+        self.assertIn("pead_sentiment", ids)
 
         for item in catalog:
             self.assertTrue(item["summary"])

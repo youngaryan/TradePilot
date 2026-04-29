@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import pandas as pd
@@ -70,6 +71,54 @@ class EventProviderTests(unittest.TestCase):
         self.assertEqual(events.iloc[0]["ticker"], "AAA")
         self.assertGreater(float(events.iloc[0]["event_score"]), 0.0)
 
+    def test_sec_companyfacts_provider_skips_ticker_level_http_errors(self) -> None:
+        provider = SecCompanyFactsEventProvider(
+            user_agent="PairsTradingTest [test@example.com]",
+            cache_dir=fresh_test_dir("artifacts/test_events/sec_http"),
+        )
+        payload = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {
+                        "units": {
+                            "USD": [
+                                {"form": "10-Q", "filed": "2023-05-01", "fy": 2023, "fp": "Q1", "val": 100.0},
+                                {"form": "10-Q", "filed": "2024-05-01", "fy": 2024, "fp": "Q1", "val": 125.0},
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+
+        def load_companyfacts(cik: str) -> dict:
+            if cik == "0000000002":
+                raise HTTPError(url="https://data.sec.gov/example", code=404, msg="Not Found", hdrs=None, fp=None)
+            return payload
+
+        with patch.object(provider, "_load_ticker_map", return_value={"AAA": "0000000001", "ETF": "0000000002"}), patch.object(
+            provider,
+            "_load_companyfacts",
+            side_effect=load_companyfacts,
+        ):
+            events = provider.get_events(["AAA", "ETF"], "2024-01-01", "2024-12-31")
+
+        self.assertEqual(events["ticker"].tolist(), ["AAA"])
+
+    def test_sec_companyfacts_provider_raises_non_404_http_errors(self) -> None:
+        provider = SecCompanyFactsEventProvider(
+            user_agent="PairsTradingTest [test@example.com]",
+            cache_dir=fresh_test_dir("artifacts/test_events/sec_http_rate_limit"),
+        )
+
+        with patch.object(provider, "_load_ticker_map", return_value={"AAA": "0000000001"}), patch.object(
+            provider,
+            "_load_companyfacts",
+            side_effect=HTTPError(url="https://data.sec.gov/example", code=429, msg="Too Many Requests", hdrs=None, fp=None),
+        ):
+            with self.assertRaises(HTTPError):
+                provider.get_events(["AAA"], "2024-01-01", "2024-12-31")
+
     def test_sec_company_filings_provider_builds_official_earnings_events(self) -> None:
         provider = SecCompanyFilingsEventProvider(
             user_agent="PairsTradingTest [test@example.com]",
@@ -100,6 +149,39 @@ class EventProviderTests(unittest.TestCase):
         self.assertIn("earnings_release_8k", set(events["event_type"]))
         self.assertIn("quarterly_earnings_report", set(events["event_type"]))
         self.assertGreater(float(events["confidence"].max()), 0.0)
+
+    def test_sec_filings_provider_skips_ticker_level_http_errors(self) -> None:
+        provider = SecCompanyFilingsEventProvider(
+            user_agent="PairsTradingTest [test@example.com]",
+            cache_dir=fresh_test_dir("artifacts/test_events/sec_filing_http"),
+        )
+        payload = {
+            "filings": {
+                "recent": {
+                    "accessionNumber": ["0000000001-24-000001"],
+                    "filingDate": ["2024-05-03"],
+                    "reportDate": ["2024-03-31"],
+                    "form": ["8-K"],
+                    "primaryDocument": ["aaa-8k.htm"],
+                    "primaryDocDescription": ["Results of Operations and Financial Condition"],
+                    "items": ["2.02"],
+                }
+            }
+        }
+
+        def load_submission(cik: str) -> dict:
+            if cik == "0000000002":
+                raise HTTPError(url="https://data.sec.gov/example", code=404, msg="Not Found", hdrs=None, fp=None)
+            return payload
+
+        with patch.object(provider, "_load_ticker_map", return_value={"AAA": "0000000001", "ETF": "0000000002"}), patch.object(
+            provider,
+            "_load_submission_payload",
+            side_effect=load_submission,
+        ):
+            events = provider.get_events(["AAA", "ETF"], "2024-01-01", "2024-12-31")
+
+        self.assertEqual(events["ticker"].tolist(), ["AAA"])
 
 
 class EventPipelineTests(unittest.TestCase):
