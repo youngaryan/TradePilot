@@ -374,7 +374,8 @@ export function SentimentLab() {
             RSS is a live headline feed. For symbols like GLD, use a recent window; old dates such as 2024 will usually
             return nothing unless you have already accumulated or loaded local historical news. Reddit subreddit URLs
             such as https://www.reddit.com/r/Gold/ are converted to .rss automatically; use one symbol when mapping a
-            topic feed to an ETF like GLD.
+            topic feed to an ETF like GLD. FX pairs such as EURUSD are queried through Yahoo's EURUSD=X alias and then
+            stored back under EURUSD.
           </div>
           <div className="button-row">
             <button type="button" className="ghost-button" onClick={() => setRequest({ ...request, ...liveRssDateRange(14) })}>

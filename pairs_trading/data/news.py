@@ -18,6 +18,84 @@ import pandas as pd
 from ..features.sentiment import BaseSentimentModel, NewsSentimentAggregator
 
 
+FX_CURRENCY_CODES = {
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNH",
+    "CNY",
+    "EUR",
+    "GBP",
+    "HKD",
+    "JPY",
+    "MXN",
+    "NOK",
+    "NZD",
+    "SEK",
+    "SGD",
+    "USD",
+    "ZAR",
+}
+
+CURRENCY_NAMES = {
+    "AUD": "Australian dollar",
+    "CAD": "Canadian dollar",
+    "CHF": "Swiss franc",
+    "CNH": "offshore yuan",
+    "CNY": "yuan",
+    "EUR": "euro",
+    "GBP": "pound",
+    "HKD": "Hong Kong dollar",
+    "JPY": "yen",
+    "MXN": "Mexican peso",
+    "NOK": "Norwegian krone",
+    "NZD": "New Zealand dollar",
+    "SEK": "Swedish krona",
+    "SGD": "Singapore dollar",
+    "USD": "dollar",
+    "ZAR": "rand",
+}
+
+
+def _compact_fx_pair(value: str) -> str | None:
+    compact = str(value).upper().strip().removesuffix("=X").replace("/", "").replace("-", "").replace("_", "")
+    if len(compact) == 6 and compact[:3] in FX_CURRENCY_CODES and compact[3:] in FX_CURRENCY_CODES:
+        return compact
+    return None
+
+
+def _newsapi_query_for_ticker(ticker: str) -> str:
+    fx_pair = _compact_fx_pair(ticker)
+    if fx_pair:
+        base, quote = fx_pair[:3], fx_pair[3:]
+        named_pair = f'"{CURRENCY_NAMES.get(base, base)} {CURRENCY_NAMES.get(quote, quote)}"'
+        return f'"{fx_pair}" OR "{base}/{quote}" OR "{base} {quote}" OR "{fx_pair}=X" OR {named_pair}'
+    return f'"{ticker}" OR ${ticker}'
+
+
+def _rss_query_ticker(ticker: str) -> str:
+    fx_pair = _compact_fx_pair(ticker)
+    if fx_pair:
+        return f"{fx_pair}=X"
+    return ticker
+
+
+def _alphavantage_query_tickers(tickers: Sequence[str]) -> tuple[list[str], dict[str, str]]:
+    query_tickers: list[str] = []
+    alias_to_requested: dict[str, str] = {}
+    for ticker in tickers:
+        requested = str(ticker).upper()
+        fx_pair = _compact_fx_pair(requested)
+        if fx_pair:
+            for alias in (fx_pair, f"FOREX:{fx_pair[:3]}", f"FOREX:{fx_pair[3:]}"):
+                query_tickers.append(alias)
+                alias_to_requested[alias] = fx_pair
+            continue
+        query_tickers.append(requested)
+        alias_to_requested[requested] = requested
+    return list(dict.fromkeys(query_tickers)), alias_to_requested
+
+
 @dataclass(frozen=True)
 class NewsRequest:
     tickers: tuple[str, ...]
@@ -377,7 +455,7 @@ class RSSHeadlineProvider(RemoteHeadlineProvider):
         urls: list[tuple[str, str | None]] = []
         for feed_url in self.feed_urls:
             if "{ticker}" in feed_url:
-                urls.extend((feed_url.format(ticker=ticker), ticker) for ticker in request.tickers)
+                urls.extend((feed_url.format(ticker=_rss_query_ticker(ticker)), ticker) for ticker in request.tickers)
             else:
                 urls.append((feed_url, None))
         return urls
@@ -466,7 +544,7 @@ class NewsAPIHeadlineProvider(RemoteHeadlineProvider):
         for ticker in request.tickers:
             for page in range(1, self.max_pages + 1):
                 params = {
-                    "q": f'"{ticker}" OR ${ticker}',
+                    "q": _newsapi_query_for_ticker(ticker),
                     "from": request.start,
                     "to": request.end,
                     "language": self.language,
@@ -548,9 +626,10 @@ class AlphaVantageNewsProvider(RemoteHeadlineProvider):
         end: str | pd.Timestamp,
     ) -> pd.DataFrame:
         request = NewsRequest.from_inputs(tickers=tickers, start=start, end=end)
+        query_tickers, alias_to_requested = _alphavantage_query_tickers(request.tickers)
         params = {
             "function": "NEWS_SENTIMENT",
-            "tickers": ",".join(request.tickers),
+            "tickers": ",".join(query_tickers),
             "topics": ",".join(self.topics),
             "time_from": pd.Timestamp(request.start).strftime("%Y%m%dT0000"),
             "time_to": pd.Timestamp(request.end).strftime("%Y%m%dT2359"),
@@ -570,7 +649,7 @@ class AlphaVantageNewsProvider(RemoteHeadlineProvider):
 
         feed = payload.get("feed", [])
         rows: list[dict[str, object]] = []
-        requested = set(request.tickers)
+        requested = set(alias_to_requested)
         for item in feed:
             timestamp = pd.to_datetime(item.get("time_published"), format="%Y%m%dT%H%M%S", errors="coerce")
             title = str(item.get("title", "")).strip()
@@ -583,10 +662,11 @@ class AlphaVantageNewsProvider(RemoteHeadlineProvider):
                 ticker = str(ticker_info.get("ticker", "")).upper()
                 if ticker not in requested:
                     continue
+                requested_ticker = alias_to_requested[ticker]
                 rows.append(
                     {
                         "timestamp": timestamp,
-                        "ticker": ticker,
+                        "ticker": requested_ticker,
                         "headline": text,
                         "title": title,
                         "summary": summary,
@@ -600,7 +680,7 @@ class AlphaVantageNewsProvider(RemoteHeadlineProvider):
                 matched = True
 
             if not matched and len(requested) == 1:
-                ticker = next(iter(requested))
+                ticker = next(iter(request.tickers))
                 rows.append(
                     {
                         "timestamp": timestamp,

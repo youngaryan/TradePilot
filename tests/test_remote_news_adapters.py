@@ -108,6 +108,24 @@ class StubRedditRSSProvider(RSSHeadlineProvider):
         </feed>"""
 
 
+class StubForexRSSProvider(RSSHeadlineProvider):
+    def __init__(self) -> None:
+        super().__init__(feed_urls=["https://feeds.example.com/{ticker}.xml"], skip_errors=False)
+        self.urls: list[str] = []
+
+    def _fetch_text(self, url: str, headers=None) -> str:
+        self.urls.append(url)
+        return """<?xml version="1.0"?>
+        <rss><channel>
+          <item>
+            <title>Dollar falls as euro gains before central bank decision</title>
+            <description>EUR/USD moved higher during the London session.</description>
+            <link>https://example.com/eurusd</link>
+            <pubDate>Fri, 17 Apr 2026 08:14:48 GMT</pubDate>
+          </item>
+        </channel></rss>"""
+
+
 class StubNewsAPIProvider(NewsAPIHeadlineProvider):
     def __init__(self) -> None:
         super().__init__(api_key="demo", page_size=50, max_pages=1)
@@ -127,6 +145,34 @@ class StubNewsAPIProvider(NewsAPIHeadlineProvider):
                     "author": "Reporter",
                 }
             ],
+        }
+
+
+class StubAlphaVantageFXProvider(AlphaVantageNewsProvider):
+    def __init__(self) -> None:
+        super().__init__(api_key="demo", topics=["forex"], sort="LATEST", limit=50)
+        self.captured_params: dict[str, str] | None = None
+
+    def _fetch_json(self, url: str, params: dict[str, str], headers=None):
+        self.captured_params = params
+        return {
+            "feed": [
+                {
+                    "title": "Euro rises against dollar",
+                    "summary": "The currency pair strengthened after weaker US data.",
+                    "time_published": "20260417T081448",
+                    "source": "Example FX",
+                    "url": "https://example.com/fx",
+                    "overall_sentiment_score": 0.18,
+                    "overall_sentiment_label": "Somewhat-Bullish",
+                    "ticker_sentiment": [
+                        {
+                            "ticker": "FOREX:EUR",
+                            "relevance_score": "0.77",
+                        }
+                    ],
+                }
+            ]
         }
 
 
@@ -185,6 +231,15 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(headlines.loc[0, "source"], "reddit:r/Gold")
         self.assertIn("Gold miners rally", headlines.loc[0, "headline"])
 
+    def test_rss_adapter_maps_fx_pair_to_yahoo_alias_but_stores_requested_symbol(self) -> None:
+        provider = StubForexRSSProvider()
+        headlines = provider.get_headlines(["EURUSD"], "2026-04-15", "2026-04-29")
+
+        self.assertEqual(provider.urls, ["https://feeds.example.com/EURUSD=X.xml"])
+        self.assertEqual(len(headlines), 1)
+        self.assertEqual(headlines.loc[0, "ticker"], "EURUSD")
+        self.assertIn("EUR/USD", headlines.loc[0, "headline"])
+
     def test_newsapi_adapter_builds_everything_request(self) -> None:
         provider = StubNewsAPIProvider()
         headlines = provider.get_headlines(["TSLA"], "2024-01-01", "2024-01-03")
@@ -198,6 +253,17 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(len(headlines), 1)
         self.assertEqual(headlines.loc[0, "ticker"], "TSLA")
         self.assertEqual(headlines.loc[0, "source"], "Example News")
+
+    def test_alpha_vantage_adapter_maps_forex_aliases_back_to_requested_pair(self) -> None:
+        provider = StubAlphaVantageFXProvider()
+        headlines = provider.get_headlines(["EURUSD"], "2026-04-15", "2026-04-29")
+
+        self.assertIsNotNone(provider.captured_params)
+        assert provider.captured_params is not None
+        self.assertEqual(provider.captured_params["tickers"], "EURUSD,FOREX:EUR,FOREX:USD")
+        self.assertEqual(len(headlines), 1)
+        self.assertEqual(headlines.loc[0, "ticker"], "EURUSD")
+        self.assertAlmostEqual(float(headlines.loc[0, "relevance"]), 0.77, places=6)
 
     def test_composite_provider_keeps_successful_sources_when_one_fails(self) -> None:
         provider = CompositeHeadlineProvider([FailingHeadlineProvider(), StubRSSProvider()])

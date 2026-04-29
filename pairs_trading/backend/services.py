@@ -1124,11 +1124,16 @@ class SentimentService:
     ) -> list[str]:
         selected = {provider.lower() for provider in request.providers}
         warnings: list[str] = list(dict.fromkeys(provider_errors or []))
-        if result.stored_headlines == 0:
+        if result.fetched_headlines == 0:
+            warnings.append(
+                "No new headlines were fetched for the selected symbols and dates. "
+                "If the tables still show data, it is from the existing sentiment cache rather than this run."
+            )
             if "rss" in selected:
                 warnings.append(
                     "No RSS headlines matched this date range. RSS feeds are live feeds, not historical archives; "
-                    "use a recent window such as the last 7-30 days for Yahoo Finance RSS."
+                    "use a recent window such as the last 7-30 days for Yahoo Finance RSS. "
+                    "For FX pairs such as EURUSD, the backend queries Yahoo aliases such as EURUSD=X."
                 )
             if "local" in selected:
                 warnings.append("No local news-file rows matched the selected symbols and dates.")

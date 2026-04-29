@@ -312,6 +312,62 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["headline_count"], 0)
         self.assertTrue(any("RSS feeds are live feeds" in warning for warning in payload["warnings"]))
 
+    def test_sentiment_routes_warn_when_latest_run_fetches_no_rows_from_nonempty_cache(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_sentiment_empty_latest_run")
+        output_dir = workspace / "sentiment_shadow"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "timestamp": ["2026-04-24T09:00:00"],
+                "ticker": ["AAPL"],
+                "headline": ["Apple raises guidance"],
+                "source": ["unit_news"],
+                "url": ["https://example.com/aapl"],
+                "relevance": [1.0],
+            }
+        ).to_parquet(output_dir / "raw_headlines.parquet", index=False)
+
+        app = create_app(
+            BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                sentiment_cache_dir=workspace / "sentiment_cache",
+            )
+        )
+        client = TestClient(app)
+
+        with (
+            patch("pairs_trading.backend.services.RSSHeadlineProvider", EmptyBackendHeadlineProvider),
+            patch("pairs_trading.backend.services.build_best_available_sentiment_model", return_value=FixedBackendSentimentModel()),
+        ):
+            response = client.post(
+                "/api/sentiment/accumulate",
+                json={
+                    "symbols": ["EURUSD"],
+                    "start": "2026-04-15",
+                    "end": "2026-04-29",
+                    "providers": ["rss"],
+                    "rss_feed_urls": [],
+                    "news_files": [],
+                    "output_dir": str(output_dir),
+                    "use_finbert": False,
+                    "local_finbert_only": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["metadata"]["fetched_headlines"], 0)
+        self.assertEqual(payload["summary"]["headline_count"], 1)
+        self.assertTrue(any("No new headlines were fetched" in warning for warning in payload["warnings"]))
+
     def test_sentiment_routes_continue_when_optional_api_provider_fails(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings
