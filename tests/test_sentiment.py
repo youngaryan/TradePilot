@@ -73,6 +73,18 @@ class SentimentModelTests(unittest.TestCase):
 
 
 class SentimentAggregationTests(unittest.TestCase):
+    def test_news_sentiment_aggregator_handles_empty_headlines(self) -> None:
+        aggregator = NewsSentimentAggregator(model=FixedSentimentModel(rows=[]))
+        headlines = pd.DataFrame(columns=["timestamp", "ticker", "headline", "relevance"])
+
+        scored = aggregator.score_headlines(headlines)
+        daily = aggregator.aggregate_daily_sentiment(scored)
+
+        self.assertTrue(scored.empty)
+        self.assertIn("confidence", scored.columns)
+        self.assertTrue(daily.empty)
+        self.assertIn("sentiment_score", daily.columns)
+
     def test_news_sentiment_aggregator_builds_weighted_daily_scores(self) -> None:
         model = FixedSentimentModel(
             rows=[

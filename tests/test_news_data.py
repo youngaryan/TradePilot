@@ -12,6 +12,7 @@ from pairs_trading.data.news import (
     HeadlineProvider,
     LocalNewsFileProvider,
 )
+from pairs_trading.data.sentiment_accumulator import ShadowSentimentAccumulator
 from pairs_trading.features.sentiment import BaseSentimentModel
 from tests.common import fresh_test_dir
 
@@ -148,6 +149,37 @@ class NewsProviderTests(unittest.TestCase):
         self.assertEqual(int(headlines.loc[0, "duplicate_count"]), 2)
         self.assertIn("source_one", headlines.loc[0, "source_list"])
         self.assertIn("source_two", headlines.loc[0, "source_list"])
+
+    def test_shadow_accumulator_persists_raw_scored_and_daily_sentiment(self) -> None:
+        data_dir = fresh_test_dir("artifacts/test_news/accumulator")
+        provider = StubHeadlineProvider(
+            pd.DataFrame(
+                {
+                    "timestamp": ["2024-01-01 09:00:00", "2024-01-01 09:05:00"],
+                    "ticker": ["AAA", "AAA"],
+                    "headline": ["AAA beats estimates", "AAA beats estimates"],
+                    "source": ["source_one", "source_two"],
+                    "url": ["https://example.com/a", "https://example.com/a"],
+                    "relevance": [1.0, 0.8],
+                }
+            )
+        )
+        accumulator = ShadowSentimentAccumulator(
+            headline_provider=provider,
+            sentiment_model=FixedSentimentModel(),
+            output_dir=data_dir,
+        )
+
+        result = accumulator.run(["AAA"], "2024-01-01", "2024-01-02")
+
+        self.assertEqual(result.fetched_headlines, 2)
+        self.assertEqual(result.stored_headlines, 1)
+        self.assertTrue(Path(result.raw_headlines_path).exists())
+        self.assertTrue(Path(result.scored_headlines_path).exists())
+        self.assertTrue(Path(result.daily_sentiment_path).exists())
+        daily = pd.read_parquet(result.daily_sentiment_path)
+        self.assertEqual(daily["ticker"].tolist(), ["AAA"])
+        self.assertEqual(int(daily.loc[0, "article_count"]), 1)
 
 
 if __name__ == "__main__":

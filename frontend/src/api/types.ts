@@ -119,6 +119,8 @@ export interface PaperAgentConfig {
   daily_sentiment_file?: string | null;
   news_provider_names?: string[];
   news_files?: string[];
+  rss_feed_urls?: string[];
+  newsapi_api_key?: string | null;
   use_finbert?: boolean;
   local_finbert_only?: boolean;
   news_topics?: string[];
@@ -245,4 +247,88 @@ export interface BacktestJob {
   finished_at_utc?: string | null;
   result?: BacktestJobResult | null;
   error?: string | null;
+}
+
+export interface SentimentAccumulationRequest {
+  symbols: string[];
+  start: string;
+  end: string;
+  providers: string[];
+  rss_feed_urls: string[];
+  news_files: string[];
+  newsapi_api_key?: string | null;
+  alphavantage_api_key?: string | null;
+  benzinga_api_key?: string | null;
+  output_dir?: string | null;
+  use_finbert: boolean;
+  local_finbert_only: boolean;
+}
+
+export interface SentimentDailyPoint {
+  date: string;
+  ticker: string;
+  sentiment_score: number;
+  sentiment_abs: number;
+  confidence: number;
+  article_count: number;
+  positive_prob: number;
+  negative_prob: number;
+  neutral_prob: number;
+  [key: string]: unknown;
+}
+
+export interface SentimentTickerSummary {
+  ticker: string;
+  article_count: number;
+  avg_sentiment: number;
+  avg_confidence: number;
+  latest_sentiment: number;
+}
+
+export interface SentimentSourceSummary {
+  source: string;
+  headline_count: number;
+}
+
+export interface SentimentHeadline {
+  timestamp?: string;
+  ticker?: string;
+  headline?: string;
+  title?: string;
+  summary?: string;
+  source?: string;
+  url?: string;
+  relevance?: number;
+  score?: number;
+  confidence?: number;
+  label?: string;
+  [key: string]: unknown;
+}
+
+export interface SentimentDatasetPayload {
+  output_dir: string;
+  raw_headlines_path: string;
+  scored_headlines_path: string;
+  daily_sentiment_path: string;
+  metadata_path: string;
+  metadata: Record<string, unknown>;
+  warnings: string[];
+  summary: {
+    headline_count: number;
+    scored_headline_count: number;
+    returned_headline_count?: number;
+    returned_scored_headline_count?: number;
+    table_row_limit?: number;
+    table_rows_per_last_run_ticker?: number;
+    headline_rows_truncated?: boolean;
+    scored_headline_rows_truncated?: boolean;
+    daily_rows: number;
+    ticker_count: number;
+    source_count: number;
+  };
+  daily_points: SentimentDailyPoint[];
+  ticker_summary: SentimentTickerSummary[];
+  source_summary: SentimentSourceSummary[];
+  headlines: SentimentHeadline[];
+  scored_headlines: SentimentHeadline[];
 }

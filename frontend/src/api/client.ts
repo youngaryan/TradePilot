@@ -6,6 +6,8 @@ import type {
   PaperDashboardPayload,
   PaperRunRequest,
   PaperRunJob,
+  SentimentAccumulationRequest,
+  SentimentDatasetPayload,
   PaperStrategy,
   StrategyCatalogItem,
   SystemMetadata
@@ -117,4 +119,16 @@ export function listBacktestJobs() {
 
 export function getBacktestJob(jobId: string) {
   return requestJson<BacktestJob>(`/api/backtests/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function getSentimentDataset(outputDir?: string | null) {
+  const suffix = outputDir ? `?output_dir=${encodeURIComponent(outputDir)}` : "";
+  return requestJson<SentimentDatasetPayload>(`/api/sentiment/dataset${suffix}`);
+}
+
+export function accumulateSentiment(request: SentimentAccumulationRequest) {
+  return requestJson<SentimentDatasetPayload>("/api/sentiment/accumulate", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
 }

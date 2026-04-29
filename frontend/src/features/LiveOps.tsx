@@ -20,9 +20,22 @@ const defaultExecution: PaperExecutionConfig = {
   weight_tolerance: 0.0025
 };
 
+const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local"];
+const DEFAULT_NEWS_FILES = ["examples/news_headlines.sample.csv"];
+
+function withDefaultSentiment<T extends Partial<PaperAgentConfig>>(agent: T): T {
+  return {
+    ...agent,
+    news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : DEFAULT_SENTIMENT_PROVIDERS,
+    news_files: agent.news_files?.length ? agent.news_files : DEFAULT_NEWS_FILES,
+    use_finbert: agent.use_finbert ?? false,
+    local_finbert_only: agent.local_finbert_only ?? true
+  };
+}
+
 function starterAgents(): PaperAgentConfig[] {
   return [
-    {
+    withDefaultSentiment({
       id: defaultAgentId(),
       name: "etf_trend_core",
       pipeline: "etf_trend",
@@ -30,8 +43,8 @@ function starterAgents(): PaperAgentConfig[] {
       interval: "1d",
       lookback_bars: 800,
       params: { top_n: 3, trend_window: 200, rebalance_bars: 21 }
-    },
-    {
+    }),
+    withDefaultSentiment({
       id: defaultAgentId(),
       name: "vol_target_trend_shadow",
       pipeline: "volatility_target_trend",
@@ -39,8 +52,8 @@ function starterAgents(): PaperAgentConfig[] {
       interval: "1d",
       lookback_bars: 360,
       params: { trend_window: 120, volatility_window: 20, target_volatility: 0.15, max_strategy_weight: 0.25 }
-    },
-    {
+    }),
+    withDefaultSentiment({
       id: defaultAgentId(),
       name: "residual_stat_arb_shadow",
       pipeline: "stat_arb",
@@ -48,10 +61,8 @@ function starterAgents(): PaperAgentConfig[] {
       interval: "1d",
       lookback_bars: 620,
       sector_map_path: "examples/sector_map.sample.json",
-      news_provider_names: [],
-      use_finbert: false,
       params: { include_residual_book: true, include_classic_pairs: true, top_n_pairs: 3, residual_lookback: 60 }
-    }
+    })
   ];
 }
 
@@ -94,6 +105,16 @@ function AgentEditor({
 }) {
   const sentimentEnabled = agentHasSentiment(agent);
 
+  function toggleProvider(provider: string, enabled: boolean) {
+    const current = agent.news_provider_names ?? [];
+    onChange({
+      ...agent,
+      news_provider_names: enabled
+        ? Array.from(new Set([...current, provider]))
+        : current.filter((item) => item !== provider)
+    });
+  }
+
   function applyStrategy(pipeline: string) {
     const item = catalog.find((candidate) => candidate.pipeline === pipeline || candidate.id === pipeline);
     const example = item?.paper_config_example as {
@@ -109,7 +130,7 @@ function AgentEditor({
     } | undefined;
     const nextParams = example?.params ?? agent.params;
     onChange({
-      ...agent,
+      ...withDefaultSentiment(agent),
       pipeline,
       symbols: Array.isArray(example?.symbols) ? example.symbols : agent.symbols,
       sector_map_path: example?.sector_map_path ?? agent.sector_map_path,
@@ -133,6 +154,8 @@ function AgentEditor({
         daily_sentiment_file: null,
         news_provider_names: [],
         news_files: [],
+        rss_feed_urls: [],
+        newsapi_api_key: null,
         news_topics: []
       });
       return;
@@ -140,7 +163,8 @@ function AgentEditor({
     onChange({
       ...agent,
       use_finbert: true,
-      news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : ["local"],
+      news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : DEFAULT_SENTIMENT_PROVIDERS,
+      news_files: agent.news_files?.length ? agent.news_files : DEFAULT_NEWS_FILES,
       news_topics: agent.news_topics?.length ? agent.news_topics : ["earnings"]
     });
   }
@@ -257,7 +281,7 @@ function AgentEditor({
           <input type="checkbox" checked={sentimentEnabled} onChange={(event) => toggleSentiment(event.target.checked)} />
           Add news/sentiment overlay
         </label>
-        <p>Currently the backend consumes this overlay most directly in stat-arb, where it adjusts pair ranking and position conviction.</p>
+        <p>Enabled by default. Unselect sources you do not want. Stat-arb uses this for ranking/conviction, and PEAD blends it with event scores.</p>
         {sentimentEnabled ? (
           <div className="form-grid">
             <label>
@@ -266,11 +290,31 @@ function AgentEditor({
             </label>
             <label>
               News providers
-              <input value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="local alphavantage benzinga" />
+              <input value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="rss local newsapi alphavantage benzinga" />
+            </label>
+            <div className="provider-check-grid provider-check-grid--compact">
+              {["rss", "local", "newsapi", "alphavantage", "benzinga"].map((provider) => (
+                <label key={provider} className="checkbox-line">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(agent.news_provider_names?.includes(provider))}
+                    onChange={(event) => toggleProvider(provider, event.target.checked)}
+                  />
+                  {provider}
+                </label>
+              ))}
+            </div>
+            <label>
+              RSS feeds
+              <input value={(agent.rss_feed_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, rss_feed_urls: splitList(event.target.value) })} placeholder="optional; default Yahoo template is used for rss" />
             </label>
             <label>
               News files
               <input value={(agent.news_files ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_files: splitList(event.target.value) })} placeholder="data/news/headlines.csv" />
+            </label>
+            <label>
+              NewsAPI key
+              <input value={agent.newsapi_api_key ?? ""} onChange={(event) => onChange({ ...agent, newsapi_api_key: event.target.value || null })} placeholder="optional; or set NEWSAPI_API_KEY in the backend environment" />
             </label>
             <label>
               News topics
@@ -358,7 +402,7 @@ export function LiveOps({
       edgar_user_agent?: string;
       lookback_bars?: number;
     } | undefined;
-    const agent: PaperAgentConfig = {
+    const agent: PaperAgentConfig = withDefaultSentiment({
       id: defaultAgentId(),
       name: `${item?.id ?? "agent"}_${agents.length + 1}`,
       pipeline: item?.pipeline ?? "etf_trend",
@@ -372,7 +416,7 @@ export function LiveOps({
       sec_filing_forms: example?.sec_filing_forms,
       edgar_user_agent: example?.edgar_user_agent,
       params: example?.params ?? {}
-    };
+    });
     setAgents((current) => [...current, agent]);
     setParamsDrafts((current) => ({ ...current, [agent.id]: JSON.stringify(agent.params, null, 2) }));
   }
@@ -406,6 +450,8 @@ export function LiveOps({
           daily_sentiment_file: agent.daily_sentiment_file || undefined,
           news_provider_names: agent.news_provider_names ?? [],
           news_files: agent.news_files ?? [],
+          rss_feed_urls: agent.rss_feed_urls ?? [],
+          newsapi_api_key: agent.newsapi_api_key || undefined,
           use_finbert: Boolean(agent.use_finbert),
           local_finbert_only: Boolean(agent.local_finbert_only),
           news_topics: agent.news_topics ?? [],

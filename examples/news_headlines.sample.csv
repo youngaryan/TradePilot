@@ -1,0 +1,5 @@
+timestamp,ticker,headline,title,summary,source,url,relevance
+2024-01-30 09:00:00,AAPL,Apple beats estimates and raises guidance,Apple beats estimates,Guidance was raised after resilient services demand.,sample_news,https://example.com/aapl,1.0
+2024-01-31 09:00:00,MSFT,Microsoft reports strong cloud demand,Microsoft reports strong cloud demand,Margin expansion and AI demand supported the quarter.,sample_news,https://example.com/msft,1.0
+2024-02-06 09:00:00,NVDA,Nvidia sees strong chip demand,Nvidia sees strong chip demand,Analysts highlight record revenue and resilient data-center orders.,sample_news,https://example.com/nvda,1.0
+2024-02-13 09:00:00,GOOGL,Alphabet faces margin pressure,Alphabet faces margin pressure,Costs rose and management sounded cautious on ad demand.,sample_news,https://example.com/googl,1.0

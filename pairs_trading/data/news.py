@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
+import html
 from hashlib import sha256
 import json
 from pathlib import Path
 import re
-from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from typing import Sequence
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 
@@ -216,6 +219,13 @@ class RemoteHeadlineProvider(HeadlineProvider):
     def __init__(self, timeout_seconds: float = 30.0) -> None:
         self.timeout_seconds = timeout_seconds
 
+    def _fetch_text(self, url: str, headers: dict[str, str] | None = None) -> str:
+        request = Request(url, headers=headers or {})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            raw = response.read()
+            encoding = response.headers.get_content_charset() or "utf-8"
+        return raw.decode(encoding, errors="replace")
+
     def _fetch_json(self, url: str, params: dict[str, str], headers: dict[str, str] | None = None) -> dict | list:
         query = urlencode({key: value for key, value in params.items() if value not in (None, "")})
         full_url = f"{url}?{query}" if query else url
@@ -223,6 +233,286 @@ class RemoteHeadlineProvider(HeadlineProvider):
         with urlopen(request, timeout=self.timeout_seconds) as response:
             payload = response.read().decode("utf-8")
         return json.loads(payload)
+
+
+def _provider_label(provider: HeadlineProvider) -> str:
+    label = provider.__class__.__name__
+    return label.removesuffix("Provider").removesuffix("Headline")
+
+
+def _safe_provider_error(provider: HeadlineProvider, exc: Exception) -> str:
+    label = _provider_label(provider)
+    if isinstance(exc, HTTPError):
+        return f"{label} failed with HTTP {exc.code} {exc.reason}."
+    if isinstance(exc, URLError):
+        return f"{label} network error: {exc.reason}."
+    return f"{label} failed: {exc}"
+
+
+def _strip_markup(value: object) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _namespaced_text(element: ET.Element, names: Sequence[str]) -> str:
+    for name in names:
+        try:
+            child = element.find(name)
+        except SyntaxError:
+            child = None
+        if child is not None and child.text:
+            return _strip_markup(child.text)
+    local_names = {
+        name.rsplit("}", 1)[-1].split(":", 1)[-1].lower()
+        for name in names
+    }
+    for child in element:
+        local_name = child.tag.rsplit("}", 1)[-1].lower()
+        if local_name in local_names and child.text:
+            return _strip_markup(child.text)
+    return ""
+
+
+def _namespaced_link(element: ET.Element) -> str:
+    link = _namespaced_text(element, ("link",))
+    if link:
+        return link
+    for child in element:
+        if child.tag.rsplit("}", 1)[-1].lower() != "link":
+            continue
+        href = child.attrib.get("href")
+        if href:
+            return str(href)
+    return ""
+
+
+class RSSHeadlineProvider(RemoteHeadlineProvider):
+    """
+    Free RSS headline provider.
+
+    Feed URLs can either be normal feed URLs or ticker templates containing
+    ``{ticker}``. The default template uses Yahoo Finance's ticker headline RSS
+    endpoint, which keeps symbol assignment explicit and avoids broad scraping.
+    """
+
+    DEFAULT_FEED_TEMPLATE = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+
+    def __init__(
+        self,
+        feed_urls: Sequence[str] | None = None,
+        user_agent: str = "QuantResearchApp/0.1 (+research; contact@example.com)",
+        max_items_per_feed: int = 200,
+        timeout_seconds: float = 20.0,
+        skip_errors: bool = True,
+        assign_single_ticker_when_unmatched: bool = True,
+    ) -> None:
+        super().__init__(timeout_seconds=timeout_seconds)
+        self.feed_urls = tuple(self._normalize_feed_url(url) for url in (feed_urls or (self.DEFAULT_FEED_TEMPLATE,)))
+        self.user_agent = user_agent
+        self.max_items_per_feed = max(1, int(max_items_per_feed))
+        self.skip_errors = skip_errors
+        self.assign_single_ticker_when_unmatched = assign_single_ticker_when_unmatched
+
+    @staticmethod
+    def _source_name(url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().removeprefix("www.")
+        if host in {"reddit.com", "old.reddit.com"}:
+            match = re.match(r"^/r/([^/]+)", parsed.path, flags=re.IGNORECASE)
+            if match:
+                return f"reddit:r/{match.group(1)}"
+        return host or "rss"
+
+    @staticmethod
+    def _normalize_feed_url(url: str) -> str:
+        stripped = str(url).strip()
+        parsed = urlparse(stripped)
+        host = parsed.netloc.lower().removeprefix("www.")
+        if host in {"reddit.com", "old.reddit.com"} and not parsed.path.endswith(".rss"):
+            path = parsed.path.rstrip("/")
+            if re.match(r"^/r/[^/]+$", path, flags=re.IGNORECASE):
+                path = f"{path}/.rss"
+                return parsed._replace(path=path).geturl()
+        return stripped
+
+    @staticmethod
+    def _parse_feed(xml_text: str, source_url: str) -> list[dict[str, object]]:
+        root = ET.fromstring(xml_text)
+        items = list(root.findall(".//item"))
+        if not items:
+            items = [
+                child
+                for child in root.findall(".//*")
+                if child.tag.rsplit("}", 1)[-1].lower() == "entry"
+            ]
+
+        rows: list[dict[str, object]] = []
+        for item in items:
+            title = _namespaced_text(item, ("title",))
+            summary = _namespaced_text(item, ("description", "summary", "content", "{http://purl.org/rss/1.0/modules/content/}encoded"))
+            link = _namespaced_link(item)
+            published = _namespaced_text(item, ("pubDate", "published", "updated", "dc:date"))
+            timestamp = pd.to_datetime(published, utc=True, errors="coerce")
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "title": title,
+                    "summary": summary,
+                    "headline": " ".join(part for part in (title, summary) if part).strip(),
+                    "source": RSSHeadlineProvider._source_name(source_url),
+                    "url": link,
+                    "relevance": 1.0,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _infer_tickers(text: str, requested: set[str]) -> list[str]:
+        tokens = {token.upper() for token in re.findall(r"\$?[A-Z]{1,5}(?:\.[A-Z])?", text)}
+        tokens |= {token[1:] for token in tokens if token.startswith("$")}
+        return sorted(ticker for ticker in requested if ticker in tokens)
+
+    def _urls_for_request(self, request: NewsRequest) -> list[tuple[str, str | None]]:
+        urls: list[tuple[str, str | None]] = []
+        for feed_url in self.feed_urls:
+            if "{ticker}" in feed_url:
+                urls.extend((feed_url.format(ticker=ticker), ticker) for ticker in request.tickers)
+            else:
+                urls.append((feed_url, None))
+        return urls
+
+    def get_headlines(
+        self,
+        tickers: Sequence[str],
+        start: str | pd.Timestamp,
+        end: str | pd.Timestamp,
+    ) -> pd.DataFrame:
+        request = NewsRequest.from_inputs(tickers=tickers, start=start, end=end)
+        requested = set(request.tickers)
+        rows: list[dict[str, object]] = []
+
+        for feed_url, explicit_ticker in self._urls_for_request(request):
+            try:
+                xml_text = self._fetch_text(feed_url, headers={"User-Agent": self.user_agent})
+                feed_rows = self._parse_feed(xml_text, source_url=feed_url)[: self.max_items_per_feed]
+            except Exception:
+                if self.skip_errors:
+                    continue
+                raise
+
+            for row in feed_rows:
+                text = " ".join(str(row.get(column, "")) for column in ("title", "summary", "headline"))
+                matched_tickers = [explicit_ticker] if explicit_ticker else self._infer_tickers(text, requested)
+                if not matched_tickers and len(requested) == 1 and explicit_ticker:
+                    matched_tickers = [explicit_ticker]
+                if not matched_tickers and len(requested) == 1 and self.assign_single_ticker_when_unmatched:
+                    matched_tickers = [next(iter(requested))]
+                for ticker in matched_tickers:
+                    record = dict(row)
+                    record["ticker"] = str(ticker).upper()
+                    rows.append(record)
+
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            return pd.DataFrame(columns=["timestamp", "ticker", "headline", "title", "summary", "relevance", "source", "url"])
+
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce").dt.tz_convert(None)
+        frame = frame.dropna(subset=["timestamp"])
+        frame["ticker"] = frame["ticker"].astype(str).str.upper()
+        start_ts = pd.Timestamp(request.start)
+        end_ts = pd.Timestamp(request.end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        frame = frame[(frame["timestamp"] >= start_ts) & (frame["timestamp"] <= end_ts)]
+        return frame.sort_values(["timestamp", "ticker"]).reset_index(drop=True)
+
+
+class NewsAPIHeadlineProvider(RemoteHeadlineProvider):
+    """
+    NewsAPI.org /v2/everything adapter.
+
+    This provider is useful as a limited free-tier supplement to RSS. It queries
+    per ticker to keep symbol attribution explicit.
+    """
+
+    BASE_URL = "https://newsapi.org/v2/everything"
+
+    def __init__(
+        self,
+        api_key: str,
+        language: str = "en",
+        sort_by: str = "publishedAt",
+        page_size: int = 100,
+        max_pages: int = 1,
+        domains: Sequence[str] | None = None,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        super().__init__(timeout_seconds=timeout_seconds)
+        self.api_key = api_key
+        self.language = language
+        self.sort_by = sort_by
+        self.page_size = min(max(int(page_size), 1), 100)
+        self.max_pages = max(int(max_pages), 1)
+        self.domains = tuple(domains or ())
+
+    def get_headlines(
+        self,
+        tickers: Sequence[str],
+        start: str | pd.Timestamp,
+        end: str | pd.Timestamp,
+    ) -> pd.DataFrame:
+        request = NewsRequest.from_inputs(tickers=tickers, start=start, end=end)
+        rows: list[dict[str, object]] = []
+
+        for ticker in request.tickers:
+            for page in range(1, self.max_pages + 1):
+                params = {
+                    "q": f'"{ticker}" OR ${ticker}',
+                    "from": request.start,
+                    "to": request.end,
+                    "language": self.language,
+                    "sortBy": self.sort_by,
+                    "pageSize": str(self.page_size),
+                    "page": str(page),
+                    "domains": ",".join(self.domains),
+                    "apiKey": self.api_key,
+                }
+                payload = self._fetch_json(self.BASE_URL, params)
+                if not isinstance(payload, dict):
+                    raise ValueError("Unexpected NewsAPI payload type.")
+                if payload.get("status") == "error":
+                    raise RuntimeError(f"NewsAPI error: {payload.get('code', 'unknown')} {payload.get('message', '')}")
+
+                articles = payload.get("articles", [])
+                if not articles:
+                    break
+                for article in articles:
+                    title = _strip_markup(article.get("title", ""))
+                    summary = _strip_markup(article.get("description", "") or article.get("content", ""))
+                    source = article.get("source") or {}
+                    rows.append(
+                        {
+                            "timestamp": pd.to_datetime(article.get("publishedAt"), utc=True, errors="coerce"),
+                            "ticker": ticker,
+                            "headline": " ".join(part for part in (title, summary) if part).strip(),
+                            "title": title,
+                            "summary": summary,
+                            "source": source.get("name") if isinstance(source, dict) else "NewsAPI",
+                            "url": article.get("url"),
+                            "relevance": 1.0,
+                            "author": article.get("author"),
+                        }
+                    )
+                if len(articles) < self.page_size:
+                    break
+
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            return pd.DataFrame(columns=["timestamp", "ticker", "headline", "title", "summary", "relevance", "source", "url"])
+
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce").dt.tz_convert(None)
+        frame = frame.dropna(subset=["timestamp"])
+        frame["ticker"] = frame["ticker"].astype(str).str.upper()
+        return frame.sort_values(["timestamp", "ticker"]).reset_index(drop=True)
 
 
 class AlphaVantageNewsProvider(RemoteHeadlineProvider):
@@ -440,11 +730,14 @@ class CompositeHeadlineProvider(HeadlineProvider):
         self,
         providers: Sequence[HeadlineProvider],
         dedup_config: HeadlineDedupConfig = HeadlineDedupConfig(),
+        skip_errors: bool = True,
     ) -> None:
         if not providers:
             raise ValueError("CompositeHeadlineProvider requires at least one underlying provider.")
         self.providers = list(providers)
         self.dedup_config = dedup_config
+        self.skip_errors = skip_errors
+        self.last_errors: list[str] = []
 
     def get_headlines(
         self,
@@ -453,8 +746,15 @@ class CompositeHeadlineProvider(HeadlineProvider):
         end: str | pd.Timestamp,
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
+        self.last_errors = []
         for provider in self.providers:
-            frame = provider.get_headlines(tickers=tickers, start=start, end=end).copy()
+            try:
+                frame = provider.get_headlines(tickers=tickers, start=start, end=end).copy()
+            except Exception as exc:
+                if not self.skip_errors:
+                    raise
+                self.last_errors.append(_safe_provider_error(provider, exc))
+                continue
             if frame.empty:
                 continue
             frame["provider_name"] = provider.__class__.__name__

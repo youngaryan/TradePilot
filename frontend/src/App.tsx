@@ -7,6 +7,7 @@ import {
   FlaskConical,
   Gauge,
   LayoutDashboard,
+  Newspaper,
   RefreshCw,
   Rocket
 } from "lucide-react";
@@ -34,9 +35,10 @@ import { EmptyState } from "./components/Cards";
 import { BacktestLab } from "./features/BacktestLab";
 import { CommandCenter } from "./features/CommandCenter";
 import { LiveOps } from "./features/LiveOps";
+import { SentimentLab } from "./features/SentimentLab";
 import { SystemGuide } from "./features/SystemGuide";
 
-type ViewId = "command" | "live" | "backtests" | "system";
+type ViewId = "command" | "live" | "sentiment" | "backtests" | "system";
 
 const views: Array<{ id: ViewId; label: string; description: string; icon: ReactNode }> = [
   {
@@ -50,6 +52,12 @@ const views: Array<{ id: ViewId; label: string; description: string; icon: React
     label: "Run Paper",
     description: "Run fake-money agents with optional news and official SEC events.",
     icon: <Rocket size={18} />
+  },
+  {
+    id: "sentiment",
+    label: "Sentiment",
+    description: "Build and inspect the free news overlay dataset.",
+    icon: <Newspaper size={18} />
   },
   {
     id: "backtests",
@@ -207,6 +215,8 @@ export default function App() {
             onRefresh={() => void refreshAll()}
           />
         ) : null}
+
+        {activeView === "sentiment" ? <SentimentLab /> : null}
 
         {activeView === "backtests" ? (
           <BacktestLab

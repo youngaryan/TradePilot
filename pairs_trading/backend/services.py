@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -24,9 +25,16 @@ from ..apps.cli import (
     run_stat_arb_pipeline,
 )
 from ..operations.paper_trading import run_paper_batch
+from ..data.news import AlphaVantageNewsProvider, BenzingaNewsProvider, CompositeHeadlineProvider, LocalNewsFileProvider, NewsAPIHeadlineProvider, RSSHeadlineProvider
+from ..data.sentiment_accumulator import ShadowSentimentAccumulator
+from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
-from .schemas import BacktestRunRequest
+from .schemas import BacktestRunRequest, SentimentAccumulationRequest
+
+
+SENTIMENT_TABLE_ROW_LIMIT = 2_000
+SENTIMENT_TABLE_ROWS_PER_LAST_RUN_TICKER = 200
 
 
 @dataclass(frozen=True)
@@ -722,6 +730,16 @@ class BacktestService:
                 sentiment_cache_dir=str(self.settings.sentiment_cache_dir),
                 artifact_root=artifact_root,
                 daily_sentiment_file=str(params["daily_sentiment_file"]) if params.get("daily_sentiment_file") else None,
+                news_provider_names=params.get("news_provider_names"),
+                news_files=params.get("news_files"),
+                news_api_key=params.get("news_api_key"),
+                alphavantage_api_key=params.get("alphavantage_api_key"),
+                benzinga_api_key=params.get("benzinga_api_key"),
+                newsapi_api_key=params.get("newsapi_api_key"),
+                news_topics=params.get("news_topics"),
+                rss_feed_urls=params.get("rss_feed_urls"),
+                use_finbert=bool(params.get("use_finbert", False)),
+                local_finbert_only=bool(params.get("local_finbert_only", False)),
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
@@ -797,9 +815,14 @@ class BacktestService:
                 daily_sentiment_file=str(params["daily_sentiment_file"]) if params.get("daily_sentiment_file") else None,
                 news_provider_names=params.get("news_provider_names"),
                 news_files=params.get("news_files"),
+                news_api_key=params.get("news_api_key"),
+                alphavantage_api_key=params.get("alphavantage_api_key"),
+                benzinga_api_key=params.get("benzinga_api_key"),
+                newsapi_api_key=params.get("newsapi_api_key"),
                 use_finbert=bool(params.get("use_finbert", False)),
                 local_finbert_only=bool(params.get("local_finbert_only", False)),
                 news_topics=params.get("news_topics"),
+                rss_feed_urls=params.get("rss_feed_urls"),
                 holding_period_bars=int(params.get("holding_period_bars", 5)),
                 entry_threshold=float(params.get("entry_threshold", 0.20)),
                 event_weight=float(params.get("event_weight", 0.45)),
@@ -986,3 +1009,250 @@ class PaperService:
             "deployment_config_path": str(config_path),
         }
         return latest_payload
+
+
+class SentimentService:
+    def __init__(self, settings: BackendSettings) -> None:
+        self.settings = settings
+
+    @property
+    def default_output_dir(self) -> Path:
+        return self.settings.sentiment_cache_dir / "shadow"
+
+    def _output_dir(self, output_dir: str | Path | None = None) -> Path:
+        return Path(output_dir) if output_dir else self.default_output_dir
+
+    @staticmethod
+    def _read_frame(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame()
+        if path.suffix.lower() == ".csv":
+            return pd.read_csv(path)
+        return pd.read_parquet(path)
+
+    @staticmethod
+    def _naive_timestamp(series: pd.Series) -> pd.Series:
+        return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_convert(None)
+
+    @staticmethod
+    def _metadata_tickers(metadata: dict[str, Any]) -> list[str]:
+        tickers = metadata.get("tickers", [])
+        if isinstance(tickers, str):
+            tickers = [tickers]
+        if not isinstance(tickers, list):
+            return []
+        return [str(ticker).upper() for ticker in tickers if str(ticker).strip()]
+
+    @staticmethod
+    def _sort_headline_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        if "timestamp" in frame.columns:
+            return frame.sort_values("timestamp", ascending=False).reset_index(drop=True)
+        return frame.reset_index(drop=True)
+
+    @classmethod
+    def _headline_preview_frame(cls, frame: pd.DataFrame, metadata: dict[str, Any]) -> pd.DataFrame:
+        """Return a bounded UI preview while always surfacing the latest run's tickers."""
+        ordered = cls._sort_headline_frame(frame)
+        if len(ordered) <= SENTIMENT_TABLE_ROW_LIMIT:
+            return ordered
+
+        preview_parts = [ordered.head(SENTIMENT_TABLE_ROW_LIMIT)]
+        tickers = cls._metadata_tickers(metadata)
+        if tickers and "ticker" in ordered.columns:
+            ticker_values = ordered["ticker"].astype(str).str.upper()
+            for ticker in tickers:
+                preview_parts.append(ordered.loc[ticker_values == ticker].head(SENTIMENT_TABLE_ROWS_PER_LAST_RUN_TICKER))
+
+        preview = pd.concat(preview_parts, axis=0, ignore_index=False)
+        preview = preview.loc[~preview.index.duplicated(keep="first")]
+        return cls._sort_headline_frame(preview)
+
+    def _headline_provider(self, request: SentimentAccumulationRequest):
+        providers = []
+        selected = list(dict.fromkeys(provider.lower() for provider in request.providers))
+        if not selected:
+            selected = ["rss"]
+
+        if "rss" in selected:
+            providers.append(RSSHeadlineProvider(feed_urls=request.rss_feed_urls or None))
+
+        if "local" in selected:
+            if not request.news_files:
+                raise ValueError("Local sentiment accumulation requires at least one news file.")
+            providers.extend(LocalNewsFileProvider(path) for path in request.news_files)
+
+        if "newsapi" in selected:
+            api_key = request.newsapi_api_key or os.getenv("NEWSAPI_API_KEY")
+            if not api_key:
+                raise ValueError("NewsAPI accumulation requires a NewsAPI key or NEWSAPI_API_KEY.")
+            providers.append(NewsAPIHeadlineProvider(api_key=api_key))
+
+        if "alphavantage" in selected:
+            api_key = request.alphavantage_api_key or os.getenv("ALPHAVANTAGE_API_KEY")
+            if not api_key:
+                raise ValueError("Alpha Vantage accumulation requires an Alpha Vantage key or ALPHAVANTAGE_API_KEY.")
+            providers.append(AlphaVantageNewsProvider(api_key=api_key))
+
+        if "benzinga" in selected:
+            api_key = request.benzinga_api_key or os.getenv("BENZINGA_API_KEY")
+            if not api_key:
+                raise ValueError("Benzinga accumulation requires a Benzinga key or BENZINGA_API_KEY.")
+            providers.append(BenzingaNewsProvider(api_key=api_key))
+
+        if not providers:
+            raise ValueError("Choose at least one sentiment source.")
+        return CompositeHeadlineProvider(providers, skip_errors=True)
+
+    @staticmethod
+    def _sentiment_model(use_finbert: bool, local_finbert_only: bool):
+        if use_finbert:
+            try:
+                model = FinBERTSentimentModel(local_files_only=local_finbert_only)
+                model.score_texts(["earnings beat expectations"])
+                return model
+            except Exception:
+                return build_best_available_sentiment_model()
+        return build_best_available_sentiment_model()
+
+    @staticmethod
+    def _accumulation_warnings(
+        request: SentimentAccumulationRequest,
+        result,
+        provider_errors: list[str] | None = None,
+    ) -> list[str]:
+        selected = {provider.lower() for provider in request.providers}
+        warnings: list[str] = list(dict.fromkeys(provider_errors or []))
+        if result.stored_headlines == 0:
+            if "rss" in selected:
+                warnings.append(
+                    "No RSS headlines matched this date range. RSS feeds are live feeds, not historical archives; "
+                    "use a recent window such as the last 7-30 days for Yahoo Finance RSS."
+                )
+            if "local" in selected:
+                warnings.append("No local news-file rows matched the selected symbols and dates.")
+            if selected & {"newsapi", "alphavantage", "benzinga"}:
+                warnings.append("No API news rows matched the selected symbols and dates; check provider limits, symbols, and credentials.")
+        elif result.daily_rows == 0:
+            warnings.append("Headlines were fetched, but no daily sentiment rows were produced. Check timestamp and ticker columns.")
+        return warnings
+
+    @staticmethod
+    def _write_accumulation_metadata(result, request: SentimentAccumulationRequest, warnings: list[str]) -> None:
+        metadata_path = Path(result.metadata_path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        metadata.update(
+            {
+                "providers": [str(provider).lower() for provider in request.providers],
+                "rss_feed_urls": [str(url) for url in request.rss_feed_urls],
+                "news_files": [str(path) for path in request.news_files],
+                "warnings": warnings,
+            }
+        )
+        metadata_path.write_text(json.dumps(json_ready(metadata), indent=2), encoding="utf-8")
+
+    def accumulate(self, request: SentimentAccumulationRequest) -> dict[str, Any]:
+        if not request.symbols:
+            raise ValueError("Choose at least one symbol for sentiment accumulation.")
+        output_dir = self._output_dir(request.output_dir)
+        provider = self._headline_provider(request)
+        model = self._sentiment_model(request.use_finbert, request.local_finbert_only)
+        result = ShadowSentimentAccumulator(
+            headline_provider=provider,
+            sentiment_model=model,
+            output_dir=output_dir,
+        ).run(tickers=request.symbols, start=request.start, end=request.end)
+        provider_errors = list(getattr(provider, "last_errors", []))
+        warnings = self._accumulation_warnings(request, result, provider_errors=provider_errors)
+        self._write_accumulation_metadata(result, request, warnings)
+        return self.dataset(output_dir=result.output_dir)
+
+    def dataset(self, output_dir: str | Path | None = None) -> dict[str, Any]:
+        output_path = self._output_dir(output_dir)
+        raw_path = output_path / "raw_headlines.parquet"
+        scored_path = output_path / "scored_headlines.parquet"
+        daily_path = output_path / "daily_sentiment.parquet"
+        metadata_path = output_path / "metadata.json"
+
+        raw = self._read_frame(raw_path)
+        scored = self._read_frame(scored_path)
+        daily = self._read_frame(daily_path)
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+
+        if not raw.empty and "timestamp" in raw.columns:
+            raw["timestamp"] = self._naive_timestamp(raw["timestamp"])
+        if not scored.empty and "timestamp" in scored.columns:
+            scored["timestamp"] = self._naive_timestamp(scored["timestamp"])
+        if not daily.empty and "date" in daily.columns:
+            daily["date"] = self._naive_timestamp(daily["date"]).dt.normalize()
+
+        daily_points: list[dict[str, Any]] = []
+        ticker_summary: list[dict[str, Any]] = []
+        source_summary: list[dict[str, Any]] = []
+
+        if not daily.empty:
+            daily = daily.sort_values(["date", "ticker"]).reset_index(drop=True)
+            daily_points = json_ready(daily.tail(500).to_dict("records"))
+            grouped = daily.groupby("ticker", sort=True)
+            ticker_summary = json_ready(
+                [
+                    {
+                        "ticker": str(ticker),
+                        "article_count": float(group["article_count"].sum()),
+                        "avg_sentiment": float(group["sentiment_score"].mean()),
+                        "avg_confidence": float(group["confidence"].mean()),
+                        "latest_sentiment": float(group.sort_values("date").iloc[-1]["sentiment_score"]),
+                    }
+                    for ticker, group in grouped
+                ]
+            )
+
+        if not raw.empty:
+            source_col = "source" if "source" in raw.columns else "provider_name"
+            if source_col in raw.columns:
+                source_summary = json_ready(
+                    raw.groupby(source_col, dropna=False)
+                    .size()
+                    .reset_index(name="headline_count")
+                    .rename(columns={source_col: "source"})
+                    .sort_values("headline_count", ascending=False)
+                    .to_dict("records")
+                )
+
+        headlines = self._headline_preview_frame(raw, metadata)
+        scored_tail = self._headline_preview_frame(scored, metadata)
+
+        warnings = metadata.get("warnings", [])
+        if not isinstance(warnings, list):
+            warnings = [str(warnings)]
+        if not warnings and raw.empty:
+            warnings = ["No headlines are stored in this sentiment dataset yet."]
+
+        return {
+            "output_dir": str(output_path),
+            "raw_headlines_path": str(raw_path),
+            "scored_headlines_path": str(scored_path),
+            "daily_sentiment_path": str(daily_path),
+            "metadata_path": str(metadata_path),
+            "metadata": json_ready(metadata),
+            "warnings": json_ready(warnings),
+            "summary": {
+                "headline_count": int(len(raw)),
+                "scored_headline_count": int(len(scored)),
+                "returned_headline_count": int(len(headlines)),
+                "returned_scored_headline_count": int(len(scored_tail)),
+                "table_row_limit": SENTIMENT_TABLE_ROW_LIMIT,
+                "table_rows_per_last_run_ticker": SENTIMENT_TABLE_ROWS_PER_LAST_RUN_TICKER,
+                "headline_rows_truncated": bool(len(headlines) < len(raw)),
+                "scored_headline_rows_truncated": bool(len(scored_tail) < len(scored)),
+                "daily_rows": int(len(daily)),
+                "ticker_count": int(daily["ticker"].nunique()) if not daily.empty and "ticker" in daily.columns else 0,
+                "source_count": int(raw["source"].nunique()) if not raw.empty and "source" in raw.columns else 0,
+            },
+            "daily_points": daily_points,
+            "ticker_summary": ticker_summary,
+            "source_summary": source_summary,
+            "headlines": json_ready(headlines.to_dict("records")),
+            "scored_headlines": json_ready(scored_tail.to_dict("records")),
+        }

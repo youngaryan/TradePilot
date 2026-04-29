@@ -18,6 +18,8 @@ from ..data.news import (
     CompositeHeadlineProvider,
     DailySentimentFileProvider,
     LocalNewsFileProvider,
+    NewsAPIHeadlineProvider,
+    RSSHeadlineProvider,
 )
 from ..engines.backtesting import (
     CostModel,
@@ -158,8 +160,22 @@ def load_daily_sentiment(
     news_api_key: str | None,
     alphavantage_api_key: str | None,
     benzinga_api_key: str | None,
+    newsapi_api_key: str | None = None,
     news_topics: list[str] | None = None,
+    rss_feed_urls: list[str] | None = None,
 ):
+    def coerce_list(value) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
+    news_provider_names = coerce_list(news_provider_names)
+    news_files = coerce_list(news_files)
+    news_topics = coerce_list(news_topics)
+    rss_feed_urls = coerce_list(rss_feed_urls)
+
     if daily_sentiment_file:
         provider = DailySentimentFileProvider(daily_sentiment_file)
         return provider.get_daily_sentiment(tickers=tickers, start=start, end=end)
@@ -186,6 +202,15 @@ def load_daily_sentiment(
         if not api_key:
             raise ValueError("Benzinga news requires --benzinga-api-key, --news-api-key, or BENZINGA_API_KEY.")
         providers.append(BenzingaNewsProvider(api_key=api_key))
+
+    if "newsapi" in provider_names:
+        api_key = newsapi_api_key or news_api_key or os.getenv("NEWSAPI_API_KEY")
+        if not api_key:
+            raise ValueError("NewsAPI requires --newsapi-api-key, --news-api-key, or NEWSAPI_API_KEY.")
+        providers.append(NewsAPIHeadlineProvider(api_key=api_key))
+
+    if "rss" in provider_names:
+        providers.append(RSSHeadlineProvider(feed_urls=rss_feed_urls))
 
     if not providers:
         return None
@@ -694,7 +719,9 @@ def run_stat_arb_pipeline(
     news_api_key: str | None = None,
     alphavantage_api_key: str | None = None,
     benzinga_api_key: str | None = None,
+    newsapi_api_key: str | None = None,
     news_topics: list[str] | None = None,
+    rss_feed_urls: list[str] | None = None,
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
@@ -726,7 +753,9 @@ def run_stat_arb_pipeline(
         news_api_key=news_api_key,
         alphavantage_api_key=alphavantage_api_key,
         benzinga_api_key=benzinga_api_key,
+        newsapi_api_key=newsapi_api_key,
         news_topics=news_topics,
+        rss_feed_urls=rss_feed_urls,
     )
 
     pipeline = SectorStatArbPipeline(
@@ -1245,7 +1274,9 @@ def run_pead_sentiment_pipeline(
     news_api_key: str | None = None,
     alphavantage_api_key: str | None = None,
     benzinga_api_key: str | None = None,
+    newsapi_api_key: str | None = None,
     news_topics: list[str] | None = None,
+    rss_feed_urls: list[str] | None = None,
     holding_period_bars: int = 5,
     entry_threshold: float = 0.20,
     event_weight: float = 0.45,
@@ -1295,7 +1326,9 @@ def run_pead_sentiment_pipeline(
         news_api_key=news_api_key,
         alphavantage_api_key=alphavantage_api_key,
         benzinga_api_key=benzinga_api_key,
+        newsapi_api_key=newsapi_api_key,
         news_topics=news_topics,
+        rss_feed_urls=rss_feed_urls,
     )
 
     pipeline = PEADSentimentPipeline(
@@ -1392,14 +1425,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--news-provider",
         nargs="+",
-        choices=["local", "alphavantage", "benzinga"],
+        choices=["local", "rss", "newsapi", "alphavantage", "benzinga"],
         help="One or more news sources to use before sentiment scoring.",
     )
     parser.add_argument("--news-file", nargs="*", help="One or more CSV/parquet files of raw news headlines.")
+    parser.add_argument("--rss-feed", nargs="*", help="Optional RSS feed URLs. Use {ticker} in a URL for per-symbol feeds.")
     parser.add_argument("--daily-sentiment-file", help="CSV or parquet of precomputed daily sentiment.")
     parser.add_argument("--news-api-key", help="API key for the selected remote news provider.")
     parser.add_argument("--alphavantage-api-key", help="API key for Alpha Vantage news.")
     parser.add_argument("--benzinga-api-key", help="API key for Benzinga news.")
+    parser.add_argument("--newsapi-api-key", help="API key for NewsAPI.org.")
     parser.add_argument("--news-topics", nargs="*", help="Optional topic filters for providers that support them.")
     parser.add_argument("--use-finbert", action="store_true", help="Use FinBERT for headline sentiment.")
     parser.add_argument("--local-finbert-only", action="store_true", help="Require FinBERT to already exist locally.")
@@ -1508,7 +1543,9 @@ def main() -> None:
             news_api_key=args.news_api_key,
             alphavantage_api_key=args.alphavantage_api_key,
             benzinga_api_key=args.benzinga_api_key,
+            newsapi_api_key=args.newsapi_api_key,
             news_topics=args.news_topics,
+            rss_feed_urls=args.rss_feed,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,
@@ -1571,7 +1608,9 @@ def main() -> None:
             news_api_key=args.news_api_key,
             alphavantage_api_key=args.alphavantage_api_key,
             benzinga_api_key=args.benzinga_api_key,
+            newsapi_api_key=args.newsapi_api_key,
             news_topics=args.news_topics,
+            rss_feed_urls=args.rss_feed,
             holding_period_bars=args.pead_holding_period_bars,
             entry_threshold=args.pead_entry_threshold,
             event_weight=args.pead_event_weight,

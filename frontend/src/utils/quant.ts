@@ -49,6 +49,7 @@ export function agentHasSentiment(agent: PaperAgentConfig): boolean {
       agent.daily_sentiment_file ||
       agent.news_provider_names?.length ||
       agent.news_files?.length ||
+      agent.rss_feed_urls?.length ||
       agent.news_topics?.length
   );
 }

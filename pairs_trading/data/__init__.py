@@ -11,8 +11,11 @@ from .news import (
     HeadlineDedupConfig,
     HeadlineProvider,
     LocalNewsFileProvider,
+    NewsAPIHeadlineProvider,
+    RSSHeadlineProvider,
     deduplicate_headlines,
 )
+from .sentiment_accumulator import ShadowSentimentAccumulator, SentimentAccumulationResult
 
 __all__ = [
     "AlphaVantageNewsProvider",
@@ -28,8 +31,12 @@ __all__ = [
     "LocalEventFileProvider",
     "LocalNewsFileProvider",
     "MarketDataProvider",
+    "NewsAPIHeadlineProvider",
+    "RSSHeadlineProvider",
     "SecCompanyFactsEventProvider",
     "SecCompanyFilingsEventProvider",
+    "SentimentAccumulationResult",
+    "ShadowSentimentAccumulator",
     "YahooFinanceProvider",
     "deduplicate_headlines",
 ]

@@ -388,6 +388,22 @@ class NewsSentimentAggregator:
             raise ValueError(f"Missing required headline columns: {sorted(missing)}")
 
         frame = headlines.copy().reset_index(drop=True)
+        score_defaults = {
+            "label": "neutral",
+            "score": 0.0,
+            "confidence": 0.0,
+            "positive_prob": 0.0,
+            "negative_prob": 0.0,
+            "neutral_prob": 1.0,
+        }
+        if frame.empty:
+            for column, default in score_defaults.items():
+                frame[column] = pd.Series(dtype="object" if isinstance(default, str) else "float64")
+            frame["date"] = pd.Series(dtype="datetime64[ns]")
+            frame["relevance"] = pd.Series(dtype="float64")
+            frame["weight"] = pd.Series(dtype="float64")
+            return frame
+
         frame[self.timestamp_col] = pd.to_datetime(frame[self.timestamp_col], utc=False)
         frame["date"] = frame[self.timestamp_col].dt.tz_localize(None).dt.normalize()
         frame["relevance"] = frame.get("relevance", 1.0)
@@ -395,6 +411,9 @@ class NewsSentimentAggregator:
 
         scores = self.model.score_texts(frame[self.text_col].fillna("").tolist())
         frame = pd.concat([frame, scores], axis=1)
+        for column, default in score_defaults.items():
+            if column not in frame.columns:
+                frame[column] = default
         frame["weight"] = frame["confidence"].clip(lower=0.05) * frame["relevance"]
         return frame
 

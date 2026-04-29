@@ -1,4 +1,4 @@
-import type { LeaderboardRow, PaperStrategy } from "../api/types";
+import type { LeaderboardRow, PaperStrategy, SentimentDailyPoint, SentimentSourceSummary } from "../api/types";
 import { formatCurrency, formatNumber, formatPercent, pipelineLabel, toNumber } from "../utils/format";
 import { aggregateEquityHistory, orderNotional } from "../utils/quant";
 import type { PaperOrder } from "../api/types";
@@ -6,6 +6,34 @@ import type { PaperOrder } from "../api/types";
 function scale(value: number, min: number, max: number, low: number, high: number) {
   if (Math.abs(max - min) < 1e-9) return (low + high) / 2;
   return low + ((value - min) / (max - min)) * (high - low);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function hexToRgb(hex: string) {
+  const normalized = hex.replace("#", "");
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16)
+  };
+}
+
+function mixHex(from: string, to: string, amount: number) {
+  const a = hexToRgb(from);
+  const b = hexToRgb(to);
+  const t = clamp(amount, 0, 1);
+  const channel = (start: number, end: number) => Math.round(start + (end - start) * t).toString(16).padStart(2, "0");
+  return `#${channel(a.r, b.r)}${channel(a.g, b.g)}${channel(a.b, b.b)}`;
+}
+
+function sentimentColor(value: number) {
+  const neutral = "#f3f6f8";
+  if (value > 0) return mixHex(neutral, "#0f766e", Math.sqrt(clamp(value, 0, 1)));
+  if (value < 0) return mixHex(neutral, "#b42318", Math.sqrt(clamp(Math.abs(value), 0, 1)));
+  return neutral;
 }
 
 function EmptyChart({ label }: { label: string }) {
@@ -249,4 +277,307 @@ export function StrategyConcentrationBars({ strategy }: { strategy: PaperStrateg
     .sort((a, b) => b.value - a.value)
     .slice(0, 12);
   return <HorizontalBars valueKind="percent" rows={rows} />;
+}
+
+function shortDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+export function SentimentTimelineChart({
+  points,
+  title = "Sentiment overlay",
+  detail
+}: {
+  points: SentimentDailyPoint[];
+  title?: string;
+  detail?: string;
+}) {
+  if (!points.length) return <EmptyChart label="No sentiment points yet. Run the accumulator to build the overlay dataset." />;
+
+  const width = 900;
+  const height = 360;
+  const padding = 58;
+  const rightPadding = 34;
+  const bottomPadding = 58;
+  const byDate = Array.from(
+    points.reduce((map, point) => {
+      const dateKey = String(point.date).slice(0, 10);
+      const current = map.get(dateKey) ?? { date: dateKey, article_count: 0, weighted_sentiment: 0, confidence: 0, rows: 0 };
+      const articles = Math.max(0, toNumber(point.article_count));
+      current.article_count += articles;
+      current.weighted_sentiment += toNumber(point.sentiment_score) * Math.max(articles, 1);
+      current.confidence += toNumber(point.confidence);
+      current.rows += 1;
+      map.set(dateKey, current);
+      return map;
+    }, new Map<string, { date: string; article_count: number; weighted_sentiment: number; confidence: number; rows: number }>())
+  ).map(([, value]) => ({
+    ...value,
+    sentiment: value.article_count > 0 ? value.weighted_sentiment / value.article_count : 0,
+    confidence_avg: value.rows > 0 ? value.confidence / value.rows : 0
+  })).sort((a, b) => a.date.localeCompare(b.date));
+
+  const maxArticles = Math.max(1, ...byDate.map((point) => point.article_count));
+  const x = (index: number) => scale(index, 0, Math.max(byDate.length - 1, 1), padding, width - rightPadding);
+  const ySentiment = (value: number) => scale(value, -1, 1, height - bottomPadding, padding);
+  const yArticle = (value: number) => scale(value, 0, maxArticles, height - bottomPadding, height * 0.60);
+  const zeroY = ySentiment(0);
+  const sentimentPath = byDate.map((point, index) => `${x(index)},${ySentiment(point.sentiment)}`).join(" ");
+  const tickIndexes = byDate
+    .map((_, index) => index)
+    .filter((index) => byDate.length <= 8 || index === 0 || index === byDate.length - 1 || index % Math.ceil(byDate.length / 6) === 0);
+  const latest = byDate.at(-1);
+  const averageSentiment = byDate.reduce((sum, point) => sum + point.sentiment, 0) / Math.max(byDate.length, 1);
+  const totalArticles = byDate.reduce((sum, point) => sum + point.article_count, 0);
+  const bestPoint = byDate.reduce((best, point) => (point.sentiment > best.sentiment ? point : best), byDate[0]);
+  const worstPoint = byDate.reduce((worst, point) => (point.sentiment < worst.sentiment ? point : worst), byDate[0]);
+
+  return (
+    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sentiment score and article count">
+      <defs>
+        <linearGradient id="sentimentAreaGradient" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor="#0b5cad" stopOpacity="0.14" />
+          <stop offset="100%" stopColor="#0b5cad" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {[1, 0.5, 0, -0.5, -1].map((tick) => (
+        <g key={tick}>
+          <line x1={padding} x2={width - rightPadding} y1={ySentiment(tick)} y2={ySentiment(tick)} className={tick === 0 ? "chart-axis chart-axis--dashed" : "chart-grid"} />
+          <text x={padding - 12} y={ySentiment(tick) + 4} className="chart-tick" textAnchor="end">
+            {formatNumber(tick)}
+          </text>
+        </g>
+      ))}
+      <line x1={padding} x2={padding} y1={padding} y2={height - bottomPadding} className="chart-axis" />
+      <line x1={padding} x2={width - rightPadding} y1={height - bottomPadding} y2={height - bottomPadding} className="chart-axis" />
+      {byDate.map((point, index) => {
+        const barX = x(index);
+        const barY = yArticle(point.article_count);
+        return (
+          <rect
+            key={point.date}
+            x={barX - 6}
+            y={barY}
+            width={12}
+            height={Math.max(height - bottomPadding - barY, 1)}
+            rx={4}
+            className="chart-bar chart-bar--neutral"
+          >
+            <title>{`${point.date}: ${formatNumber(point.article_count, 0)} articles`}</title>
+          </rect>
+        );
+      })}
+      <polygon
+        points={`${padding},${zeroY} ${sentimentPath} ${width - rightPadding},${zeroY}`}
+        fill="url(#sentimentAreaGradient)"
+      />
+      <polyline points={sentimentPath} fill="none" className="chart-line chart-line--primary" />
+      {byDate.map((point, index) => {
+        const sentimentClass = point.sentiment >= 0 ? "chart-bubble chart-bubble--good" : "chart-bubble chart-bubble--bad";
+        return (
+          <g key={`${point.date}-dot`}>
+            <circle
+              cx={x(index)}
+              cy={ySentiment(point.sentiment)}
+              r={Math.max(5, 5 + point.confidence_avg * 6)}
+              className={sentimentClass}
+            >
+              <title>
+                {`${point.date}\nSentiment: ${formatNumber(point.sentiment)}\nArticles: ${formatNumber(point.article_count, 0)}\nConfidence: ${formatNumber(point.confidence_avg)}`}
+              </title>
+            </circle>
+            {(point.date === bestPoint.date || point.date === worstPoint.date || point.date === latest?.date) ? (
+              <text x={x(index)} y={ySentiment(point.sentiment) - 16} className="chart-mini-label" textAnchor="middle">
+                {formatNumber(point.sentiment)}
+              </text>
+            ) : null}
+          </g>
+        );
+      })}
+      {tickIndexes.map((index) => (
+        <g key={`${byDate[index].date}-tick`}>
+          <line x1={x(index)} x2={x(index)} y1={height - bottomPadding} y2={height - bottomPadding + 6} className="chart-axis" />
+          <text x={x(index)} y={height - 30} className="chart-tick" textAnchor="middle">
+            {shortDate(byDate[index].date)}
+          </text>
+          <text x={x(index)} y={height - 14} className="chart-tick chart-tick--muted" textAnchor="middle">
+            {byDate[index].date.slice(0, 4)}
+          </text>
+        </g>
+      ))}
+      <text x={padding} y={24} className="chart-label">
+        {title}
+      </text>
+      <text x={padding} y={43} className="chart-sub-label">
+        {detail ?? "Line = weighted sentiment | bars = articles | dot size = confidence"}
+      </text>
+      <text x={width - 330} y={24} className="chart-label">
+        Latest {formatNumber(latest?.sentiment)} | Avg {formatNumber(averageSentiment)}
+      </text>
+      <text x={width - 330} y={43} className="chart-sub-label">
+        {formatNumber(totalArticles, 0)} articles | high {formatNumber(bestPoint.sentiment)} on {shortDate(bestPoint.date)} | low {formatNumber(worstPoint.sentiment)} on {shortDate(worstPoint.date)}
+      </text>
+    </svg>
+  );
+}
+
+export function SentimentTickerBars({ points }: { points: SentimentDailyPoint[] }) {
+  const rows = Array.from(
+    points.reduce((map, point) => {
+      const current = map.get(point.ticker) ?? { ticker: point.ticker, article_count: 0, weighted_sentiment: 0 };
+      const articles = Math.max(0, toNumber(point.article_count));
+      current.article_count += articles;
+      current.weighted_sentiment += toNumber(point.sentiment_score) * Math.max(articles, 1);
+      map.set(point.ticker, current);
+      return map;
+    }, new Map<string, { ticker: string; article_count: number; weighted_sentiment: number }>())
+  ).map(([, value]) => ({
+    label: value.ticker,
+    value: value.article_count > 0 ? value.weighted_sentiment / value.article_count : 0,
+    detail: `${formatNumber(value.article_count, 0)} articles`
+  })).sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+
+  return <HorizontalBars valueKind="number" rows={rows} />;
+}
+
+export function SentimentHeatmapChart({ points }: { points: SentimentDailyPoint[] }) {
+  if (!points.length) return <EmptyChart label="No sentiment heatmap data for the current filters." />;
+
+  const normalized = points
+    .map((point) => ({
+      date: String(point.date).slice(0, 10),
+      ticker: String(point.ticker).toUpperCase(),
+      sentiment: toNumber(point.sentiment_score),
+      confidence: toNumber(point.confidence),
+      article_count: toNumber(point.article_count)
+    }))
+    .filter((point) => point.date && point.ticker);
+  if (!normalized.length) return <EmptyChart label="No usable sentiment heatmap rows after filtering." />;
+
+  const dates = Array.from(new Set(normalized.map((point) => point.date))).sort();
+  const rows = Array.from(
+    normalized.reduce((map, point) => {
+      const current = map.get(point.ticker) ?? { ticker: point.ticker, latest: -Infinity, latestSentiment: 0, articles: 0 };
+      const dateTime = new Date(point.date).getTime();
+      if (dateTime >= current.latest) {
+        current.latest = dateTime;
+        current.latestSentiment = point.sentiment;
+      }
+      current.articles += point.article_count;
+      map.set(point.ticker, current);
+      return map;
+    }, new Map<string, { ticker: string; latest: number; latestSentiment: number; articles: number }>())
+  ).map(([, value]) => value)
+    .sort((a, b) => Math.abs(b.latestSentiment) - Math.abs(a.latestSentiment) || a.ticker.localeCompare(b.ticker));
+
+  const valueMap = new Map(normalized.map((point) => [`${point.ticker}|${point.date}`, point]));
+  const maxArticles = Math.max(1, ...normalized.map((point) => point.article_count));
+  const cellSize = clamp(Math.floor(760 / Math.max(dates.length, 1)), 16, 30);
+  const rowHeight = 30;
+  const left = 78;
+  const top = 76;
+  const right = 106;
+  const bottom = 70;
+  const width = Math.max(920, left + right + dates.length * cellSize);
+  const height = top + bottom + rows.length * rowHeight;
+  const tickStep = Math.max(1, Math.ceil(dates.length / 9));
+
+  return (
+    <div className="heatmap-scroll" role="img" aria-label="Sentiment heatmap by ticker and date">
+      <svg className="chart chart--heatmap" style={{ minWidth: width }} viewBox={`0 0 ${width} ${height}`}>
+        <text x={left} y={24} className="chart-label">
+          Color = sentiment score | dot size = article volume | stronger borders = confidence
+        </text>
+        <g transform={`translate(${left}, 38)`}>
+          {[-1, -0.5, 0, 0.5, 1].map((value, index) => (
+            <g key={value} transform={`translate(${index * 70}, 0)`}>
+              <rect width={58} height={14} rx={7} fill={sentimentColor(value)} stroke="#d4dfeb" />
+              <text x={29} y={30} textAnchor="middle" className="chart-tick">
+                {value > 0 ? `+${value}` : value}
+              </text>
+            </g>
+          ))}
+          <text x={388} y={12} className="chart-sub-label">
+            Neutral center is zero
+          </text>
+        </g>
+        {dates.map((date, index) => {
+          if (index % tickStep !== 0 && index !== dates.length - 1) return null;
+          const x = left + index * cellSize + cellSize / 2;
+          return (
+            <g key={`${date}-axis`} transform={`translate(${x}, ${top - 10}) rotate(-35)`}>
+              <text textAnchor="end" className="chart-tick">
+                {shortDate(date)}
+              </text>
+            </g>
+          );
+        })}
+        {rows.map((row, rowIndex) => {
+          const y = top + rowIndex * rowHeight;
+          return (
+            <g key={row.ticker}>
+              <text x={left - 12} y={y + 19} textAnchor="end" className="chart-label">
+                {row.ticker}
+              </text>
+              {dates.map((date, dateIndex) => {
+                const point = valueMap.get(`${row.ticker}|${date}`);
+                const x = left + dateIndex * cellSize;
+                const confidence = point ? clamp(point.confidence, 0, 1) : 0;
+                const radius = point ? clamp((point.article_count / maxArticles) * (cellSize / 2.6), 2, cellSize / 2.8) : 0;
+                return (
+                  <g key={`${row.ticker}-${date}`}>
+                    <rect
+                      x={x + 1}
+                      y={y + 2}
+                      width={cellSize - 2}
+                      height={rowHeight - 5}
+                      rx={5}
+                      fill={point ? sentimentColor(point.sentiment) : "#edf2f7"}
+                      opacity={point ? 0.62 + confidence * 0.38 : 0.38}
+                      stroke={point ? "rgba(19, 34, 56, 0.22)" : "rgba(143, 161, 184, 0.18)"}
+                      strokeWidth={point ? 0.8 + confidence * 1.2 : 0.6}
+                    >
+                      <title>
+                        {point
+                          ? `${row.ticker} ${date}\nSentiment: ${formatNumber(point.sentiment)}\nArticles: ${formatNumber(point.article_count, 0)}\nConfidence: ${formatNumber(point.confidence)}`
+                          : `${row.ticker} ${date}\nNo sentiment row`}
+                      </title>
+                    </rect>
+                    {point ? (
+                      <circle cx={x + cellSize / 2} cy={y + rowHeight / 2} r={radius} fill="rgba(15, 28, 42, 0.28)">
+                        <title>{`${formatNumber(point.article_count, 0)} articles`}</title>
+                      </circle>
+                    ) : null}
+                    {point && cellSize >= 24 ? (
+                      <text x={x + cellSize / 2} y={y + rowHeight / 2 + 4} textAnchor="middle" className="heatmap-cell-label">
+                        {formatNumber(point.sentiment)}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              })}
+              <text x={left + dates.length * cellSize + 12} y={y + 18} className="chart-tick">
+                latest {formatNumber(row.latestSentiment)} | {formatNumber(row.articles, 0)} articles
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+export function SentimentSourceBars({ sources }: { sources: SentimentSourceSummary[] }) {
+  return (
+    <HorizontalBars
+      valueKind="number"
+      rows={sources.map((source) => ({
+        label: source.source || "unknown",
+        value: source.headline_count,
+        tone: "neutral" as const
+      }))}
+    />
+  );
 }
