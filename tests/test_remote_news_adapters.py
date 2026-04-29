@@ -176,6 +176,27 @@ class StubAlphaVantageFXProvider(AlphaVantageNewsProvider):
         }
 
 
+class StubAlphaVantageFXFallbackProvider(AlphaVantageNewsProvider):
+    def __init__(self) -> None:
+        super().__init__(api_key="demo", topics=["forex"], sort="LATEST", limit=50)
+
+    def _fetch_json(self, url: str, params: dict[str, str], headers=None):
+        return {
+            "feed": [
+                {
+                    "title": "Dollar slips against major currencies",
+                    "summary": "Foreign exchange markets reacted to weaker US inflation data.",
+                    "time_published": "20260417T091500",
+                    "source": "Example FX",
+                    "url": "https://example.com/fx-fallback",
+                    "overall_sentiment_score": 0.12,
+                    "overall_sentiment_label": "Neutral",
+                    "ticker_sentiment": [],
+                }
+            ]
+        }
+
+
 class FailingHeadlineProvider(HeadlineProvider):
     def get_headlines(self, tickers, start, end) -> pd.DataFrame:
         raise RuntimeError("bad credential")
@@ -231,6 +252,13 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(headlines.loc[0, "source"], "reddit:r/Gold")
         self.assertIn("Gold miners rally", headlines.loc[0, "headline"])
 
+    def test_rss_adapter_does_not_blindly_assign_topic_feed_to_multiple_symbols(self) -> None:
+        provider = StubRedditRSSProvider()
+        headlines = provider.get_headlines(["GLD", "AAPL"], "2026-04-20", "2026-04-29")
+
+        self.assertEqual(provider.urls, ["https://www.reddit.com/r/Gold/.rss"])
+        self.assertTrue(headlines.empty)
+
     def test_rss_adapter_maps_fx_pair_to_yahoo_alias_but_stores_requested_symbol(self) -> None:
         provider = StubForexRSSProvider()
         headlines = provider.get_headlines(["EURUSD"], "2026-04-15", "2026-04-29")
@@ -254,6 +282,20 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(headlines.loc[0, "ticker"], "TSLA")
         self.assertEqual(headlines.loc[0, "source"], "Example News")
 
+    def test_newsapi_adapter_expands_fx_pair_query_terms(self) -> None:
+        provider = StubNewsAPIProvider()
+        headlines = provider.get_headlines(["EURUSD"], "2024-01-01", "2024-01-03")
+
+        self.assertIsNotNone(provider.captured_params)
+        assert provider.captured_params is not None
+        query = provider.captured_params["q"]
+        self.assertIn('"EURUSD"', query)
+        self.assertIn('"EUR/USD"', query)
+        self.assertIn('"EURUSD=X"', query)
+        self.assertIn('"euro dollar"', query)
+        self.assertEqual(len(headlines), 1)
+        self.assertEqual(headlines.loc[0, "ticker"], "EURUSD")
+
     def test_alpha_vantage_adapter_maps_forex_aliases_back_to_requested_pair(self) -> None:
         provider = StubAlphaVantageFXProvider()
         headlines = provider.get_headlines(["EURUSD"], "2026-04-15", "2026-04-29")
@@ -265,6 +307,14 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(headlines.loc[0, "ticker"], "EURUSD")
         self.assertAlmostEqual(float(headlines.loc[0, "relevance"]), 0.77, places=6)
 
+    def test_alpha_vantage_adapter_single_fx_pair_falls_back_when_feed_has_no_ticker_sentiment(self) -> None:
+        provider = StubAlphaVantageFXFallbackProvider()
+        headlines = provider.get_headlines(["EURUSD"], "2026-04-15", "2026-04-29")
+
+        self.assertEqual(len(headlines), 1)
+        self.assertEqual(headlines.loc[0, "ticker"], "EURUSD")
+        self.assertIn("Dollar slips", headlines.loc[0, "headline"])
+
     def test_composite_provider_keeps_successful_sources_when_one_fails(self) -> None:
         provider = CompositeHeadlineProvider([FailingHeadlineProvider(), StubRSSProvider()])
 
@@ -274,6 +324,18 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(headlines.loc[0, "ticker"], "NVDA")
         self.assertTrue(provider.last_errors)
         self.assertIn("Failing failed", provider.last_errors[0])
+
+    def test_composite_provider_reports_all_failures_and_returns_empty_frame(self) -> None:
+        provider = CompositeHeadlineProvider([FailingHeadlineProvider(), FailingHeadlineProvider()])
+
+        headlines = provider.get_headlines(["NVDA"], "2024-01-01", "2024-01-03")
+
+        self.assertTrue(headlines.empty)
+        self.assertEqual(len(provider.last_errors), 2)
+        self.assertEqual(
+            list(headlines.columns),
+            ["timestamp", "ticker", "headline", "relevance", "source", "url"],
+        )
 
 
 if __name__ == "__main__":

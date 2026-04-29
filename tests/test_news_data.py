@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import unittest
 
@@ -180,6 +181,80 @@ class NewsProviderTests(unittest.TestCase):
         daily = pd.read_parquet(result.daily_sentiment_path)
         self.assertEqual(daily["ticker"].tolist(), ["AAA"])
         self.assertEqual(int(daily.loc[0, "article_count"]), 1)
+
+    def test_shadow_accumulator_appends_new_runs_without_erasing_existing_symbols(self) -> None:
+        data_dir = fresh_test_dir("artifacts/test_news/accumulator_append")
+        provider = StubHeadlineProvider(
+            pd.DataFrame(
+                {
+                    "timestamp": ["2026-04-20 09:00:00"],
+                    "ticker": ["AAA"],
+                    "headline": ["AAA beats estimates"],
+                    "source": ["source_one"],
+                    "url": ["https://example.com/aaa"],
+                    "relevance": [1.0],
+                }
+            )
+        )
+        accumulator = ShadowSentimentAccumulator(
+            headline_provider=provider,
+            sentiment_model=FixedSentimentModel(),
+            output_dir=data_dir,
+        )
+
+        first = accumulator.run(["AAA"], "2026-04-20", "2026-04-20")
+        provider.frame = pd.DataFrame(
+            {
+                "timestamp": ["2026-04-21 10:00:00"],
+                "ticker": ["EURUSD"],
+                "headline": ["EUR/USD rises as the dollar weakens"],
+                "source": ["fx_feed"],
+                "url": ["https://example.com/eurusd"],
+                "relevance": [0.9],
+            }
+        )
+        second = accumulator.run(["EURUSD"], "2026-04-21", "2026-04-21")
+
+        self.assertEqual(first.fetched_headlines, 1)
+        self.assertEqual(second.fetched_headlines, 1)
+        self.assertEqual(second.stored_headlines, 2)
+        raw = pd.read_parquet(second.raw_headlines_path)
+        daily = pd.read_parquet(second.daily_sentiment_path)
+        metadata = json.loads(Path(second.metadata_path).read_text(encoding="utf-8"))
+        self.assertEqual(sorted(raw["ticker"].astype(str).str.upper().unique().tolist()), ["AAA", "EURUSD"])
+        self.assertEqual(sorted(daily["ticker"].astype(str).str.upper().unique().tolist()), ["AAA", "EURUSD"])
+        self.assertEqual(metadata["tickers"], ["EURUSD"])
+
+    def test_shadow_accumulator_preserves_existing_cache_when_latest_fetch_is_empty(self) -> None:
+        data_dir = fresh_test_dir("artifacts/test_news/accumulator_empty_append")
+        provider = StubHeadlineProvider(
+            pd.DataFrame(
+                {
+                    "timestamp": ["2026-04-20 09:00:00"],
+                    "ticker": ["AAA"],
+                    "headline": ["AAA raises guidance"],
+                    "source": ["source_one"],
+                    "url": ["https://example.com/aaa"],
+                    "relevance": [1.0],
+                }
+            )
+        )
+        accumulator = ShadowSentimentAccumulator(
+            headline_provider=provider,
+            sentiment_model=FixedSentimentModel(),
+            output_dir=data_dir,
+        )
+        accumulator.run(["AAA"], "2026-04-20", "2026-04-20")
+
+        provider.frame = pd.DataFrame(columns=["timestamp", "ticker", "headline", "source", "url", "relevance"])
+        result = accumulator.run(["EURUSD"], "2026-04-21", "2026-04-21")
+
+        self.assertEqual(result.fetched_headlines, 0)
+        self.assertEqual(result.stored_headlines, 1)
+        raw = pd.read_parquet(result.raw_headlines_path)
+        daily = pd.read_parquet(result.daily_sentiment_path)
+        self.assertEqual(raw["ticker"].tolist(), ["AAA"])
+        self.assertEqual(daily["ticker"].tolist(), ["AAA"])
 
 
 if __name__ == "__main__":

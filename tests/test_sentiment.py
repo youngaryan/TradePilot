@@ -73,6 +73,12 @@ class SentimentModelTests(unittest.TestCase):
 
 
 class SentimentAggregationTests(unittest.TestCase):
+    def test_news_sentiment_aggregator_requires_core_headline_columns(self) -> None:
+        aggregator = NewsSentimentAggregator(model=FixedSentimentModel(rows=[]))
+
+        with self.assertRaisesRegex(ValueError, "Missing required headline columns"):
+            aggregator.score_headlines(pd.DataFrame({"timestamp": ["2024-01-01"], "headline": ["missing ticker"]}))
+
     def test_news_sentiment_aggregator_handles_empty_headlines(self) -> None:
         aggregator = NewsSentimentAggregator(model=FixedSentimentModel(rows=[]))
         headlines = pd.DataFrame(columns=["timestamp", "ticker", "headline", "relevance"])
@@ -84,6 +90,43 @@ class SentimentAggregationTests(unittest.TestCase):
         self.assertIn("confidence", scored.columns)
         self.assertTrue(daily.empty)
         self.assertIn("sentiment_score", daily.columns)
+
+    def test_news_sentiment_aggregator_clips_relevance_and_builds_weights(self) -> None:
+        model = FixedSentimentModel(
+            rows=[
+                {
+                    "label": "positive",
+                    "score": 0.5,
+                    "confidence": 0.8,
+                    "positive_prob": 0.7,
+                    "negative_prob": 0.1,
+                    "neutral_prob": 0.2,
+                },
+                {
+                    "label": "negative",
+                    "score": -0.5,
+                    "confidence": 0.8,
+                    "positive_prob": 0.1,
+                    "negative_prob": 0.7,
+                    "neutral_prob": 0.2,
+                },
+            ]
+        )
+        headlines = pd.DataFrame(
+            {
+                "timestamp": ["2024-01-02 09:00:00", "2024-01-02 12:00:00"],
+                "ticker": ["AAA", "AAA"],
+                "headline": ["high relevance", "negative relevance"],
+                "relevance": [2.0, -1.0],
+            }
+        )
+
+        scored = NewsSentimentAggregator(model=model).score_headlines(headlines)
+
+        self.assertEqual(scored["relevance"].tolist(), [1.0, 0.0])
+        self.assertAlmostEqual(float(scored.loc[0, "weight"]), 0.8, places=6)
+        self.assertAlmostEqual(float(scored.loc[1, "weight"]), 0.0, places=6)
+        self.assertEqual(scored["date"].dt.strftime("%Y-%m-%d").tolist(), ["2024-01-02", "2024-01-02"])
 
     def test_news_sentiment_aggregator_builds_weighted_daily_scores(self) -> None:
         model = FixedSentimentModel(
@@ -170,6 +213,41 @@ class SentimentAggregationTests(unittest.TestCase):
         self.assertIn("sentiment_score", adjusted.frame.columns)
         self.assertGreater(float(adjusted.frame["position"].iloc[-1]), 1.0)
         self.assertGreaterEqual(float(adjusted.frame["cost_estimate"].iloc[-1]), 0.001)
+
+    def test_sentiment_overlay_penalizes_disagreement_and_tracks_costs(self) -> None:
+        index = pd.date_range("2024-01-01", periods=2, freq="D")
+        base_frame = pd.DataFrame(
+            {
+                "signal": [1.0, 1.0],
+                "forecast": [0.4, 0.4],
+                "position": [1.0, 1.0],
+                "cost_estimate": [0.001, 0.001],
+                "unit_return": [0.0, 0.01],
+                "gross_return": [0.0, 0.01],
+            },
+            index=index,
+        )
+        output = StrategyOutput(name="pair", frame=base_frame, diagnostics={})
+        overlay = pd.DataFrame(
+            {
+                "relative_sentiment": [-0.8, -0.8],
+                "relative_confidence": [0.9, 0.9],
+                "article_coverage": [1.0, 1.0],
+                "sentiment_strength": [-0.8, -0.8],
+            },
+            index=index,
+        )
+        adjusted = apply_sentiment_overlay(
+            output,
+            overlay,
+            SentimentConfig(forecast_weight=0.25, disagreement_penalty=1.0, max_position_multiplier=1.5, overlay_cost_bps=2.0),
+        )
+
+        self.assertLess(float(adjusted.frame["position"].iloc[-1]), 1.0)
+        self.assertLess(float(adjusted.frame["forecast"].iloc[-1]), 0.4)
+        self.assertGreater(float(adjusted.frame["cost_estimate"].iloc[-1]), 0.001)
+        self.assertGreater(float(adjusted.frame["sentiment_overlay_turnover"].iloc[-1]), 0.0)
+        self.assertGreater(float(adjusted.diagnostics["sentiment_overlay"]["mean_strength"]), 0.0)
 
     def test_rank_adjustment_uses_sentiment_strength(self) -> None:
         ranked_pairs = pd.DataFrame(

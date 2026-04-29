@@ -192,9 +192,10 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(dataset.status_code, 200)
         self.assertEqual(dataset.json()["summary"]["scored_headline_count"], 2)
 
-    def test_sentiment_dataset_returns_rows_beyond_old_preview_window(self) -> None:
+    def test_sentiment_dataset_preview_includes_latest_run_ticker_when_truncated(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings
+        from pairs_trading.backend.services import SENTIMENT_TABLE_ROW_LIMIT
 
         workspace = fresh_test_dir("artifacts/test_backend_sentiment_preview_window")
         output_dir = workspace / "sentiment_shadow"
@@ -202,22 +203,22 @@ class BackendAppTests(unittest.TestCase):
 
         newer_rows = pd.DataFrame(
             {
-                "timestamp": pd.date_range("2026-04-29T12:00:00", periods=90, freq="-1min"),
-                "ticker": ["AAA"] * 90,
-                "headline": [f"AAA market update {index}" for index in range(90)],
-                "source": ["unit_feed"] * 90,
-                "url": [f"https://example.com/aaa/{index}" for index in range(90)],
-                "relevance": [1.0] * 90,
+                "timestamp": pd.date_range("2026-04-29T12:00:00", periods=SENTIMENT_TABLE_ROW_LIMIT + 20, freq="-1min"),
+                "ticker": ["AAA"] * (SENTIMENT_TABLE_ROW_LIMIT + 20),
+                "headline": [f"AAA market update {index}" for index in range(SENTIMENT_TABLE_ROW_LIMIT + 20)],
+                "source": ["unit_feed"] * (SENTIMENT_TABLE_ROW_LIMIT + 20),
+                "url": [f"https://example.com/aaa/{index}" for index in range(SENTIMENT_TABLE_ROW_LIMIT + 20)],
+                "relevance": [1.0] * (SENTIMENT_TABLE_ROW_LIMIT + 20),
             }
         )
         older_rows = pd.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2026-04-22T20:10:00", "2026-04-16T14:30:00"]),
-                "ticker": ["COKE", "COKE"],
-                "headline": ["COKE announces earnings release date", "COKE volume trend improves"],
-                "source": ["feeds.finance.yahoo.com", "alphavantage"],
-                "url": ["https://example.com/coke/1", "https://example.com/coke/2"],
-                "relevance": [1.0, 0.8],
+                "timestamp": pd.to_datetime(["2026-04-22T20:10:00", "2026-04-16T14:30:00", "2026-04-15T10:00:00"]),
+                "ticker": ["COKE", "COKE", "COKE"],
+                "headline": ["COKE announces earnings release date", "COKE volume trend improves", "COKE dividend coverage improves"],
+                "source": ["feeds.finance.yahoo.com", "alphavantage", "benzinga"],
+                "url": ["https://example.com/coke/1", "https://example.com/coke/2", "https://example.com/coke/3"],
+                "relevance": [1.0, 0.8, 0.7],
             }
         )
         raw = pd.concat([newer_rows, older_rows], ignore_index=True)
@@ -239,8 +240,8 @@ class BackendAppTests(unittest.TestCase):
                 {
                     "tickers": ["COKE"],
                     "providers": ["rss", "alphavantage"],
-                    "fetched_headlines": 2,
-                    "stored_headlines": 92,
+                    "fetched_headlines": 3,
+                    "stored_headlines": SENTIMENT_TABLE_ROW_LIMIT + 23,
                     "daily_rows": 2,
                 }
             ),
@@ -264,11 +265,80 @@ class BackendAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["summary"]["headline_count"], 92)
-        self.assertEqual(payload["summary"]["returned_headline_count"], 92)
-        self.assertEqual(payload["summary"]["returned_scored_headline_count"], 92)
+        self.assertEqual(payload["summary"]["headline_count"], SENTIMENT_TABLE_ROW_LIMIT + 23)
+        self.assertEqual(payload["summary"]["returned_headline_count"], SENTIMENT_TABLE_ROW_LIMIT + 3)
+        self.assertEqual(payload["summary"]["returned_scored_headline_count"], SENTIMENT_TABLE_ROW_LIMIT + 3)
+        self.assertTrue(payload["summary"]["headline_rows_truncated"])
+        self.assertTrue(payload["summary"]["scored_headline_rows_truncated"])
         self.assertIn("COKE", {row["ticker"] for row in payload["headlines"]})
         self.assertIn("COKE", {row["ticker"] for row in payload["scored_headlines"]})
+        self.assertEqual(sum(row["ticker"] == "COKE" for row in payload["headlines"]), 3)
+
+    def test_sentiment_dataset_empty_directory_returns_stable_empty_payload(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_sentiment_empty_dataset")
+        output_dir = workspace / "sentiment_shadow"
+        app = create_app(
+            BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                sentiment_cache_dir=workspace / "sentiment_cache",
+            )
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/sentiment/dataset", params={"output_dir": str(output_dir)})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["headline_count"], 0)
+        self.assertEqual(payload["summary"]["returned_headline_count"], 0)
+        self.assertEqual(payload["summary"]["daily_rows"], 0)
+        self.assertEqual(payload["headlines"], [])
+        self.assertEqual(payload["scored_headlines"], [])
+        self.assertTrue(any("No headlines are stored" in warning for warning in payload["warnings"]))
+
+    def test_sentiment_accumulate_rejects_empty_symbol_list(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_sentiment_no_symbols")
+        app = create_app(
+            BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                sentiment_cache_dir=workspace / "sentiment_cache",
+            )
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/sentiment/accumulate",
+            json={
+                "symbols": [],
+                "start": "2026-04-15",
+                "end": "2026-04-29",
+                "providers": ["rss"],
+                "rss_feed_urls": [],
+                "news_files": [],
+                "output_dir": str(workspace / "sentiment_shadow"),
+                "use_finbert": False,
+                "local_finbert_only": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Choose at least one symbol", response.json()["detail"])
 
     def test_sentiment_routes_explain_empty_rss_date_windows(self) -> None:
         from pairs_trading.backend.app import create_app

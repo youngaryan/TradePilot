@@ -679,7 +679,7 @@ class AlphaVantageNewsProvider(RemoteHeadlineProvider):
                 )
                 matched = True
 
-            if not matched and len(requested) == 1:
+            if not matched and len(request.tickers) == 1:
                 ticker = next(iter(request.tickers))
                 rows.append(
                     {
