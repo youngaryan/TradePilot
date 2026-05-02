@@ -129,6 +129,144 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(paper_jobs.status_code, 200)
         self.assertEqual(metadata.status_code, 200)
         self.assertEqual(metadata.json()["counts"]["jobs"], 0)
+        self.assertGreaterEqual(metadata.json()["counts"]["organizations"], 1)
+
+    def test_saas_routes_auth_workspace_billing_and_details(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+        from pairs_trading.platform import SQLiteMetadataStore
+
+        workspace = fresh_test_dir("artifacts/test_backend_saas")
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+            app_base_url="http://127.0.0.1:5173",
+        )
+        app = create_app(settings)
+        client = TestClient(app)
+
+        login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+        self.assertEqual(login.status_code, 200)
+        token = login.json()["access_token"]
+        org_id = login.json()["active_organization_id"]
+        headers = {"Authorization": f"Bearer {token}", "X-Organization-Id": org_id}
+
+        store = SQLiteMetadataStore(settings.metadata_db_path)
+        store.upsert_experiment(
+            organization_id=org_id,
+            payload={
+                "id": "exp-api-1",
+                "name": "API readiness experiment",
+                "pipeline": "etf_trend",
+                "status": "completed",
+                "summary": {"sharpe": 1.2},
+                "validation": {"dsr": 0.75, "pbo": 0.2},
+                "lineage": {"symbols": ["SPY", "QQQ"]},
+                "readiness": {"score": 83, "checks": [{"name": "DSR", "passed": True, "target": ">= 0.60"}]},
+                "trades": [],
+                "sentiment": {"daily_sentiment_file": "daily.parquet"},
+            },
+        )
+        store.upsert_paper_agent(
+            organization_id=org_id,
+            payload={
+                "id": "agent-api-1",
+                "name": "ETF paper",
+                "pipeline": "etf_trend",
+                "status": "running",
+                "fake_cash": 100000,
+                "config": {"symbols": ["SPY"]},
+                "latest_payload": {"equity": 100500, "target_weights": {"SPY": 1.0}},
+                "warnings": [],
+            },
+        )
+
+        me = client.get("/api/auth/me", headers=headers)
+        workspace_response = client.get("/api/workspaces", headers=headers)
+        project = client.post("/api/workspaces/projects", headers=headers, json={"name": "New SaaS Project"})
+        api_key = client.post(
+            "/api/workspaces/api-keys",
+            headers=headers,
+            json={"name": "NewsAPI", "provider": "newsapi", "secret_ref": "NEWSAPI_API_KEY"},
+        )
+        checkout = client.post("/api/billing/checkout", headers=headers, json={"plan": "pro"})
+        experiments = client.get("/api/workspaces/experiments", headers=headers)
+        experiment_detail = client.get("/api/workspaces/experiments/exp-api-1", headers=headers)
+        agents = client.get("/api/workspaces/paper-agents", headers=headers)
+        agent_detail = client.get("/api/workspaces/paper-agents/agent-api-1", headers=headers)
+
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json()["user"]["email"], "demo@quantops.local")
+        self.assertEqual(workspace_response.status_code, 200)
+        self.assertGreaterEqual(len(workspace_response.json()["projects"]), 1)
+        self.assertEqual(project.status_code, 201)
+        self.assertEqual(api_key.status_code, 201)
+        self.assertEqual(api_key.json()["secret_ref"], "NEWSAPI_API_KEY")
+        self.assertEqual(checkout.status_code, 200)
+        self.assertEqual(checkout.json()["mode"], "demo")
+        self.assertEqual(experiments.status_code, 200)
+        self.assertEqual(experiment_detail.status_code, 200)
+        self.assertEqual(experiment_detail.json()["readiness"]["score"], 83)
+        self.assertEqual(agents.status_code, 200)
+        self.assertEqual(agent_detail.status_code, 200)
+        self.assertEqual(agent_detail.json()["latest_payload"]["equity"], 100500)
+
+    def test_observability_routes_capture_telemetry_and_refresh_status(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_observability")
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+            refresh_interval_hours=24,
+            refresh_max_attempts=2,
+        )
+        app = create_app(settings)
+        client = TestClient(app)
+
+        login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+        token = login.json()["access_token"]
+        org_id = login.json()["active_organization_id"]
+        headers = {"Authorization": f"Bearer {token}", "X-Organization-Id": org_id}
+
+        denied = client.post(
+            "/api/telemetry/events",
+            headers=headers,
+            json={"name": "view_opened", "category": "product", "properties": {"email": "user@example.com"}, "consent": "denied"},
+        )
+        captured = client.post(
+            "/api/telemetry/events",
+            headers=headers,
+            json={"name": "backtest_started", "category": "product", "properties": {"pipeline": "etf_trend", "api_key": "secret"}, "consent": "granted"},
+        )
+        events = client.get("/api/telemetry/events", headers=headers)
+        refresh = client.post("/api/refresh/run", headers=headers, json={"force": True})
+        refresh_duplicate = client.post("/api/refresh/run", headers=headers, json={"force": True})
+        status = client.get("/api/refresh/status", headers=headers)
+
+        self.assertEqual(denied.status_code, 200)
+        self.assertFalse(denied.json()["stored"])
+        self.assertEqual(captured.status_code, 200)
+        self.assertTrue(captured.json()["stored"])
+        self.assertEqual(captured.json()["event"]["properties"]["api_key"], "[redacted]")
+        self.assertEqual(events.status_code, 200)
+        self.assertGreaterEqual(len(events.json()), 1)
+        self.assertEqual(refresh.status_code, 202)
+        self.assertIn(refresh.json()["status"], {"succeeded", "queued", "running"})
+        self.assertEqual(refresh_duplicate.status_code, 202)
+        self.assertTrue(refresh_duplicate.json().get("deduplicated"))
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["interval_hours"], 24)
+        self.assertGreaterEqual(len(status.json()["recent_runs"]), 1)
 
     def test_sentiment_routes_accumulate_local_news_dataset(self) -> None:
         from pairs_trading.backend.app import create_app

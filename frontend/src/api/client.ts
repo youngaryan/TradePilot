@@ -2,18 +2,41 @@ import type {
   BacktestJob,
   BacktestRunRequest,
   BacktestTemplate,
+  AuthResponse,
+  ApiKeyCreateRequest,
+  BillingCheckoutRequest,
+  BillingResponse,
+  ExperimentRecord,
   HealthResponse,
   PaperDashboardPayload,
   PaperRunRequest,
   PaperRunJob,
+  PaperAgentRecord,
+  ProjectCreateRequest,
+  RefreshRunRecord,
+  RefreshStatusPayload,
   SentimentAccumulationRequest,
   SentimentDatasetPayload,
   PaperStrategy,
   StrategyCatalogItem,
-  SystemMetadata
+  SystemMetadata,
+  TelemetryEventRecord,
+  TelemetryEventRequest,
+  WorkspacePayload
 } from "./types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+let authToken: string | null = null;
+let activeOrganizationId: string | null = null;
+
+export function setApiAuth(token: string | null, organizationId?: string | null) {
+  authToken = token;
+  if (organizationId !== undefined) activeOrganizationId = organizationId;
+}
+
+export function setActiveOrganizationId(organizationId: string | null) {
+  activeOrganizationId = organizationId;
+}
 
 function apiPath(path: string) {
   return `${API_BASE_URL}${path}`;
@@ -45,9 +68,14 @@ async function responseErrorMessage(response: Response) {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json"
+  };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  if (activeOrganizationId) headers["X-Organization-Id"] = activeOrganizationId;
   const response = await fetch(apiPath(path), {
     headers: {
-      "Content-Type": "application/json",
+      ...headers,
       ...init?.headers
     },
     ...init
@@ -62,6 +90,91 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getHealth() {
   return requestJson<HealthResponse>("/api/health");
+}
+
+export function login(email: string, password: string) {
+  return requestJson<AuthResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password })
+  });
+}
+
+export function getCurrentUser() {
+  return requestJson<Omit<AuthResponse, "access_token" | "token_type">>("/api/auth/me");
+}
+
+export function logout() {
+  return requestJson<{ status: string }>("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+}
+
+export function getWorkspace() {
+  return requestJson<WorkspacePayload>("/api/workspaces");
+}
+
+export function createProject(request: ProjectCreateRequest) {
+  return requestJson<WorkspacePayload["projects"][number]>("/api/workspaces/projects", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function createApiKeyMetadata(request: ApiKeyCreateRequest) {
+  return requestJson<WorkspacePayload["api_keys"][number]>("/api/workspaces/api-keys", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function listWorkspaceExperiments() {
+  return requestJson<ExperimentRecord[]>("/api/workspaces/experiments");
+}
+
+export function getWorkspaceExperiment(experimentId: string) {
+  return requestJson<ExperimentRecord>(`/api/workspaces/experiments/${encodeURIComponent(experimentId)}`);
+}
+
+export function listWorkspacePaperAgents() {
+  return requestJson<PaperAgentRecord[]>("/api/workspaces/paper-agents");
+}
+
+export function getWorkspacePaperAgent(agentId: string) {
+  return requestJson<PaperAgentRecord>(`/api/workspaces/paper-agents/${encodeURIComponent(agentId)}`);
+}
+
+export function startBillingCheckout(request: BillingCheckoutRequest) {
+  return requestJson<BillingResponse>("/api/billing/checkout", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function openBillingPortal(returnUrl?: string) {
+  return requestJson<BillingResponse>("/api/billing/portal", {
+    method: "POST",
+    body: JSON.stringify({ return_url: returnUrl ?? null })
+  });
+}
+
+export function trackTelemetryEvent(request: TelemetryEventRequest) {
+  return requestJson<{ stored: boolean; reason?: string; event?: TelemetryEventRecord }>("/api/telemetry/events", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function listTelemetryEvents(limit = 100) {
+  return requestJson<TelemetryEventRecord[]>(`/api/telemetry/events?limit=${encodeURIComponent(limit)}`);
+}
+
+export function getRefreshStatus() {
+  return requestJson<RefreshStatusPayload>("/api/refresh/status");
+}
+
+export function runDailyRefresh(force = false) {
+  return requestJson<RefreshRunRecord>("/api/refresh/run", {
+    method: "POST",
+    body: JSON.stringify({ force })
+  });
 }
 
 export function getSystemMetadata() {

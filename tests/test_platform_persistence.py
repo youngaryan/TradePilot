@@ -45,6 +45,129 @@ class PlatformPersistenceTests(unittest.TestCase):
         self.assertEqual(reopened.get_deployment_config(config_id="deployment-1")["config"]["strategies"][0]["name"], "demo")
         self.assertEqual(reopened.list_experiment_runs(kind="backtest")[0]["summary"]["sharpe"], 1.2)
         self.assertEqual(reopened.counts().jobs, 1)
+        self.assertGreaterEqual(reopened.counts().users, 1)
+
+    def test_sqlite_metadata_store_persists_saas_workspace_records(self) -> None:
+        workspace = fresh_test_dir("artifacts/test_platform_saas_records")
+        store = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+        context = store.ensure_demo_workspace()
+        org_id = context["organization_id"]
+
+        project = store.create_project(organization_id=org_id, name="Production readiness lab")
+        dataset = store.upsert_dataset(
+            organization_id=org_id,
+            payload={
+                "project_id": project["id"],
+                "name": "Daily sentiment",
+                "kind": "sentiment_daily",
+                "path": "data/sentiment_cache/shadow/daily_sentiment.parquet",
+                "provider": {"source": "rss"},
+                "schema": {"columns": ["date", "ticker", "sentiment_score"]},
+                "row_count": 42,
+            },
+        )
+        api_key = store.create_api_key_metadata(
+            organization_id=org_id,
+            name="NewsAPI",
+            provider="newsapi",
+            secret="sk_test_123456789",
+        )
+        experiment = store.upsert_experiment(
+            organization_id=org_id,
+            payload={
+                "id": "exp-1",
+                "project_id": project["id"],
+                "job_id": "job-1",
+                "name": "ETF trend v1",
+                "pipeline": "etf_trend",
+                "status": "completed",
+                "summary": {"sharpe": 1.1},
+                "validation": {"dsr": 0.7},
+                "lineage": {"symbols": ["SPY"]},
+                "readiness": {"score": 80},
+                "trades": [{"symbol": "SPY"}],
+                "sentiment": {"daily_sentiment_file": "daily.parquet"},
+            },
+        )
+        agent = store.upsert_paper_agent(
+            organization_id=org_id,
+            payload={
+                "id": "agent-1",
+                "project_id": project["id"],
+                "name": "ETF trend paper",
+                "pipeline": "etf_trend",
+                "status": "running",
+                "fake_cash": 100000,
+                "config": {"symbols": ["SPY"]},
+                "latest_payload": {"equity": 101000},
+                "warnings": ["review turnover"],
+            },
+        )
+
+        reopened = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+        self.assertEqual(reopened.list_projects(organization_id=org_id)[-1]["name"], "Production readiness lab")
+        self.assertEqual(dataset["row_count"], 42)
+        self.assertIn("...", api_key["masked_value"])
+        self.assertEqual(reopened.get_experiment(organization_id=org_id, experiment_id="exp-1")["readiness"]["score"], 80)
+        self.assertEqual(reopened.get_paper_agent(organization_id=org_id, agent_id="agent-1")["warnings"], ["review turnover"])
+        self.assertEqual(experiment["pipeline"], "etf_trend")
+        self.assertEqual(agent["latest_payload"]["equity"], 101000)
+        self.assertGreaterEqual(reopened.counts().subscriptions, 1)
+
+    def test_sqlite_metadata_store_persists_telemetry_and_refresh_state(self) -> None:
+        workspace = fresh_test_dir("artifacts/test_platform_observability")
+        store = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+        context = store.ensure_demo_workspace()
+        user_id = context["user_id"]
+        org_id = context["organization_id"]
+
+        event = store.record_telemetry_event(
+            event_id="evt-1",
+            name="backtest_started",
+            category="product",
+            properties={"pipeline": "etf_trend"},
+            context={"view": "backtests"},
+            consent="granted",
+            user_id=user_id,
+            organization_id=org_id,
+            occurred_at_utc="2026-05-02T00:00:00Z",
+        )
+        run, created = store.create_refresh_run(
+            run_id="refresh-1",
+            idempotency_key="daily:user:2026-05-02",
+            user_id=user_id,
+            organization_id=org_id,
+            max_attempts=3,
+            locked_until_utc="2026-05-02T00:30:00Z",
+        )
+        duplicate, duplicate_created = store.create_refresh_run(
+            run_id="refresh-duplicate",
+            idempotency_key="daily:user:2026-05-02",
+            user_id=user_id,
+            organization_id=org_id,
+            max_attempts=3,
+            locked_until_utc="2026-05-02T00:30:00Z",
+        )
+        store.update_refresh_run(run_id="refresh-1", status="succeeded", attempt=1, summary={"dataset_count": 2})
+        store.upsert_refresh_status(
+            user_id=user_id,
+            organization_id=org_id,
+            status="succeeded",
+            latest_run_id="refresh-1",
+            last_success_at_utc="2026-05-02T00:01:00Z",
+            last_attempt_at_utc="2026-05-02T00:01:00Z",
+            next_due_at_utc="2026-05-03T00:01:00Z",
+        )
+
+        self.assertEqual(event["properties"]["pipeline"], "etf_trend")
+        self.assertTrue(created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate["id"], run["id"])
+        self.assertEqual(store.get_refresh_status(user_id=user_id)["status"], "succeeded")
+        self.assertEqual(store.list_refresh_runs(user_id=user_id)[0]["summary"]["dataset_count"], 2)
+        self.assertGreaterEqual(store.counts().telemetry_events, 1)
+        self.assertGreaterEqual(store.counts().refresh_runs, 1)
+        self.assertGreaterEqual(store.counts().refresh_statuses, 1)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from ..data.sentiment_accumulator import ShadowSentimentAccumulator
 from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
+from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
 
 
@@ -515,12 +516,39 @@ class BacktestJobRunner:
         try:
             result = BacktestService(self.settings).run_backtest(request, progress=progress)
             summary = result.get("summary", {})
+            validation = result.get("validation", {})
             experiment_id = str(summary.get("experiment_id") or job_id)
             self.metadata_store.save_experiment_run(
                 experiment_id=experiment_id,
                 kind="backtest",
                 summary=json_ready(summary),
                 artifact_dir=result.get("artifact_dir"),
+            )
+            demo_context = self.metadata_store.ensure_demo_workspace()
+            organization_id = str(demo_context["organization_id"])
+            self.metadata_store.upsert_experiment(
+                organization_id=organization_id,
+                payload={
+                    "id": experiment_id,
+                    "job_id": job_id,
+                    "name": str(summary.get("strategy") or request.experiment_name or experiment_id),
+                    "pipeline": request.pipeline,
+                    "status": "completed",
+                    "artifact_dir": result.get("artifact_dir"),
+                    "summary": json_ready(summary),
+                    "validation": json_ready(validation),
+                    "lineage": build_lineage(
+                        request=json_ready(request.model_dump(mode="json")),
+                        artifact_dir=result.get("artifact_dir"),
+                        settings=self.settings,
+                    ),
+                    "readiness": build_readiness(summary=json_ready(summary), validation=json_ready(validation)),
+                    "trades": [],
+                    "sentiment": sentiment_snapshot(
+                        request=json_ready(request.model_dump(mode="json")),
+                        artifact_dir=Path(str(result.get("artifact_dir") or "")),
+                    ),
+                },
             )
         except Exception as exc:  # pragma: no cover - exercised through API tests
             self._set_status(
@@ -954,10 +982,16 @@ class PaperService:
 
     def build_dashboard_payload(self, batch_summary_path: str | Path | None = None) -> dict[str, Any]:
         summary_path = Path(batch_summary_path) if batch_summary_path else self.latest_batch_summary_path()
-        return build_paper_dashboard_payload(
+        payload = build_paper_dashboard_payload(
             state_dir=self.settings.paper_state_dir,
             batch_summary_path=summary_path,
         )
+        demo_context = self.metadata_store.ensure_demo_workspace()
+        SaaSService(self.settings).sync_paper_agents_from_dashboard(
+            organization_id=str(demo_context["organization_id"]),
+            payload=payload,
+        )
+        return payload
 
     def list_strategies(self, batch_summary_path: str | Path | None = None) -> list[dict[str, Any]]:
         return list(self.build_dashboard_payload(batch_summary_path=batch_summary_path).get("strategies", []))
@@ -1003,6 +1037,11 @@ class PaperService:
             latest_payload = self.build_dashboard_payload(batch_summary_path=summary.get("artifact_dir") and Path(summary["artifact_dir"]) / "paper_batch_summary.json")
             completed_dates.append(asof_date)
         latest_payload = latest_payload or self.build_dashboard_payload()
+        demo_context = self.metadata_store.ensure_demo_workspace()
+        SaaSService(self.settings).sync_paper_agents_from_dashboard(
+            organization_id=str(demo_context["organization_id"]),
+            payload=latest_payload,
+        )
         latest_payload["run_sequence"] = {
             "dates": completed_dates,
             "count": len(completed_dates),
@@ -1014,6 +1053,7 @@ class PaperService:
 class SentimentService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
 
     @property
     def default_output_dir(self) -> Path:
@@ -1171,6 +1211,24 @@ class SentimentService:
         provider_errors = list(getattr(provider, "last_errors", []))
         warnings = self._accumulation_warnings(request, result, provider_errors=provider_errors)
         self._write_accumulation_metadata(result, request, warnings)
+        demo_context = self.metadata_store.ensure_demo_workspace()
+        daily_path = Path(result.output_dir) / "daily_sentiment.parquet"
+        self.metadata_store.upsert_dataset(
+            organization_id=str(demo_context["organization_id"]),
+            payload={
+                "name": "Shadow Daily Sentiment",
+                "kind": "sentiment_daily",
+                "path": str(daily_path),
+                "provider": {
+                    "providers": list(request.providers),
+                    "symbols": list(request.symbols),
+                    "start": request.start,
+                    "end": request.end,
+                },
+                "schema": {"columns": list(self._read_frame(daily_path).columns) if daily_path.exists() else []},
+                "row_count": int(result.daily_rows),
+            },
+        )
         return self.dataset(output_dir=result.output_dir)
 
     def dataset(self, output_dir: str | Path | None = None) -> dict[str, Any]:

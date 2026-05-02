@@ -27,6 +27,18 @@ class BackendSettings:
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     )
+    app_base_url: str = "http://127.0.0.1:5173"
+    stripe_secret_key: str | None = None
+    stripe_pro_price_id: str | None = None
+    stripe_success_url: str | None = None
+    stripe_cancel_url: str | None = None
+    telemetry_enabled: bool = True
+    telemetry_sample_rate: float = 1.0
+    refresh_interval_hours: int = 24
+    refresh_max_attempts: int = 3
+    refresh_lock_minutes: int = 30
+    refresh_scheduler_enabled: bool = False
+    refresh_scheduler_poll_seconds: int = 3600
 
     @classmethod
     def from_env(cls) -> "BackendSettings":
@@ -45,4 +57,16 @@ class BackendSettings:
                 os.getenv("PAIRS_TRADING_CORS_ORIGINS"),
                 ("http://localhost:5173", "http://127.0.0.1:5173"),
             ),
+            app_base_url=os.getenv("PAIRS_TRADING_APP_BASE_URL", "http://127.0.0.1:5173"),
+            stripe_secret_key=os.getenv("STRIPE_SECRET_KEY"),
+            stripe_pro_price_id=os.getenv("STRIPE_PRO_PRICE_ID"),
+            stripe_success_url=os.getenv("STRIPE_SUCCESS_URL"),
+            stripe_cancel_url=os.getenv("STRIPE_CANCEL_URL"),
+            telemetry_enabled=os.getenv("PAIRS_TRADING_TELEMETRY_ENABLED", "true").lower() not in {"0", "false", "no"},
+            telemetry_sample_rate=float(os.getenv("PAIRS_TRADING_TELEMETRY_SAMPLE_RATE", "1.0")),
+            refresh_interval_hours=int(os.getenv("PAIRS_TRADING_REFRESH_INTERVAL_HOURS", "24")),
+            refresh_max_attempts=int(os.getenv("PAIRS_TRADING_REFRESH_MAX_ATTEMPTS", "3")),
+            refresh_lock_minutes=int(os.getenv("PAIRS_TRADING_REFRESH_LOCK_MINUTES", "30")),
+            refresh_scheduler_enabled=os.getenv("PAIRS_TRADING_REFRESH_SCHEDULER_ENABLED", "false").lower() in {"1", "true", "yes"},
+            refresh_scheduler_poll_seconds=int(os.getenv("PAIRS_TRADING_REFRESH_SCHEDULER_POLL_SECONDS", "3600")),
         )

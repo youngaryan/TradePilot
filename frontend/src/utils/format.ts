@@ -53,7 +53,7 @@ export function toneFromNumber(value: unknown): "good" | "bad" | "neutral" {
 }
 
 export function statusTone(status: string | null | undefined): "good" | "bad" | "warn" | "neutral" {
-  if (status === "completed" || status === "ok") return "good";
+  if (status === "completed" || status === "ok" || status === "succeeded" || status === "active" || status === "running_ok") return "good";
   if (status === "failed" || status === "interrupted") return "bad";
   if (status === "queued" || status === "running") return "warn";
   return "neutral";

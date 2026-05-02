@@ -1,0 +1,570 @@
+import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, CheckCircle2, CreditCard, DatabaseZap, KeyRound, Loader2, Rocket, ShieldCheck, Workflow } from "lucide-react";
+
+import {
+  createApiKeyMetadata,
+  createProject,
+  getRefreshStatus,
+  getWorkspaceExperiment,
+  getWorkspacePaperAgent,
+  listTelemetryEvents,
+  openBillingPortal,
+  runDailyRefresh,
+  startBillingCheckout
+} from "../api/client";
+import type {
+  ApiKeyCreateRequest,
+  AuthResponse,
+  ExperimentRecord,
+  Organization,
+  PaperAgentRecord,
+  RefreshStatusPayload,
+  TelemetryEventRecord,
+  WorkspacePayload
+} from "../api/types";
+import { Badge } from "../components/Badge";
+import { BacktestEquityChart, StrategyConcentrationBars } from "../components/Charts";
+import { Explainer, MetricCard, Panel, SectionHeader } from "../components/Cards";
+import { DataTable } from "../components/Table";
+import { formatCurrency, formatNumber, formatPercent, pipelineLabel, statusTone, toNumber } from "../utils/format";
+
+type WorkspaceSection = "onboarding" | "experiments" | "agents" | "data" | "operations" | "billing";
+
+function safeString(value: unknown, fallback = "n/a") {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function metric(summary: Record<string, unknown>, key: string) {
+  return toNumber(summary[key]);
+}
+
+function prettyJson(value: unknown) {
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function readinessTone(score?: number) {
+  if (score == null) return "neutral";
+  if (score >= 80) return "good";
+  if (score >= 50) return "warn";
+  return "bad";
+}
+
+function equityPoints(experiment: ExperimentRecord | null) {
+  return (experiment?.equity_curve_points ?? [])
+    .map((point) => ({
+      timestamp: safeString(point.timestamp),
+      equity: toNumber(point.equity) ?? 1,
+      drawdown: toNumber(point.drawdown) ?? 0,
+      net_return: toNumber(point.net_return) ?? 0
+    }))
+    .filter((point) => point.timestamp !== "n/a");
+}
+
+export function SaaSWorkspace({
+  auth,
+  activeOrganizationId,
+  workspace,
+  organizations,
+  onSwitchOrganization,
+  onRefresh,
+  onNavigate
+}: {
+  auth: AuthResponse;
+  activeOrganizationId: string | null;
+  workspace: WorkspacePayload | null;
+  organizations: Organization[];
+  onSwitchOrganization: (organizationId: string) => void;
+  onRefresh: () => Promise<void>;
+  onNavigate: (view: "live" | "sentiment" | "backtests") => void;
+}) {
+  const [section, setSection] = useState<WorkspaceSection>("onboarding");
+  const [activeExperiment, setActiveExperiment] = useState<ExperimentRecord | null>(workspace?.experiments[0] ?? null);
+  const [activeAgent, setActiveAgent] = useState<PaperAgentRecord | null>(workspace?.paper_agents[0] ?? null);
+  const [projectName, setProjectName] = useState("ETF validation lab");
+  const [apiKeyForm, setApiKeyForm] = useState<ApiKeyCreateRequest>({ name: "NewsAPI research key", provider: "newsapi", secret_ref: "NEWSAPI_API_KEY" });
+  const [isBusy, setIsBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshStatus, setRefreshStatus] = useState<RefreshStatusPayload | null>(null);
+  const [telemetryEvents, setTelemetryEvents] = useState<TelemetryEventRecord[]>([]);
+
+  useEffect(() => {
+    setActiveExperiment(workspace?.experiments[0] ?? null);
+    setActiveAgent(workspace?.paper_agents[0] ?? null);
+  }, [workspace?.organization_id]);
+
+  useEffect(() => {
+    if (!workspace) return;
+    void loadOperations();
+  }, [workspace?.organization_id]);
+
+  const activeOrg = useMemo(
+    () => organizations.find((organization) => organization.id === activeOrganizationId) ?? organizations[0],
+    [activeOrganizationId, organizations]
+  );
+
+  async function refreshWorkspace() {
+    setError(null);
+    await onRefresh();
+    await loadOperations();
+  }
+
+  async function loadOperations() {
+    try {
+      const [nextRefreshStatus, nextEvents] = await Promise.all([getRefreshStatus(), listTelemetryEvents(25)]);
+      setRefreshStatus(nextRefreshStatus);
+      setTelemetryEvents(nextEvents);
+    } catch {
+      setRefreshStatus(null);
+      setTelemetryEvents([]);
+    }
+  }
+
+  async function handleCreateProject() {
+    setIsBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await createProject({ name: projectName, description: "Created from the first-strategy onboarding wizard." });
+      setNotice("Project created. The workspace is ready to store experiments under a durable project boundary.");
+      await refreshWorkspace();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create the project.");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handleCreateApiKey() {
+    setIsBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await createApiKeyMetadata(apiKeyForm);
+      setNotice("API key metadata saved. For production, secrets should move to a real vault such as AWS Secrets Manager or Stripe-managed keys.");
+      await refreshWorkspace();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save API key metadata.");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handleCheckout() {
+    setIsBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await startBillingCheckout({ plan: "pro" });
+      setNotice(response.message ?? `Billing flow ready in ${response.mode} mode.`);
+      const url = response.checkout_url;
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      await refreshWorkspace();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not start checkout.");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handlePortal() {
+    setIsBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await openBillingPortal(window.location.href);
+      setNotice(response.message ?? `Billing portal ready in ${response.mode} mode.`);
+      const url = response.portal_url;
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not open billing portal.");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function handleManualRefresh(force = false) {
+    setIsBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const run = await runDailyRefresh(force);
+      setNotice(
+        run.status === "skipped_not_due"
+          ? "Daily refresh is not due yet. Use Force refresh only when debugging data freshness."
+          : `Refresh ${run.status}. Check Operations for run details and retry history.`
+      );
+      await loadOperations();
+      await onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not run the daily data refresh.");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function selectExperiment(experiment: ExperimentRecord) {
+    setActiveExperiment(experiment);
+    setSection("experiments");
+    try {
+      setActiveExperiment(await getWorkspaceExperiment(experiment.id));
+    } catch {
+      setActiveExperiment(experiment);
+    }
+  }
+
+  async function selectAgent(agent: PaperAgentRecord) {
+    setActiveAgent(agent);
+    setSection("agents");
+    try {
+      setActiveAgent(await getWorkspacePaperAgent(agent.id));
+    } catch {
+      setActiveAgent(agent);
+    }
+  }
+
+  if (!workspace) {
+    return (
+      <Panel title="Workspace loading" subtitle="The SaaS layer is reading organizations, projects, and durable records.">
+        <div className="empty-state chart-empty">No workspace payload has loaded yet.</div>
+      </Panel>
+    );
+  }
+
+  const onboarding = workspace.onboarding;
+  const subscription = workspace.subscription;
+
+  return (
+    <div className="saas-workspace">
+      <SectionHeader eyebrow="SaaS Operating Layer" title="Workspace, billing, experiments, and paper agents">
+        <div className="workspace-switcher">
+          <span>{auth.user.display_name}</span>
+          <select
+            value={activeOrganizationId ?? ""}
+            onChange={(event) => onSwitchOrganization(event.target.value)}
+            aria-label="Active organization"
+          >
+            {organizations.map((organization) => (
+              <option key={organization.id} value={organization.id}>
+                {organization.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </SectionHeader>
+
+      <div className="metric-grid">
+        <MetricCard label="Workspace" value={activeOrg?.name ?? "Unknown"} detail="Multi-tenant organization boundary" tone="good" icon={<ShieldCheck size={18} />} />
+        <MetricCard label="Plan" value={subscription?.plan ?? "free"} detail={subscription?.status ?? "not configured"} tone="neutral" icon={<CreditCard size={18} />} />
+        <MetricCard label="Experiments" value={formatNumber(workspace.experiments.length)} detail="Saved research records" tone="neutral" icon={<Workflow size={18} />} />
+        <MetricCard label="Paper agents" value={formatNumber(workspace.paper_agents.length)} detail="Fake-money deployment records" tone="neutral" icon={<Rocket size={18} />} />
+      </div>
+
+      {notice ? (
+        <section className="alert-card alert-card--good">
+          <CheckCircle2 size={18} />
+          <span>{notice}</span>
+        </section>
+      ) : null}
+      {error ? (
+        <section className="alert-card">
+          <AlertTriangle size={18} />
+          <span>{error}</span>
+        </section>
+      ) : null}
+
+      <div className="section-tabs">
+        {(["onboarding", "experiments", "agents", "data", "operations", "billing"] as WorkspaceSection[]).map((item) => (
+          <button key={item} type="button" className={section === item ? "chip chip--active" : "chip"} onClick={() => setSection(item)}>
+            {item === "onboarding" ? "Launch wizard" : item}
+          </button>
+        ))}
+      </div>
+
+      {section === "onboarding" ? (
+        <div className="grid-two">
+          <Panel title="Launch first strategy wizard" subtitle="A guided path from empty SaaS account to a monitored paper agent.">
+            <div className="wizard-steps">
+              {onboarding.steps.map((step, index) => (
+                <div key={step.id} className={step.complete ? "wizard-step wizard-step--done" : "wizard-step"}>
+                  <strong>{index + 1}</strong>
+                  <span>{step.label}</span>
+                  <Badge label={step.complete ? "done" : "next"} tone={step.complete ? "good" : "warn"} />
+                </div>
+              ))}
+            </div>
+            <div className="form-row">
+              <label>
+                Project name
+                <input value={projectName} onChange={(event) => setProjectName(event.target.value)} />
+              </label>
+              <button type="button" className="primary-button" onClick={() => void handleCreateProject()} disabled={isBusy}>
+                {isBusy ? <Loader2 size={16} className="spin" /> : <CheckCircle2 size={16} />}
+                Create project
+              </button>
+            </div>
+            <div className="button-cluster">
+              <button type="button" className="ghost-button" onClick={() => onNavigate("sentiment")}>Build sentiment data</button>
+              <button type="button" className="ghost-button" onClick={() => onNavigate("backtests")}>Run first backtest</button>
+              <button type="button" className="ghost-button" onClick={() => onNavigate("live")}>Deploy fake-money agent</button>
+            </div>
+          </Panel>
+
+          <Panel title="Why this matters" subtitle="The SaaS version must sell trust, not mystery.">
+            <Explainer
+              icon={<ShieldCheck size={17} />}
+              title="Production-grade workflow"
+              body="Every serious quant SaaS needs durable records: who ran what, with which data, which assumptions, which billing plan, and what happened after deployment."
+              items={[
+                "Experiments store lineage, validation, artifacts, and readiness score.",
+                "Paper agents store live fake-money state, decisions, orders, reconciliation, and warnings.",
+                "Datasets and API-key metadata make external data dependencies visible."
+              ]}
+            />
+          </Panel>
+        </div>
+      ) : null}
+
+      {section === "experiments" ? (
+        <div className="grid-two grid-two--wide-left">
+          <Panel title="Saved experiments" subtitle="Durable backtest records synced from completed jobs and artifacts.">
+            <DataTable
+              empty="Run a backtest to create the first experiment."
+              getKey={(experiment) => experiment.id}
+              columns={[
+                { key: "name", header: "Name", render: (experiment) => <button type="button" className="link-button" onClick={() => void selectExperiment(experiment)}>{experiment.name}</button> },
+                { key: "pipeline", header: "Pipeline", render: (experiment) => pipelineLabel(experiment.pipeline) },
+                { key: "readiness", header: "Readiness", render: (experiment) => <Badge label={`${experiment.readiness.score ?? 0}/100`} tone={readinessTone(experiment.readiness.score)} /> },
+                { key: "sharpe", header: "Sharpe", align: "right", render: (experiment) => formatNumber(metric(experiment.summary, "sharpe")) },
+                { key: "dsr", header: "DSR", align: "right", render: (experiment) => formatNumber(metric(experiment.validation, "dsr") || metric(experiment.summary, "dsr")) }
+              ]}
+              rows={workspace.experiments}
+            />
+          </Panel>
+
+          <Panel title={activeExperiment ? activeExperiment.name : "Experiment detail"} subtitle="Lineage, validation, sentiment, trades, and artifact trail.">
+            {activeExperiment ? (
+              <div className="detail-stack">
+                <div className="metric-grid metric-grid--compact">
+                  <MetricCard label="Readiness" value={`${activeExperiment.readiness.score ?? 0}/100`} detail={activeExperiment.readiness.verdict ?? "unscored"} tone={readinessTone(activeExperiment.readiness.score)} />
+                  <MetricCard label="Sharpe" value={formatNumber(metric(activeExperiment.summary, "sharpe"))} detail="after modeled costs" />
+                  <MetricCard label="PBO" value={formatNumber(metric(activeExperiment.validation, "pbo") ?? metric(activeExperiment.summary, "pbo"))} detail="overfit probability" />
+                  <MetricCard label="Drawdown" value={formatPercent(metric(activeExperiment.summary, "max_drawdown"))} detail="max historical dip" />
+                </div>
+                <BacktestEquityChart points={equityPoints(activeExperiment)} />
+                <DataTable
+                  empty="No readiness checks were attached to this experiment."
+                  getKey={(check) => check.name}
+                  columns={[
+                    { key: "check", header: "Check", render: (check) => check.name },
+                    { key: "target", header: "Target", render: (check) => check.target },
+                    { key: "value", header: "Value", render: (check) => String(check.value ?? "n/a") },
+                    { key: "status", header: "Status", render: (check) => <Badge label={check.passed ? "pass" : "review"} tone={check.passed ? "good" : "warn"} /> }
+                  ]}
+                  rows={activeExperiment.readiness.checks ?? []}
+                />
+                <div className="code-split">
+                  <pre>{prettyJson(activeExperiment.lineage)}</pre>
+                  <pre>{prettyJson(activeExperiment.sentiment)}</pre>
+                </div>
+                <small>{activeExperiment.artifact_dir ? `Artifacts: ${activeExperiment.artifact_dir}` : "No artifact directory attached yet."}</small>
+              </div>
+            ) : (
+              <div className="empty-state chart-empty">Run a backtest to create the first durable experiment record.</div>
+            )}
+          </Panel>
+        </div>
+      ) : null}
+
+      {section === "agents" ? (
+        <div className="grid-two grid-two--wide-left">
+          <Panel title="Paper agents" subtitle="Fake-money deployment records synchronized from the paper dashboard.">
+            <DataTable
+              empty="Run a paper deployment to create the first paper agent."
+              getKey={(agent) => agent.id}
+              columns={[
+                { key: "agent", header: "Agent", render: (agent) => <button type="button" className="link-button" onClick={() => void selectAgent(agent)}>{agent.name}</button> },
+                { key: "pipeline", header: "Pipeline", render: (agent) => pipelineLabel(agent.pipeline) },
+                { key: "status", header: "Status", render: (agent) => <Badge label={agent.status} tone={statusTone(agent.status)} /> },
+                { key: "cash", header: "Cash", align: "right", render: (agent) => formatCurrency(agent.fake_cash) },
+                { key: "warnings", header: "Warnings", align: "right", render: (agent) => formatNumber(agent.warnings.length) }
+              ]}
+              rows={workspace.paper_agents}
+            />
+          </Panel>
+
+          <Panel title={activeAgent ? activeAgent.name : "Paper agent detail"} subtitle="Live fake-money state, orders, decisions, reconciliation, and warnings.">
+            {activeAgent ? (
+              <div className="detail-stack">
+                <div className="metric-grid metric-grid--compact">
+                  <MetricCard label="Equity" value={formatCurrency(toNumber(activeAgent.latest_payload.equity))} detail="fake capital" tone="neutral" />
+                  <MetricCard label="Daily PnL" value={formatCurrency(toNumber(activeAgent.latest_payload.daily_pnl))} detail="latest paper run" tone={toNumber(activeAgent.latest_payload.daily_pnl) && toNumber(activeAgent.latest_payload.daily_pnl)! >= 0 ? "good" : "warn"} />
+                  <MetricCard label="Gross exposure" value={formatPercent(toNumber(activeAgent.latest_payload.gross_exposure_ratio))} detail="risk footprint" />
+                  <MetricCard label="Trades" value={formatNumber(toNumber(activeAgent.latest_payload.trade_count))} detail="latest rebalance" />
+                </div>
+                <StrategyConcentrationBars
+                  strategy={{ target_weights: activeAgent.latest_payload.target_weights ?? {} } as never}
+                />
+                {activeAgent.warnings.length ? (
+                  <div className="warning-list">
+                    {activeAgent.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+                  </div>
+                ) : (
+                  <Badge label="No current warnings" tone="good" />
+                )}
+                <pre>{prettyJson(activeAgent.latest_payload.diagnostics ?? activeAgent.latest_payload)}</pre>
+              </div>
+            ) : (
+              <div className="empty-state chart-empty">Run a paper deployment to create the first paper-agent record.</div>
+            )}
+          </Panel>
+        </div>
+      ) : null}
+
+      {section === "data" ? (
+        <div className="grid-two">
+          <Panel title="Datasets" subtitle="Visible data dependencies for reproducible research.">
+            <DataTable
+              empty="No datasets have been indexed yet. Build sentiment data or run a backtest."
+              getKey={(dataset) => dataset.id}
+              columns={[
+                { key: "name", header: "Name", render: (dataset) => dataset.name },
+                { key: "kind", header: "Kind", render: (dataset) => dataset.kind },
+                { key: "rows", header: "Rows/files", align: "right", render: (dataset) => formatNumber(dataset.row_count) },
+                { key: "path", header: "Path", render: (dataset) => <span className="path-cell">{dataset.path}</span> }
+              ]}
+              rows={workspace.datasets}
+            />
+          </Panel>
+          <Panel title="API key metadata" subtitle="Secrets should live in a vault; this prototype stores masked metadata and references.">
+            <div className="form-grid">
+              <label>
+                Name
+                <input value={apiKeyForm.name} onChange={(event) => setApiKeyForm({ ...apiKeyForm, name: event.target.value })} />
+              </label>
+              <label>
+                Provider
+                <input value={apiKeyForm.provider} onChange={(event) => setApiKeyForm({ ...apiKeyForm, provider: event.target.value })} />
+              </label>
+              <label>
+                Secret reference
+                <input value={apiKeyForm.secret_ref ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret_ref: event.target.value, secret: null })} />
+              </label>
+              <label>
+                Secret value for masking only
+                <input value={apiKeyForm.secret ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret: event.target.value, secret_ref: null })} />
+              </label>
+            </div>
+            <button type="button" className="primary-button" onClick={() => void handleCreateApiKey()} disabled={isBusy}>
+              <KeyRound size={16} />
+              Save API key metadata
+            </button>
+            <DataTable
+              empty="No API key metadata has been saved yet."
+              getKey={(key) => key.id}
+              columns={[
+                { key: "name", header: "Name", render: (key) => key.name },
+                { key: "provider", header: "Provider", render: (key) => key.provider },
+                { key: "masked", header: "Masked", render: (key) => key.masked_value },
+                { key: "status", header: "Status", render: (key) => <Badge label={key.status} tone="good" /> }
+              ]}
+              rows={workspace.api_keys}
+            />
+          </Panel>
+        </div>
+      ) : null}
+
+      {section === "operations" ? (
+        <div className="grid-two grid-two--wide-left">
+          <Panel title="24-hour data refresh" subtitle="Per-user refresh status, idempotency, retries, and recent outcomes.">
+            <div className="metric-grid metric-grid--compact">
+              <MetricCard label="Interval" value={`${refreshStatus?.interval_hours ?? 24}h`} detail="per user" />
+              <MetricCard label="Max retries" value={formatNumber(refreshStatus?.max_attempts ?? 3, 0)} detail="before failed status" />
+              <MetricCard label="Scheduler" value={refreshStatus?.scheduler_enabled ? "Enabled" : "Manual/local"} detail="worker-safe implementation" tone={refreshStatus?.scheduler_enabled ? "good" : "warn"} />
+            </div>
+            <div className="button-cluster">
+              <button type="button" className="primary-button" onClick={() => void handleManualRefresh(false)} disabled={isBusy}>
+                <DatabaseZap size={16} />
+                Run if due
+              </button>
+              <button type="button" className="ghost-button" onClick={() => void handleManualRefresh(true)} disabled={isBusy}>
+                Force refresh
+              </button>
+            </div>
+            <DataTable
+              empty="No refresh status has been recorded yet."
+              getKey={(status) => status.user_id}
+              columns={[
+                { key: "status", header: "Status", render: (status) => <Badge label={status.status} tone={statusTone(status.status)} /> },
+                { key: "last_success", header: "Last success", render: (status) => status.last_success_at_utc ?? "Not yet" },
+                { key: "next_due", header: "Next due", render: (status) => status.next_due_at_utc },
+                { key: "error", header: "Last error", render: (status) => status.last_error ?? "None" }
+              ]}
+              rows={refreshStatus?.statuses ?? []}
+            />
+            <DataTable
+              empty="No refresh runs yet."
+              getKey={(run) => run.id}
+              columns={[
+                { key: "run", header: "Run", render: (run) => <span className="path-cell">{run.id}</span> },
+                { key: "status", header: "Status", render: (run) => <Badge label={run.status} tone={statusTone(run.status)} /> },
+                { key: "attempt", header: "Attempt", align: "right", render: (run) => `${run.attempt}/${run.max_attempts}` },
+                { key: "created", header: "Created", render: (run) => run.created_at_utc }
+              ]}
+              rows={refreshStatus?.recent_runs ?? []}
+            />
+          </Panel>
+
+          <Panel title="Telemetry stream" subtitle="Privacy-aware product and operational events for debugging and analytics.">
+            <Explainer
+              icon={<ShieldCheck size={17} />}
+              title="Privacy guardrail"
+              body="The backend redacts sensitive-looking keys such as email, token, password, secret, and API key before storage. Product telemetry is skipped when analytics consent is off."
+            />
+            <DataTable
+              empty="No telemetry events have been recorded for this workspace yet."
+              getKey={(event) => event.id}
+              columns={[
+                { key: "name", header: "Event", render: (event) => event.name },
+                { key: "category", header: "Category", render: (event) => event.category },
+                { key: "consent", header: "Consent", render: (event) => event.consent },
+                { key: "time", header: "Time", render: (event) => event.occurred_at_utc }
+              ]}
+              rows={telemetryEvents}
+            />
+          </Panel>
+        </div>
+      ) : null}
+
+      {section === "billing" ? (
+        <div className="grid-two">
+          <Panel title="Stripe billing hooks" subtitle="Hosted Checkout and Customer Portal, with demo mode until Stripe env vars are set.">
+            <div className="billing-card">
+              <CreditCard size={24} />
+              <div>
+                <strong>{subscription?.plan ?? "free"} / {subscription?.status ?? "not configured"}</strong>
+                <span>Set STRIPE_SECRET_KEY and STRIPE_PRO_PRICE_ID to create real Checkout sessions.</span>
+              </div>
+            </div>
+            <div className="button-cluster">
+              <button type="button" className="primary-button" onClick={() => void handleCheckout()} disabled={isBusy}>
+                <CreditCard size={16} />
+                Start Pro checkout
+              </button>
+              <button type="button" className="ghost-button" onClick={() => void handlePortal()} disabled={isBusy}>
+                Manage subscription
+              </button>
+            </div>
+          </Panel>
+          <Panel title="SaaS readiness notes" subtitle="The next hard step is secure production deployment.">
+            <Explainer
+              icon={<DatabaseZap size={17} />}
+              title="What is production vs prototype?"
+              body="This screen gives the product skeleton: tenants, subscriptions, data lineage, and durable operational records. Production still needs real secret vaulting, webhooks, monitoring, and legal review before live-money trading."
+            />
+          </Panel>
+        </div>
+      ) : null}
+    </div>
+  );
+}

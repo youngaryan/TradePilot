@@ -14,11 +14,15 @@ from pairs_trading.data.sentiment_accumulator import ShadowSentimentAccumulator
 from pairs_trading.engines.backtesting import json_ready
 from pairs_trading.features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from pairs_trading.platform import SQLiteMetadataStore
+from pairs_trading.backend.telemetry import DailyRefreshService
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect local worker metadata or accumulate local sentiment datasets.")
     parser.add_argument("--kind", choices=("paper", "backtest"), help="Optionally list jobs for one job kind.")
+    parser.add_argument("--run-daily-refresh", action="store_true", help="Run the due 24-hour per-user data refresh once.")
+    parser.add_argument("--refresh-limit", type=int, default=100, help="Maximum users to refresh in one worker tick.")
+    parser.add_argument("--force-refresh", action="store_true", help="Refresh users even if they are not due yet.")
     parser.add_argument("--accumulate-sentiment", action="store_true", help="Fetch free headlines and write local sentiment parquet files.")
     parser.add_argument("--symbols", nargs="*", help="Tickers to accumulate sentiment for.")
     parser.add_argument("--start", help="Start date for sentiment accumulation. Defaults to seven days ago.")
@@ -37,6 +41,13 @@ def main() -> None:
     parser.add_argument("--use-finbert", action="store_true", help="Force FinBERT instead of best local fallback.")
     parser.add_argument("--local-finbert-only", action="store_true", help="Do not download FinBERT; require local cache.")
     args = parser.parse_args()
+
+    settings = BackendSettings.from_env()
+
+    if args.run_daily_refresh:
+        result = DailyRefreshService(settings).run_due_users(limit=args.refresh_limit, force=args.force_refresh)
+        print(json.dumps(result, indent=2))
+        return
 
     if args.accumulate_sentiment:
         if not args.symbols:
@@ -72,7 +83,6 @@ def main() -> None:
         print(json.dumps(json_ready(asdict(result)), indent=2))
         return
 
-    settings = BackendSettings.from_env()
     store = SQLiteMetadataStore(settings.metadata_db_path)
     counts = store.counts()
     payload: dict[str, object] = {

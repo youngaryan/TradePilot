@@ -52,6 +52,49 @@ class FrontendContractTests(unittest.TestCase):
         ):
             self.assertIn(field, source)
 
+    def test_saas_frontend_exposes_login_workspace_and_detail_pages(self) -> None:
+        app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        workspace_source = PROJECT_ROOT.joinpath("frontend/src/features/SaaSWorkspace.tsx").read_text(encoding="utf-8")
+        client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+
+        self.assertIn('id: "workspace"', app_source)
+        self.assertIn("LoginScreen", app_source)
+        self.assertIn("setApiAuth", app_source)
+        self.assertIn("SaaSWorkspace", app_source)
+        self.assertIn("Launch first strategy wizard", workspace_source)
+        self.assertIn("getWorkspaceExperiment", workspace_source)
+        self.assertIn("getWorkspacePaperAgent", workspace_source)
+        self.assertIn("startBillingCheckout", workspace_source)
+        self.assertIn("/api/auth/login", client_source)
+        self.assertIn("/api/workspaces/experiments", client_source)
+        self.assertIn("/api/billing/checkout", client_source)
+        self.assertIn("export interface WorkspacePayload", type_source)
+        self.assertIn("export interface ExperimentRecord", type_source)
+        self.assertIn("export interface PaperAgentRecord", type_source)
+
+    def test_frontend_has_theme_refresh_and_telemetry_contracts(self) -> None:
+        app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        workspace_source = PROJECT_ROOT.joinpath("frontend/src/features/SaaSWorkspace.tsx").read_text(encoding="utf-8")
+        client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('type ThemeMode = "light" | "dark" | "system"', app_source)
+        self.assertIn("document.documentElement.dataset.theme", app_source)
+        self.assertIn("telemetryConsent", app_source)
+        self.assertIn("trackTelemetryEvent", app_source)
+        self.assertIn('"operations"', workspace_source)
+        self.assertIn("getRefreshStatus", workspace_source)
+        self.assertIn("runDailyRefresh", workspace_source)
+        self.assertIn("listTelemetryEvents", workspace_source)
+        self.assertIn("/api/telemetry/events", client_source)
+        self.assertIn("/api/refresh/status", client_source)
+        self.assertIn("export interface RefreshStatusPayload", type_source)
+        self.assertIn("export interface TelemetryEventRequest", type_source)
+        self.assertIn(':root[data-theme="dark"]', style_source)
+        self.assertIn(".compact-control", style_source)
+
 
 if __name__ == "__main__":
     unittest.main()

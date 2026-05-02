@@ -149,7 +149,243 @@ export interface SystemMetadata {
     jobs: number;
     deployment_configs: number;
     experiment_runs: number;
+    users?: number;
+    organizations?: number;
+    projects?: number;
+    experiments?: number;
+    paper_agents?: number;
+    datasets?: number;
+    api_keys?: number;
+    subscriptions?: number;
+    telemetry_events?: number;
+    refresh_runs?: number;
+    refresh_statuses?: number;
   };
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  owner_user_id: string;
+  billing_email?: string | null;
+  stripe_customer_id?: string | null;
+  role?: string;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  user: AuthUser;
+  organizations: Organization[];
+  active_organization_id: string | null;
+}
+
+export interface SaaSProject {
+  id: string;
+  organization_id: string;
+  name: string;
+  slug: string;
+  description?: string | null;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface ProjectCreateRequest {
+  name: string;
+  description?: string | null;
+}
+
+export interface SubscriptionRecord {
+  id: string;
+  organization_id: string;
+  plan: string;
+  status: string;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+  current_period_end_utc?: string | null;
+  usage: Record<string, unknown>;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface DatasetRecord {
+  id: string;
+  organization_id: string;
+  project_id?: string | null;
+  name: string;
+  kind: string;
+  path: string;
+  provider: Record<string, unknown>;
+  schema: Record<string, unknown>;
+  row_count: number;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface ApiKeyRecord {
+  id: string;
+  organization_id: string;
+  name: string;
+  provider: string;
+  masked_value: string;
+  secret_ref?: string | null;
+  status: string;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface ApiKeyCreateRequest {
+  name: string;
+  provider: string;
+  secret?: string | null;
+  secret_ref?: string | null;
+}
+
+export interface ReadinessCheck {
+  name: string;
+  value?: number | string | null;
+  passed: boolean;
+  target: string;
+}
+
+export interface ExperimentRecord {
+  id: string;
+  organization_id: string;
+  project_id?: string | null;
+  job_id?: string | null;
+  name: string;
+  pipeline: string;
+  status: string;
+  artifact_dir?: string | null;
+  summary: Record<string, unknown>;
+  validation: Record<string, unknown>;
+  lineage: Record<string, unknown>;
+  readiness: {
+    score?: number;
+    verdict?: string;
+    passed_checks?: number;
+    total_checks?: number;
+    checks?: ReadinessCheck[];
+  };
+  trades: Array<Record<string, unknown>>;
+  sentiment: Record<string, unknown>;
+  artifact_files?: string[];
+  equity_curve_points?: Array<Record<string, unknown>>;
+  fold_metrics?: Array<Record<string, unknown>>;
+  diagnostics?: unknown;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface PaperAgentRecord {
+  id: string;
+  organization_id: string;
+  project_id?: string | null;
+  name: string;
+  pipeline: string;
+  status: string;
+  fake_cash: number;
+  config: Record<string, unknown>;
+  latest_payload: Partial<PaperStrategy> & Record<string, unknown>;
+  warnings: string[];
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface WorkspacePayload {
+  organization_id: string;
+  projects: SaaSProject[];
+  subscription: SubscriptionRecord | null;
+  datasets: DatasetRecord[];
+  api_keys: ApiKeyRecord[];
+  experiments: ExperimentRecord[];
+  paper_agents: PaperAgentRecord[];
+  onboarding: {
+    complete_count: number;
+    total_count: number;
+    steps: Array<{ id: string; label: string; complete: boolean }>;
+  };
+}
+
+export interface TelemetryEventRequest {
+  name: string;
+  category?: string;
+  properties?: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  consent?: "granted" | "denied" | "system" | "unknown" | string;
+  anonymous_id?: string | null;
+  occurred_at_utc?: string | null;
+}
+
+export interface TelemetryEventRecord {
+  id: string;
+  organization_id?: string | null;
+  user_id?: string | null;
+  name: string;
+  category: string;
+  properties: Record<string, unknown>;
+  context: Record<string, unknown>;
+  consent: string;
+  occurred_at_utc: string;
+}
+
+export interface RefreshRunRecord {
+  id: string;
+  idempotency_key: string;
+  user_id: string;
+  organization_id: string;
+  status: string;
+  attempt: number;
+  max_attempts: number;
+  started_at_utc?: string | null;
+  finished_at_utc?: string | null;
+  locked_until_utc?: string | null;
+  summary: Record<string, unknown>;
+  error?: string | null;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface RefreshStatusRecord {
+  user_id: string;
+  organization_id: string;
+  status: string;
+  last_success_at_utc?: string | null;
+  last_attempt_at_utc?: string | null;
+  next_due_at_utc: string;
+  latest_run_id?: string | null;
+  last_error?: string | null;
+  updated_at_utc: string;
+}
+
+export interface RefreshStatusPayload {
+  interval_hours: number;
+  max_attempts: number;
+  scheduler_enabled: boolean;
+  statuses: RefreshStatusRecord[];
+  recent_runs: RefreshRunRecord[];
+}
+
+export interface BillingCheckoutRequest {
+  plan: string;
+  price_id?: string | null;
+}
+
+export interface BillingResponse {
+  mode: "demo" | "stripe" | string;
+  checkout_url?: string | null;
+  portal_url?: string | null;
+  message?: string;
+  stripe_session?: Record<string, unknown>;
 }
 
 export interface StrategyCatalogItem {

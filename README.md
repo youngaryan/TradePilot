@@ -23,6 +23,8 @@ The end-to-end backend/frontend tutorial lives in [docs/backend_frontend_tutoria
 Backend/frontend instructions live in [docs/fullstack_workflows.md](docs/fullstack_workflows.md).
 Strategy explanations live in [docs/strategy_catalog.md](docs/strategy_catalog.md) and are also exposed in the web dashboard.
 Interactive backtest agent workflows live in [docs/backtest_agent_workbench.md](docs/backtest_agent_workbench.md).
+The SaaS-readiness workflow lives in [docs/saas_readiness_workflow.md](docs/saas_readiness_workflow.md).
+The UX/theme/refresh/telemetry audit lives in [docs/product_ux_observability_audit.md](docs/product_ux_observability_audit.md).
 
 ## Main Sleeves
 

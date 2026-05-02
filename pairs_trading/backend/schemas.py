@@ -89,3 +89,67 @@ class SentimentAccumulationRequest(BaseModel):
     output_dir: Path | None = Field(default=None, description="Output directory for raw/scored/daily sentiment files.")
     use_finbert: bool = Field(default=True, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
     local_finbert_only: bool = Field(default=True, description="Do not download FinBERT during UI runs.")
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(default="demo@quantops.local")
+    password: str = Field(default="quantops-demo")
+
+
+class AuthenticatedUser(BaseModel):
+    id: str
+    email: str
+    display_name: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: AuthenticatedUser
+    organizations: list[dict[str, Any]]
+    active_organization_id: str | None = None
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    provider: str = Field(min_length=2, max_length=80)
+    secret: str | None = Field(default=None, description="Accepted for masking only in the local prototype; production should use a vault.")
+    secret_ref: str | None = Field(default=None, description="Environment/vault reference, for example NEWSAPI_API_KEY.")
+
+
+class BillingCheckoutRequest(BaseModel):
+    plan: str = Field(default="pro", description="Requested plan id, such as pro or team.")
+    price_id: str | None = Field(default=None, description="Optional Stripe Price id. Defaults to STRIPE_PRO_PRICE_ID.")
+
+
+class BillingPortalRequest(BaseModel):
+    return_url: str | None = None
+
+
+class TelemetryEventRequest(BaseModel):
+    name: str = Field(min_length=3, max_length=120, description="Stable snake_case event name, for example backtest_started.")
+    category: str = Field(default="product", max_length=60, description="product, engineering, refresh, billing, error, or security.")
+    properties: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    consent: str = Field(default="granted", description="granted, denied, system, or unknown.")
+    anonymous_id: str | None = Field(default=None, max_length=128)
+    occurred_at_utc: str | None = None
+
+
+class TelemetryBatchRequest(BaseModel):
+    events: list[TelemetryEventRequest] = Field(default_factory=list, max_length=50)
+
+
+class DataRefreshRequest(BaseModel):
+    force: bool = Field(default=False, description="Run even when the user's next refresh is not due.")
+    user_id: str | None = Field(default=None, description="Admin/debug override. Defaults to the authenticated user.")
+
+
+class DataRefreshTickRequest(BaseModel):
+    limit: int = Field(default=100, ge=1, le=1000)
+    force: bool = False
