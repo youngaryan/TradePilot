@@ -120,6 +120,14 @@ export interface PaperAgentConfig {
   news_provider_names?: string[];
   news_files?: string[];
   rss_feed_urls?: string[];
+  local_web_search_urls?: string[];
+  local_web_refresh_minutes?: number;
+  local_web_max_pages_per_source?: number;
+  web_research_urls?: string[];
+  web_research_domains?: string[];
+  web_research_query_terms?: string;
+  web_research_max_articles?: number;
+  web_research_fetch_article_text?: boolean;
   newsapi_api_key?: string | null;
   use_finbert?: boolean;
   local_finbert_only?: boolean;
@@ -491,6 +499,14 @@ export interface SentimentAccumulationRequest {
   end: string;
   providers: string[];
   rss_feed_urls: string[];
+  local_web_search_urls: string[];
+  local_web_refresh_minutes: number;
+  local_web_max_pages_per_source: number;
+  web_research_urls: string[];
+  web_research_domains: string[];
+  web_research_query_terms: string;
+  web_research_max_articles: number;
+  web_research_fetch_article_text: boolean;
   news_files: string[];
   newsapi_api_key?: string | null;
   alphavantage_api_key?: string | null;
@@ -498,6 +514,22 @@ export interface SentimentAccumulationRequest {
   output_dir?: string | null;
   use_finbert: boolean;
   local_finbert_only: boolean;
+}
+
+export interface SentimentAccumulationJob {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "interrupted" | string;
+  request: Record<string, unknown>;
+  created_at_utc: string;
+  updated_at_utc: string;
+  progress: number;
+  stage: string;
+  message: string;
+  warnings?: string[];
+  started_at_utc?: string | null;
+  finished_at_utc?: string | null;
+  result?: SentimentDatasetPayload | null;
+  error?: string | null;
 }
 
 export interface SentimentDailyPoint {

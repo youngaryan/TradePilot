@@ -38,6 +38,17 @@ const defaultRequest: BacktestRunRequest = {
 
 const SECTOR_MAP_PIPELINES = new Set(["stat_arb", "graph_stat_arb"]);
 const EVENT_PIPELINES = new Set(["edgar_event", "pead_sentiment"]);
+const SENTIMENT_PIPELINES = new Set(["stat_arb", "pead_sentiment"]);
+const DEFAULT_SENTIMENT_PARAMETERS = {
+  news_provider_names: ["rss", "local_web", "local"],
+  news_files: ["examples/news_headlines.sample.csv"],
+  use_finbert: false,
+  local_finbert_only: true,
+  local_web_refresh_minutes: 60,
+  local_web_max_pages_per_source: 30,
+  web_research_max_articles: 4,
+  web_research_fetch_article_text: true
+};
 
 type PipelineExample = {
   symbols?: unknown;
@@ -68,6 +79,9 @@ function metricValue(summary: Record<string, unknown>, key: string, formatter: (
 function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
   const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(template.pipeline);
   const isEventPipeline = EVENT_PIPELINES.has(template.pipeline);
+  const parameters = SENTIMENT_PIPELINES.has(template.pipeline)
+    ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...template.parameters }
+    : template.parameters;
   return {
     ...defaultRequest,
     pipeline: template.pipeline,
@@ -80,7 +94,7 @@ function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
     use_sec_companyfacts: false,
     include_sec_filings: false,
     edgar_user_agent: null,
-    parameters: template.parameters
+    parameters
   };
 }
 
@@ -96,6 +110,7 @@ export function BacktestLab({
   onJobsChange: (jobs: BacktestJob[]) => void;
 }) {
   const [request, setRequest] = useState<BacktestRunRequest>(defaultRequest);
+  const [symbolsText, setSymbolsText] = useState(defaultRequest.symbols.join(" "));
   const [parametersText, setParametersText] = useState(JSON.stringify(defaultRequest.parameters, null, 2));
   const [activeJob, setActiveJob] = useState<BacktestJob | null>(jobs[0] ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -106,7 +121,7 @@ export function BacktestLab({
   );
   const usesSectorMap = SECTOR_MAP_PIPELINES.has(request.pipeline);
   const usesEventInputs = EVENT_PIPELINES.has(request.pipeline);
-  const usesSentimentInputs = request.pipeline === "pead_sentiment";
+  const usesSentimentInputs = SENTIMENT_PIPELINES.has(request.pipeline);
   const parsedParameters = useMemo(() => {
     try {
       return parseJsonObject(parametersText, "Backtest parameters");
@@ -118,6 +133,7 @@ export function BacktestLab({
   function applyTemplate(template: BacktestTemplate) {
     const next = templateToRequest(template);
     setRequest(next);
+    setSymbolsText(next.symbols.join(" "));
     setParametersText(JSON.stringify(next.parameters, null, 2));
     setError(null);
   }
@@ -127,7 +143,8 @@ export function BacktestLab({
     const example = (item?.paper_config_example ?? {}) as PipelineExample;
     const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(pipeline);
     const isEventPipeline = EVENT_PIPELINES.has(pipeline);
-    const params = asParameterObject(example.params) ?? {};
+    const rawParams = asParameterObject(example.params) ?? {};
+    const params = SENTIMENT_PIPELINES.has(pipeline) ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...rawParams } : rawParams;
     const next: BacktestRunRequest = {
       ...request,
       pipeline,
@@ -141,6 +158,7 @@ export function BacktestLab({
       parameters: params
     };
     setRequest(next);
+    setSymbolsText(next.symbols.join(" "));
     setParametersText(JSON.stringify(params, null, 2));
     setError(null);
   }
@@ -193,9 +211,11 @@ export function BacktestLab({
     }
     setIsLaunching(true);
     try {
+      const finalSymbols = usesSectorMap ? [] : splitSymbols(symbolsText);
+
       const job = await startBacktest({
         ...request,
-        symbols: usesSectorMap ? [] : request.symbols,
+        symbols: finalSymbols,
         parameters
       });
       setActiveJob(job);
@@ -262,9 +282,12 @@ export function BacktestLab({
             <label>
               Symbols
               <input
-                value={usesSectorMap ? "" : request.symbols.join(" ")}
+                // value={usesSectorMap ? "" : request.symbols.join(" ")}
+                value={usesSectorMap ? "" : symbolsText}
                 disabled={usesSectorMap}
-                onChange={(event) => setRequest({ ...request, symbols: splitSymbols(event.target.value) })}
+                // onChange={(event) => setRequest({ ...request, symbols: splitSymbols(event.target.value) })}
+                onChange={(event) => {setSymbolsText(event.target.value);}}
+                // onBlur={() => {const nextSymbols = splitSymbols(symbolsText);setSymbolsText(nextSymbols.join(" "));setRequest((current) => ({...current,symbols: nextSymbols}));}}
                 placeholder={usesSectorMap ? "Loaded from the sector map" : "SPY QQQ TLT GLD"}
               />
               {usesSectorMap ? <small>This pipeline trades every ticker in the sector map, not the Symbols box.</small> : null}
@@ -347,10 +370,10 @@ export function BacktestLab({
 
           {usesSentimentInputs ? (
             <div className="sentiment-panel official-events-panel">
-              <strong>PEAD sentiment overlay</strong>
+              <strong>Sentiment overlay</strong>
               <p>
-                PEAD v1 can run from event scores alone. Add daily sentiment when you have a CSV/parquet with
-                date, ticker, sentiment_score, sentiment_abs, confidence, article_count, and probability columns.
+                Use a precomputed daily sentiment file, or let the backend build one from RSS/web/local headlines.
+                For weak hardware, keep FinBERT off and use the lightweight fallback scorer.
               </p>
               <div className="form-grid">
                 <label>
@@ -360,7 +383,80 @@ export function BacktestLab({
                     onChange={(event) => updateParameter("daily_sentiment_file", event.target.value || null)}
                     placeholder="examples/daily_sentiment.sample.csv"
                   />
-                  <small>Optional. Leave blank to test event-score-only PEAD.</small>
+                  <small>Optional. Leave blank to fetch/score headlines from the selected providers.</small>
+                </label>
+                <label>
+                  News providers
+                  <input
+                    value={Array.isArray(parsedParameters.news_provider_names) ? parsedParameters.news_provider_names.join(" ") : ""}
+                    onChange={(event) => updateParameter("news_provider_names", splitList(event.target.value))}
+                    placeholder="rss local_web local"
+                  />
+                  <small>Use rss local_web local for free no-key sources. Add GDELT web or API providers only when you need them.</small>
+                </label>
+                <label>
+                  RSS feeds
+                  <input
+                    value={Array.isArray(parsedParameters.rss_feed_urls) ? parsedParameters.rss_feed_urls.join(" ") : ""}
+                    onChange={(event) => updateParameter("rss_feed_urls", splitList(event.target.value))}
+                    placeholder="optional; Yahoo ticker RSS is used by default"
+                  />
+                </label>
+                <label>
+                  Local web-search feeds
+                  <input
+                    value={Array.isArray(parsedParameters.local_web_search_urls) ? parsedParameters.local_web_search_urls.join(" ") : ""}
+                    onChange={(event) => updateParameter("local_web_search_urls", splitList(event.target.value))}
+                    placeholder="optional RSS/Atom feeds or {ticker} templates"
+                  />
+                </label>
+                <label>
+                  Local web cache refresh minutes
+                  <input
+                    type="number"
+                    value={stringParameter("local_web_refresh_minutes") || "60"}
+                    onChange={(event) => updateParameter("local_web_refresh_minutes", Number(event.target.value))}
+                  />
+                </label>
+                <label>
+                  Website domains to crawl
+                  <input
+                    value={Array.isArray(parsedParameters.web_research_domains) ? parsedParameters.web_research_domains.join(" ") : ""}
+                    onChange={(event) => updateParameter("web_research_domains", splitList(event.target.value))}
+                    placeholder="reuters.com cnbc.com marketwatch.com"
+                  />
+                </label>
+                <label>
+                  Website pages per source
+                  <input
+                    type="number"
+                    value={stringParameter("local_web_max_pages_per_source") || "30"}
+                    onChange={(event) => updateParameter("local_web_max_pages_per_source", Number(event.target.value))}
+                  />
+                </label>
+                <label>
+                  Direct web URLs
+                  <input
+                    value={Array.isArray(parsedParameters.web_research_urls) ? parsedParameters.web_research_urls.join(" ") : ""}
+                    onChange={(event) => updateParameter("web_research_urls", splitList(event.target.value))}
+                    placeholder="optional article URLs or {ticker} templates"
+                  />
+                </label>
+                <label>
+                  Web articles per symbol
+                  <input
+                    type="number"
+                    value={stringParameter("web_research_max_articles") || "4"}
+                    onChange={(event) => updateParameter("web_research_max_articles", Number(event.target.value))}
+                  />
+                </label>
+                <label>
+                  News files
+                  <input
+                    value={Array.isArray(parsedParameters.news_files) ? parsedParameters.news_files.join(" ") : ""}
+                    onChange={(event) => updateParameter("news_files", splitList(event.target.value))}
+                    placeholder="examples/news_headlines.sample.csv"
+                  />
                 </label>
                 <label>
                   Sentiment window days
@@ -372,6 +468,22 @@ export function BacktestLab({
                   <small>How many prior calendar days of sentiment are blended into each event.</small>
                 </label>
               </div>
+              <label className="checkbox-line">
+                <input
+                  type="checkbox"
+                  checked={parsedParameters.web_research_fetch_article_text !== false}
+                  onChange={(event) => updateParameter("web_research_fetch_article_text", event.target.checked)}
+                />
+                Fetch web pages and create lightweight summaries
+              </label>
+              <label className="checkbox-line">
+                <input
+                  type="checkbox"
+                  checked={booleanParameter("use_finbert")}
+                  onChange={(event) => updateParameter("use_finbert", event.target.checked)}
+                />
+                Use FinBERT when available (heavier)
+              </label>
               <label className="checkbox-line">
                 <input
                   type="checkbox"

@@ -20,7 +20,7 @@ const defaultExecution: PaperExecutionConfig = {
   weight_tolerance: 0.0025
 };
 
-const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local"];
+const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local_web", "local"];
 const DEFAULT_NEWS_FILES = ["examples/news_headlines.sample.csv"];
 
 function withDefaultSentiment<T extends Partial<PaperAgentConfig>>(agent: T): T {
@@ -28,6 +28,14 @@ function withDefaultSentiment<T extends Partial<PaperAgentConfig>>(agent: T): T 
     ...agent,
     news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : DEFAULT_SENTIMENT_PROVIDERS,
     news_files: agent.news_files?.length ? agent.news_files : DEFAULT_NEWS_FILES,
+    local_web_search_urls: agent.local_web_search_urls ?? [],
+    local_web_refresh_minutes: agent.local_web_refresh_minutes ?? 60,
+    local_web_max_pages_per_source: agent.local_web_max_pages_per_source ?? 30,
+    web_research_urls: agent.web_research_urls ?? [],
+    web_research_domains: agent.web_research_domains ?? [],
+    web_research_query_terms: agent.web_research_query_terms ?? "",
+    web_research_max_articles: agent.web_research_max_articles ?? 4,
+    web_research_fetch_article_text: agent.web_research_fetch_article_text ?? true,
     use_finbert: agent.use_finbert ?? false,
     local_finbert_only: agent.local_finbert_only ?? true
   };
@@ -104,6 +112,22 @@ function AgentEditor({
   onRemove: () => void;
 }) {
   const sentimentEnabled = agentHasSentiment(agent);
+  const [symbolsText, setSymbolsText] = useState(agent.symbols.join(" "));
+
+  useEffect(() => {
+    setSymbolsText(agent.symbols.join(" "));
+  }, [agent.id]);
+
+  function updateSymbolsText(value: string) {
+    setSymbolsText(value);
+    onChange({ ...agent, symbols: splitSymbols(value) });
+  }
+
+  function commitSymbolsText() {
+    const nextSymbols = splitSymbols(symbolsText);
+    setSymbolsText(nextSymbols.join(" "));
+    onChange({ ...agent, symbols: nextSymbols });
+  }
 
   function toggleProvider(provider: string, enabled: boolean) {
     const current = agent.news_provider_names ?? [];
@@ -129,10 +153,12 @@ function AgentEditor({
       lookback_bars?: number;
     } | undefined;
     const nextParams = example?.params ?? agent.params;
+    const nextSymbols = Array.isArray(example?.symbols) ? example.symbols : agent.symbols;
+    setSymbolsText(nextSymbols.join(" "));
     onChange({
       ...withDefaultSentiment(agent),
       pipeline,
-      symbols: Array.isArray(example?.symbols) ? example.symbols : agent.symbols,
+      symbols: nextSymbols,
       sector_map_path: example?.sector_map_path ?? agent.sector_map_path,
       event_file: example?.event_file ?? agent.event_file,
       use_sec_companyfacts: example?.use_sec_companyfacts ?? agent.use_sec_companyfacts,
@@ -155,6 +181,14 @@ function AgentEditor({
         news_provider_names: [],
         news_files: [],
         rss_feed_urls: [],
+        local_web_search_urls: [],
+        local_web_refresh_minutes: 60,
+        local_web_max_pages_per_source: 30,
+        web_research_urls: [],
+        web_research_domains: [],
+        web_research_query_terms: "",
+        web_research_max_articles: 4,
+        web_research_fetch_article_text: true,
         newsapi_api_key: null,
         news_topics: []
       });
@@ -162,9 +196,14 @@ function AgentEditor({
     }
     onChange({
       ...agent,
-      use_finbert: true,
+      use_finbert: false,
       news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : DEFAULT_SENTIMENT_PROVIDERS,
       news_files: agent.news_files?.length ? agent.news_files : DEFAULT_NEWS_FILES,
+      local_web_search_urls: agent.local_web_search_urls ?? [],
+      local_web_refresh_minutes: agent.local_web_refresh_minutes ?? 60,
+      local_web_max_pages_per_source: agent.local_web_max_pages_per_source ?? 30,
+      web_research_max_articles: agent.web_research_max_articles ?? 4,
+      web_research_fetch_article_text: agent.web_research_fetch_article_text ?? true,
       news_topics: agent.news_topics?.length ? agent.news_topics : ["earnings"]
     });
   }
@@ -223,7 +262,7 @@ function AgentEditor({
 
       <label>
         Symbols
-        <input value={agent.symbols.join(" ")} onChange={(event) => onChange({ ...agent, symbols: splitSymbols(event.target.value) })} placeholder="SPY QQQ TLT GLD" />
+        <input value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="SPY QQQ TLT GLD" />
         <small>ETF, event, and directional methods trade symbols directly. Stat-arb can use the sector map instead.</small>
       </label>
 
@@ -290,10 +329,10 @@ function AgentEditor({
             </label>
             <label>
               News providers
-              <input value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="rss local newsapi alphavantage benzinga" />
+              <input value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="rss local_web local newsapi alphavantage benzinga" />
             </label>
             <div className="provider-check-grid provider-check-grid--compact">
-              {["rss", "local", "newsapi", "alphavantage", "benzinga"].map((provider) => (
+              {["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga"].map((provider) => (
                 <label key={provider} className="checkbox-line">
                   <input
                     type="checkbox"
@@ -309,6 +348,34 @@ function AgentEditor({
               <input value={(agent.rss_feed_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, rss_feed_urls: splitList(event.target.value) })} placeholder="optional; default Yahoo template is used for rss" />
             </label>
             <label>
+              Local web-search feeds
+              <input value={(agent.local_web_search_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, local_web_search_urls: splitList(event.target.value) })} placeholder="optional RSS/Atom feeds or {ticker} templates" />
+            </label>
+            <label>
+              Local web cache refresh minutes
+              <input type="number" min={0} max={1440} value={agent.local_web_refresh_minutes ?? 60} onChange={(event) => onChange({ ...agent, local_web_refresh_minutes: Number(event.target.value) })} />
+            </label>
+            <label>
+              Website domains to crawl
+              <input value={(agent.web_research_domains ?? []).join(" ")} onChange={(event) => onChange({ ...agent, web_research_domains: splitList(event.target.value) })} placeholder="optional trusted domains: reuters.com cnbc.com" />
+            </label>
+            <label>
+              Website pages per source
+              <input type="number" min={1} max={250} value={agent.local_web_max_pages_per_source ?? 30} onChange={(event) => onChange({ ...agent, local_web_max_pages_per_source: Number(event.target.value) })} />
+            </label>
+            <label>
+              Direct web URLs
+              <input value={(agent.web_research_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, web_research_urls: splitList(event.target.value) })} placeholder="optional article URLs or {ticker} templates" />
+            </label>
+            <label>
+              Web query terms
+              <input value={agent.web_research_query_terms ?? ""} onChange={(event) => onChange({ ...agent, web_research_query_terms: event.target.value })} placeholder="earnings OR guidance" />
+            </label>
+            <label>
+              Web articles per symbol
+              <input type="number" min={1} max={25} value={agent.web_research_max_articles ?? 4} onChange={(event) => onChange({ ...agent, web_research_max_articles: Number(event.target.value) })} />
+            </label>
+            <label>
               News files
               <input value={(agent.news_files ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_files: splitList(event.target.value) })} placeholder="data/news/headlines.csv" />
             </label>
@@ -321,8 +388,12 @@ function AgentEditor({
               <input value={(agent.news_topics ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_topics: splitList(event.target.value) })} placeholder="earnings macro" />
             </label>
             <label className="checkbox-line">
+              <input type="checkbox" checked={agent.web_research_fetch_article_text ?? true} onChange={(event) => onChange({ ...agent, web_research_fetch_article_text: event.target.checked })} />
+              Fetch web pages and summarize lightly
+            </label>
+            <label className="checkbox-line">
               <input type="checkbox" checked={Boolean(agent.use_finbert)} onChange={(event) => onChange({ ...agent, use_finbert: event.target.checked })} />
-              Use FinBERT when available
+              Use FinBERT when available (heavier)
             </label>
             <label className="checkbox-line">
               <input type="checkbox" checked={Boolean(agent.local_finbert_only)} onChange={(event) => onChange({ ...agent, local_finbert_only: event.target.checked })} />
@@ -451,6 +522,14 @@ export function LiveOps({
           news_provider_names: agent.news_provider_names ?? [],
           news_files: agent.news_files ?? [],
           rss_feed_urls: agent.rss_feed_urls ?? [],
+          local_web_search_urls: agent.local_web_search_urls ?? [],
+          local_web_refresh_minutes: agent.local_web_refresh_minutes ?? 60,
+          local_web_max_pages_per_source: agent.local_web_max_pages_per_source ?? 30,
+          web_research_urls: agent.web_research_urls ?? [],
+          web_research_domains: agent.web_research_domains ?? [],
+          web_research_query_terms: agent.web_research_query_terms ?? "",
+          web_research_max_articles: agent.web_research_max_articles ?? 4,
+          web_research_fetch_article_text: agent.web_research_fetch_article_text ?? true,
           newsapi_api_key: agent.newsapi_api_key || undefined,
           use_finbert: Boolean(agent.use_finbert),
           local_finbert_only: Boolean(agent.local_finbert_only),

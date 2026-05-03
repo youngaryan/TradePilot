@@ -23,10 +23,18 @@ import type {
   WorkspacePayload
 } from "../api/types";
 import { Badge } from "../components/Badge";
-import { BacktestEquityChart, StrategyConcentrationBars } from "../components/Charts";
+import {
+  BacktestEquityChart,
+  StrategyConcentrationBars,
+  TelemetryCategoryBars,
+  TelemetryConsentBars,
+  TelemetryLatencyChart,
+  TelemetryTimelineChart,
+  TelemetryTopEventsBars
+} from "../components/Charts";
 import { Explainer, MetricCard, Panel, SectionHeader } from "../components/Cards";
 import { DataTable } from "../components/Table";
-import { formatCurrency, formatNumber, formatPercent, pipelineLabel, statusTone, toNumber } from "../utils/format";
+import { formatCurrency, formatDateTime, formatNumber, formatPercent, pipelineLabel, statusTone, toNumber } from "../utils/format";
 
 type WorkspaceSection = "onboarding" | "experiments" | "agents" | "data" | "operations" | "billing";
 
@@ -58,6 +66,33 @@ function equityPoints(experiment: ExperimentRecord | null) {
       net_return: toNumber(point.net_return) ?? 0
     }))
     .filter((point) => point.timestamp !== "n/a");
+}
+
+function telemetryIsError(event: TelemetryEventRecord) {
+  const category = event.category.toLowerCase();
+  const name = event.name.toLowerCase();
+  const status = String(event.properties?.status ?? event.context?.status ?? "").toLowerCase();
+  return category === "error" || name.includes("error") || name.includes("failed") || status === "failed";
+}
+
+function telemetryLatencyMs(event: TelemetryEventRecord) {
+  for (const source of [event.properties, event.context]) {
+    for (const key of ["latency_ms", "duration_ms", "elapsed_ms", "response_ms", "runtime_ms"]) {
+      const value = source?.[key];
+      if (typeof value === "number" || typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+      }
+    }
+    for (const key of ["latency_seconds", "duration_seconds", "elapsed_seconds", "runtime_seconds"]) {
+      const value = source?.[key];
+      if (typeof value === "number" || typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed * 1000;
+      }
+    }
+  }
+  return null;
 }
 
 export function SaaSWorkspace({
@@ -111,7 +146,7 @@ export function SaaSWorkspace({
 
   async function loadOperations() {
     try {
-      const [nextRefreshStatus, nextEvents] = await Promise.all([getRefreshStatus(), listTelemetryEvents(25)]);
+      const [nextRefreshStatus, nextEvents] = await Promise.all([getRefreshStatus(), listTelemetryEvents(200)]);
       setRefreshStatus(nextRefreshStatus);
       setTelemetryEvents(nextEvents);
     } catch {
@@ -233,6 +268,17 @@ export function SaaSWorkspace({
 
   const onboarding = workspace.onboarding;
   const subscription = workspace.subscription;
+  const telemetrySummary = {
+    total: telemetryEvents.length,
+    errors: telemetryEvents.filter(telemetryIsError).length,
+    refresh: telemetryEvents.filter((event) => event.category.toLowerCase() === "refresh").length,
+    uniqueEvents: new Set(telemetryEvents.map((event) => event.name)).size,
+    latest: telemetryEvents[0],
+    latencies: telemetryEvents.map(telemetryLatencyMs).filter((value): value is number => value !== null)
+  };
+  const averageTelemetryLatency = telemetrySummary.latencies.length
+    ? telemetrySummary.latencies.reduce((sum, value) => sum + value, 0) / telemetrySummary.latencies.length
+    : null;
 
   return (
     <div className="saas-workspace">
@@ -515,7 +561,39 @@ export function SaaSWorkspace({
             />
           </Panel>
 
-          <Panel title="Telemetry stream" subtitle="Privacy-aware product and operational events for debugging and analytics.">
+          <Panel title="Telemetry dashboard" subtitle="Privacy-aware product and operational events for debugging and analytics.">
+            <div className="metric-grid metric-grid--compact">
+              <MetricCard label="Visible events" value={formatNumber(telemetrySummary.total, 0)} detail="latest 200 for this workspace" />
+              <MetricCard label="Error events" value={formatNumber(telemetrySummary.errors, 0)} detail="failed/error/security signals" tone={telemetrySummary.errors ? "bad" : "good"} />
+              <MetricCard label="Refresh events" value={formatNumber(telemetrySummary.refresh, 0)} detail="scheduler and data-sync trail" tone="good" />
+              <MetricCard label="Event types" value={formatNumber(telemetrySummary.uniqueEvents, 0)} detail="unique event names" />
+              <MetricCard
+                label="Avg latency"
+                value={averageTelemetryLatency == null ? "Not tracked" : `${formatNumber(averageTelemetryLatency, 0)}ms`}
+                detail="from latency/duration fields"
+                tone={averageTelemetryLatency != null && averageTelemetryLatency > 2000 ? "warn" : "neutral"}
+              />
+              <MetricCard label="Latest event" value={telemetrySummary.latest?.name ?? "None yet"} detail={formatDateTime(telemetrySummary.latest?.occurred_at_utc)} />
+            </div>
+            <TelemetryTimelineChart events={telemetryEvents} />
+            <div className="telemetry-chart-grid">
+              <article className="telemetry-chart-card">
+                <h4>Category mix</h4>
+                <p>Shows whether usage is mostly product, refresh, engineering, billing, or error activity.</p>
+                <TelemetryCategoryBars events={telemetryEvents} />
+              </article>
+              <article className="telemetry-chart-card">
+                <h4>Consent mix</h4>
+                <p>Separates user-consented product analytics from system events needed for operations.</p>
+                <TelemetryConsentBars events={telemetryEvents} />
+              </article>
+              <article className="telemetry-chart-card telemetry-chart-card--wide">
+                <h4>Most common events</h4>
+                <p>Useful for spotting feature adoption, noisy events, and funnel drop-off points.</p>
+                <TelemetryTopEventsBars events={telemetryEvents} />
+              </article>
+            </div>
+            <TelemetryLatencyChart events={telemetryEvents} />
             <Explainer
               icon={<ShieldCheck size={17} />}
               title="Privacy guardrail"
@@ -530,7 +608,7 @@ export function SaaSWorkspace({
                 { key: "consent", header: "Consent", render: (event) => event.consent },
                 { key: "time", header: "Time", render: (event) => event.occurred_at_utc }
               ]}
-              rows={telemetryEvents}
+              rows={telemetryEvents.slice(0, 25)}
             />
           </Panel>
         </div>

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import pandas as pd
 
@@ -77,21 +77,34 @@ class ShadowSentimentAccumulator:
         tickers: Sequence[str],
         start: str | pd.Timestamp,
         end: str | pd.Timestamp,
+        progress: Callable[[str, str, float], None] | None = None,
     ) -> SentimentAccumulationResult:
+        def report(stage: str, message: str, value: float) -> None:
+            if progress is not None:
+                progress(stage, message, float(max(0.0, min(value, 1.0))))
+
+        report("fetching_headlines", "Fetching headline rows from the selected sentiment sources.", 0.05)
         fetched = self.headline_provider.get_headlines(tickers=tickers, start=start, end=end)
+        report("reading_cache", f"Fetched {len(fetched)} new rows. Reading the existing sentiment cache.", 0.25)
         existing = self._read_existing(self.raw_headlines_path)
         combined = pd.concat([existing, fetched], axis=0, ignore_index=True, sort=False) if not existing.empty else fetched
+        report("deduplicating_headlines", "Deduplicating headlines across providers, URLs, and near-duplicate text.", 0.35)
         raw_headlines = deduplicate_headlines(combined)
 
         if raw_headlines.empty:
+            report("scoring_headlines", "No matching headlines found. Producing an empty scored sentiment table.", 0.50)
             scored_headlines = self.aggregator.score_headlines(
                 pd.DataFrame(columns=["timestamp", "ticker", "headline", "relevance"])
             )
+            report("aggregating_daily", "Aggregating empty headline scores into an empty daily sentiment table.", 0.70)
             daily_sentiment = self.aggregator.aggregate_daily_sentiment(scored_headlines)
         else:
+            report("scoring_headlines", f"Scoring {len(raw_headlines)} stored headlines with the selected sentiment model.", 0.50)
             scored_headlines = self.aggregator.score_headlines(raw_headlines)
+            report("aggregating_daily", "Aggregating scored headlines into ticker-day sentiment rows.", 0.70)
             daily_sentiment = self.aggregator.aggregate_daily_sentiment(scored_headlines)
 
+        report("saving_outputs", "Writing raw, scored, and daily sentiment parquet artifacts.", 0.85)
         raw_headlines.to_parquet(self.raw_headlines_path)
         scored_headlines.to_parquet(self.scored_headlines_path)
         daily_sentiment.to_parquet(self.daily_sentiment_path)
@@ -115,4 +128,5 @@ class ShadowSentimentAccumulator:
             "headline_provider": self.headline_provider.__class__.__name__,
         }
         self.metadata_path.write_text(json.dumps(self._json_ready(metadata), indent=2), encoding="utf-8")
+        report("saved", f"Saved {len(raw_headlines)} headlines and {len(daily_sentiment)} daily sentiment rows.", 1.0)
         return result

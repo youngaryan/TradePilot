@@ -85,6 +85,14 @@ The refresh implementation includes:
 
 Telemetry is stored in `telemetry_events`.
 
+The frontend Operations page now turns the latest workspace events into an observability dashboard:
+
+- Event-volume timeline stacked by product, refresh, engineering, other, and error events.
+- Category mix chart to show feature/operation usage.
+- Consent mix chart to verify product analytics versus system telemetry.
+- Top-event chart for noisy events and funnel/drop-off debugging.
+- Latency trail when events include fields such as `latency_ms`, `duration_ms`, `elapsed_ms`, `response_ms`, or `runtime_ms`.
+
 Core fields:
 
 ```json

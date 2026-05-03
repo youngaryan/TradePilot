@@ -16,6 +16,7 @@ import type {
   RefreshRunRecord,
   RefreshStatusPayload,
   SentimentAccumulationRequest,
+  SentimentAccumulationJob,
   SentimentDatasetPayload,
   PaperStrategy,
   StrategyCatalogItem,
@@ -244,4 +245,19 @@ export function accumulateSentiment(request: SentimentAccumulationRequest) {
     method: "POST",
     body: JSON.stringify(request)
   });
+}
+
+export function startSentimentAccumulationJob(request: SentimentAccumulationRequest) {
+  return requestJson<SentimentAccumulationJob>("/api/sentiment/accumulate-job", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function listSentimentAccumulationJobs() {
+  return requestJson<SentimentAccumulationJob[]>("/api/sentiment/jobs");
+}
+
+export function getSentimentAccumulationJob(jobId: string) {
+  return requestJson<SentimentAccumulationJob>(`/api/sentiment/jobs/${encodeURIComponent(jobId)}`);
 }

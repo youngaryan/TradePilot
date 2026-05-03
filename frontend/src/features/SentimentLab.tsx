@@ -1,19 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, BrainCircuit, DatabaseZap, Loader2, Newspaper, Play, RefreshCw } from "lucide-react";
 
-import { accumulateSentiment, getSentimentDataset } from "../api/client";
-import type { SentimentAccumulationRequest, SentimentDatasetPayload } from "../api/types";
+import { getSentimentAccumulationJob, getSentimentDataset, startSentimentAccumulationJob } from "../api/client";
+import type { SentimentAccumulationJob, SentimentAccumulationRequest, SentimentDatasetPayload } from "../api/types";
 import { Badge } from "../components/Badge";
 import { SentimentHeatmapChart, SentimentSourceBars, SentimentTickerBars, SentimentTimelineChart } from "../components/Charts";
 import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
-import { formatNumber, splitList, splitSymbols } from "../utils/format";
+import { formatDateTime, formatNumber, splitList, splitSymbols, statusTone } from "../utils/format";
 
 const DEFAULT_OUTPUT_DIR = "data/sentiment_cache/shadow";
 const DEFAULT_NEWS_FILE = "examples/news_headlines.sample.csv";
 const TABLE_PAGE_SIZE = 12;
 const SOURCE_OPTIONS = [
   { id: "rss", label: "RSS firehose", detail: "Free ticker RSS feeds; default source for live headline flow." },
+  { id: "local_web", label: "Local web search", detail: "Cached RSS/page index; avoids hosted search API rate limits." },
+  { id: "web", label: "GDELT web research", detail: "Broad web discovery; optional because public search APIs can throttle." },
   { id: "local", label: "Local files", detail: "CSV/parquet headline files; useful for samples and accumulated dumps." },
   { id: "newsapi", label: "NewsAPI", detail: "Optional API-key supplement for broader publisher coverage." },
   { id: "alphavantage", label: "Alpha Vantage", detail: "Optional free-tier news sentiment source for top-priority tickers." },
@@ -36,14 +38,22 @@ function defaultRequest(): SentimentAccumulationRequest {
     symbols: ["AAPL", "MSFT", "NVDA", "GLD"],
     start: liveDates.start,
     end: liveDates.end,
-    providers: ["rss", "local"],
+    providers: ["rss", "local_web", "local"],
     rss_feed_urls: [],
+    local_web_search_urls: [],
+    local_web_refresh_minutes: 60,
+    local_web_max_pages_per_source: 30,
+    web_research_urls: [],
+    web_research_domains: [],
+    web_research_query_terms: "",
+    web_research_max_articles: 4,
+    web_research_fetch_article_text: true,
     news_files: [DEFAULT_NEWS_FILE],
     newsapi_api_key: null,
     alphavantage_api_key: null,
     benzinga_api_key: null,
     output_dir: DEFAULT_OUTPUT_DIR,
-    use_finbert: true,
+    use_finbert: false,
     local_finbert_only: true
   };
 }
@@ -126,8 +136,10 @@ function PaginationControls({
 
 export function SentimentLab() {
   const [request, setRequest] = useState<SentimentAccumulationRequest>(() => defaultRequest());
+  const [symbolsText, setSymbolsText] = useState(() => defaultRequest().symbols.join(" "));
   const [dataset, setDataset] = useState<SentimentDatasetPayload | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [activeJob, setActiveJob] = useState<SentimentAccumulationJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
   const [tickerSearch, setTickerSearch] = useState("");
@@ -149,7 +161,8 @@ export function SentimentLab() {
 
   async function runAccumulator() {
     setError(null);
-    if (!request.symbols.length) {
+    const finalSymbols = splitSymbols(symbolsText);
+    if (!finalSymbols.length) {
       setError("Add at least one symbol before accumulating sentiment.");
       return;
     }
@@ -163,12 +176,158 @@ export function SentimentLab() {
     }
     setIsRunning(true);
     try {
-      setDataset(await accumulateSentiment(request));
+      const finalRequest = { ...request, symbols: finalSymbols };
+      setRequest(finalRequest);
+      setSymbolsText(finalSymbols.join(" "));
+      const job = await startSentimentAccumulationJob(finalRequest);
+      setActiveJob(job);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to accumulate sentiment.");
-    } finally {
+      setIsRunning(false);
+      setActiveJob(null);
+    }
+  }
+
+  function updateSymbolsText(value: string) {
+    setSymbolsText(value);
+    setRequest((current) => ({ ...current, symbols: splitSymbols(value) }));
+  }
+
+  function commitSymbolsText() {
+    const nextSymbols = splitSymbols(symbolsText);
+    setSymbolsText(nextSymbols.join(" "));
+    setRequest((current) => ({ ...current, symbols: nextSymbols }));
+  }
+
+  useEffect(() => {
+    if (!activeJob || !["queued", "running"].includes(activeJob.status)) return;
+    setIsRunning(true);
+    const timer = window.setInterval(() => {
+      void getSentimentAccumulationJob(activeJob.id)
+        .then((job) => {
+          setActiveJob(job);
+          if (job.status === "completed") {
+            setIsRunning(false);
+            if (job.result) {
+              setDataset(job.result);
+            } else {
+              void refreshDataset(request.output_dir);
+            }
+          }
+          if (job.status === "failed" || job.status === "interrupted") {
+            setIsRunning(false);
+            setError(job.error || job.message || "Sentiment accumulation failed.");
+          }
+        })
+        .catch((caught) => {
+          setIsRunning(false);
+          setError(caught instanceof Error ? caught.message : "Unable to read sentiment job status.");
+        });
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [activeJob, request.output_dir]);
+
+  useEffect(() => {
+    if (activeJob?.status === "completed" || activeJob?.status === "failed" || activeJob?.status === "interrupted") {
       setIsRunning(false);
     }
+  }, [activeJob]);
+
+  const jobIsRunning = activeJob ? ["queued", "running"].includes(activeJob.status) : isRunning;
+  const jobProgress = Math.round((activeJob?.progress ?? (isRunning ? 0.04 : 0)) * 100);
+  const jobStage = activeJob?.stage?.replaceAll("_", " ") ?? "queued";
+  const jobWarnings = Array.isArray(activeJob?.warnings) ? activeJob.warnings.filter(Boolean) : [];
+  const jobRequest = activeJob?.request as { symbols?: unknown; providers?: unknown; output_dir?: unknown } | undefined;
+  const jobSymbols = Array.isArray(jobRequest?.symbols) ? jobRequest.symbols.map(String).join(" ") : request.symbols.join(" ");
+  const jobProviders = Array.isArray(jobRequest?.providers) ? jobRequest.providers.map(String).join(" + ") : request.providers.join(" + ");
+  const jobOutputDir = typeof jobRequest?.output_dir === "string" && jobRequest.output_dir ? jobRequest.output_dir : request.output_dir ?? DEFAULT_OUTPUT_DIR;
+  const jobStarted = activeJob?.started_at_utc ?? activeJob?.created_at_utc;
+  const jobFinished = activeJob?.finished_at_utc;
+  const jobRuntime = jobStarted ? (jobFinished ? `${formatDateTime(jobStarted)} to ${formatDateTime(jobFinished)}` : `Started ${formatDateTime(jobStarted)}`) : "Not started yet";
+  const jobHasWarnings = jobWarnings.length > 0;
+  const jobHeadline = activeJob?.status === "completed"
+    ? jobHasWarnings
+      ? "Sentiment dataset updated with warnings"
+      : "Sentiment dataset updated"
+    : activeJob?.status === "failed" || activeJob?.status === "interrupted"
+      ? "Sentiment run needs attention"
+      : "Sentiment run in progress";
+  const jobResultPath = activeJob?.result?.daily_sentiment_path ?? `${jobOutputDir}/daily_sentiment.parquet`;
+  const jobSummary = activeJob?.result?.summary
+    ? `${formatNumber(activeJob.result.summary.headline_count ?? 0, 0)} headlines, ${formatNumber(activeJob.result.summary.scored_headline_count ?? 0, 0)} scored rows, ${formatNumber(activeJob.result.summary.daily_rows ?? 0, 0)} daily rows.`
+    : `Writing to ${jobResultPath}`;
+  const jobSteps = ["preparing", "loading", "fetching", "deduplicating", "scoring", "saving"];
+
+  async function refreshWithJobContext() {
+    if (activeJob?.status === "completed" && activeJob.result) {
+      setDataset(activeJob.result);
+      return;
+    }
+    await refreshDataset();
+  }
+
+  function jobStepState(step: string) {
+    if (activeJob?.status === "completed") return "done";
+    if (activeJob?.status === "failed" || activeJob?.status === "interrupted") return jobStage.includes(step) ? "failed" : "pending";
+    return jobStage.includes(step) ? "active" : "pending";
+  }
+
+  function sentimentJobProgressCard() {
+    if (!activeJob && !isRunning) return null;
+    return (
+      <div className={`job-progress-card ${activeJob?.status === "completed" ? "job-progress-card--done" : ""} ${activeJob?.status === "completed" && jobHasWarnings ? "job-progress-card--warning" : ""} ${activeJob?.status === "failed" || activeJob?.status === "interrupted" ? "job-progress-card--failed" : ""}`}>
+        <div className="progress-card__top">
+          <div>
+            <strong>{jobHeadline}</strong>
+            <span>{jobStage} | {jobRuntime}</span>
+          </div>
+          <div className="badge-row">
+            <Badge label={activeJob?.status === "completed" && jobHasWarnings ? "warnings" : activeJob?.status ?? "queued"} tone={activeJob?.status === "completed" && jobHasWarnings ? "warn" : statusTone(activeJob?.status)} />
+            <strong>{jobProgress}%</strong>
+          </div>
+        </div>
+        <div className="progress-track" role="progressbar" aria-valuenow={jobProgress} aria-valuemin={0} aria-valuemax={100}>
+          <i style={{ width: `${jobProgress}%` }} />
+        </div>
+        <p>{activeJob?.message ?? "Starting sentiment accumulation."}</p>
+        <small>{jobProviders} | {jobSymbols} | {jobOutputDir}</small>
+        <div className="job-step-row">
+          {jobSteps.map((step) => (
+            <span key={step} className={`job-step job-step--${jobStepState(step)}`}>
+              {jobStepState(step) === "active" ? `${step} now` : step}
+            </span>
+          ))}
+        </div>
+        <div className="artifact-note">
+          <strong>Result file:</strong>
+          <span>{jobResultPath}</span>
+          <span>{jobSummary}</span>
+        </div>
+        {activeJob?.error ? (
+          <div className="inline-error">
+            <AlertTriangle size={16} />
+            {activeJob.error}
+          </div>
+        ) : null}
+        {jobWarnings.length ? (
+          <div className="inline-warning">
+            <AlertTriangle size={16} />
+            <span>{jobWarnings.join(" ")}</span>
+          </div>
+        ) : null}
+        <div className="button-row">
+          <button type="button" className="ghost-button" onClick={() => void refreshWithJobContext()}>
+            <RefreshCw size={17} />
+            {activeJob?.status === "completed" ? "Load completed dataset" : "Refresh dataset"}
+          </button>
+          {activeJob && !["queued", "running"].includes(activeJob.status) ? (
+            <button type="button" className="ghost-button" onClick={() => setActiveJob(null)}>
+              Dismiss status
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
   useEffect(() => {
@@ -181,7 +340,7 @@ export function SentimentLab() {
   const fetchedHeadlineCount = latestMetadata.fetched_headlines ?? 0;
   const storedHeadlineCount = latestMetadata.stored_headlines ?? dataset?.summary.headline_count ?? 0;
   const returnedHeadlineCount = dataset?.summary.returned_headline_count ?? dataset?.headlines.length ?? 0;
-  const warnings = dataset?.warnings ?? [];
+  const storedWarnings = dataset?.warnings ?? [];
   const availableTickers = useMemo(() => {
     const tickers = new Set<string>();
     for (const point of dataset?.daily_points ?? []) tickers.add(String(point.ticker).toUpperCase());
@@ -321,7 +480,7 @@ export function SentimentLab() {
         <Panel title="1. Sources And Symbols" subtitle="RSS works without a key; API providers are optional supplements and report warnings if credentials fail">
           <label>
             Symbols
-            <input value={request.symbols.join(" ")} onChange={(event) => setRequest({ ...request, symbols: splitSymbols(event.target.value) })} />
+            <input value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="AAPL MSFT NVDA GLD" />
           </label>
           <div className="provider-check-grid">
             {SOURCE_OPTIONS.map((source) => (
@@ -358,6 +517,41 @@ export function SentimentLab() {
               <input value={request.rss_feed_urls.join(" ")} onChange={(event) => setRequest({ ...request, rss_feed_urls: splitList(event.target.value) })} placeholder="Optional. Default Yahoo Finance ticker RSS template is used." />
             </label>
             <label>
+              Local web-search feeds
+              <input value={request.local_web_search_urls.join(" ")} onChange={(event) => setRequest({ ...request, local_web_search_urls: splitList(event.target.value) })} placeholder="Optional RSS/Atom feeds; {ticker} templates are supported." />
+              <small>Used by Local web search. Results are cached locally, then searched without calling GDELT.</small>
+            </label>
+            <label>
+              Local web cache refresh minutes
+              <input type="number" min={0} max={1440} value={request.local_web_refresh_minutes} onChange={(event) => setRequest({ ...request, local_web_refresh_minutes: Number(event.target.value) })} />
+              <small>Use 60+ for normal work. Set 0 only when you need to force a refetch.</small>
+            </label>
+            <label>
+              Website domains to crawl
+              <input value={request.web_research_domains.join(" ")} onChange={(event) => setRequest({ ...request, web_research_domains: splitList(event.target.value) })} placeholder="Optional: reuters.com cnbc.com marketwatch.com" />
+              <small>Local web search crawls each domain's sitemap/homepage and caches article pages. GDELT also uses these domains if selected.</small>
+            </label>
+            <label>
+              Website pages per source
+              <input type="number" min={1} max={250} value={request.local_web_max_pages_per_source} onChange={(event) => setRequest({ ...request, local_web_max_pages_per_source: Number(event.target.value) })} />
+              <small>Higher values gather more text but run slower and may be blocked by some sites.</small>
+            </label>
+            <label>
+              Direct web URLs
+              <input value={request.web_research_urls.join(" ")} onChange={(event) => setRequest({ ...request, web_research_urls: splitList(event.target.value) })} placeholder="Optional article URLs or URL templates containing {ticker}" />
+              <small>Use this when you want a specific page fetched and summarized.</small>
+            </label>
+            <label>
+              Extra web query terms
+              <input value={request.web_research_query_terms} onChange={(event) => setRequest({ ...request, web_research_query_terms: event.target.value })} placeholder="Optional: earnings OR guidance OR inflation" />
+              <small>Added to each symbol query. Keep it short to avoid filtering out useful stories.</small>
+            </label>
+            <label>
+              Web articles per symbol
+              <input type="number" min={1} max={25} value={request.web_research_max_articles} onChange={(event) => setRequest({ ...request, web_research_max_articles: Number(event.target.value) })} />
+              <small>Lower values run faster on weak hardware and slow networks.</small>
+            </label>
+            <label>
               NewsAPI key
               <input value={request.newsapi_api_key ?? ""} onChange={(event) => setRequest({ ...request, newsapi_api_key: event.target.value || null })} placeholder="Optional unless NewsAPI is selected" />
             </label>
@@ -375,7 +569,8 @@ export function SentimentLab() {
             return nothing unless you have already accumulated or loaded local historical news. Reddit subreddit URLs
             such as https://www.reddit.com/r/Gold/ are converted to .rss automatically; use one symbol when mapping a
             topic feed to an ETF like GLD. FX pairs such as EURUSD are queried through Yahoo's EURUSD=X alias and then
-            stored back under EURUSD.
+            stored back under EURUSD. Local web search is the default no-key web tool: it builds a local cached RSS/page
+            index, searches that cache for ticker/topic aliases, and avoids GDELT's public search API rate limits.
           </div>
           <div className="button-row">
             <button type="button" className="ghost-button" onClick={() => setRequest({ ...request, ...liveRssDateRange(14) })}>
@@ -387,34 +582,34 @@ export function SentimentLab() {
           </div>
           <div className="sentiment-panel">
             <label className="checkbox-line">
+              <input type="checkbox" checked={request.web_research_fetch_article_text} onChange={(event) => setRequest({ ...request, web_research_fetch_article_text: event.target.checked })} />
+              Fetch web pages and create lightweight summaries
+            </label>
+            <label className="checkbox-line">
               <input type="checkbox" checked={request.use_finbert} onChange={(event) => setRequest({ ...request, use_finbert: event.target.checked })} />
-              Score with FinBERT when available
+              Use FinBERT when available (heavier, optional)
             </label>
             <label className="checkbox-line">
               <input type="checkbox" checked={request.local_finbert_only} onChange={(event) => setRequest({ ...request, local_finbert_only: event.target.checked })} />
               Use local model cache only during UI runs
             </label>
+            <small>For weak hardware, leave FinBERT unchecked. The fallback scorer is fast and runs locally without model downloads.</small>
           </div>
           <div className="button-row">
-            <button type="button" className="primary-button" onClick={() => void runAccumulator()} disabled={isRunning}>
-              {isRunning ? <Loader2 size={17} /> : <Play size={17} />}
-              {isRunning ? "Accumulating" : "Run sentiment accumulator"}
+            <button type="button" className="primary-button" onClick={() => void runAccumulator()} disabled={jobIsRunning} title={jobIsRunning ? "A sentiment job is already running." : "Start a tracked sentiment accumulation job."}>
+              {jobIsRunning ? <Loader2 size={17} /> : <Play size={17} />}
+              {jobIsRunning ? "Accumulating" : "Run sentiment accumulator"}
             </button>
             <button type="button" className="ghost-button" onClick={() => void refreshDataset()}>
               <RefreshCw size={17} />
               Refresh dataset
             </button>
           </div>
+          {sentimentJobProgressCard()}
           {error ? (
             <div className="inline-error">
               <AlertTriangle size={16} />
               {error}
-            </div>
-          ) : null}
-          {warnings.length ? (
-            <div className="inline-warning">
-              <AlertTriangle size={16} />
-              <span>{warnings.join(" ")}</span>
             </div>
           ) : null}
         </Panel>
@@ -435,6 +630,20 @@ export function SentimentLab() {
               The cache stores {formatNumber(storedHeadlineCount, 0)} raw headlines; this API response returned {formatNumber(returnedHeadlineCount, 0)} rows for frontend filtering and pagination.
             </span>
           </div>
+          {storedWarnings.length ? (
+            <details className="warning-disclosure">
+              <summary>Last run saved {formatNumber(storedWarnings.length, 0)} warning{storedWarnings.length === 1 ? "" : "s"}</summary>
+              <p>
+                These warnings are persisted with the dataset for audit/debugging. They are not new login errors; run the
+                accumulator again with corrected sources to replace them.
+              </p>
+              <div className="warning-list warning-list--compact">
+                {storedWarnings.map((warning, index) => (
+                  <span key={`${index}-${warning}`}>{warning}</span>
+                ))}
+              </div>
+            </details>
+          ) : null}
           <Explainer
             title="PEAD overlay"
             body="PEAD blends event score and daily sentiment around earnings-like events, then holds for the configured drift window."

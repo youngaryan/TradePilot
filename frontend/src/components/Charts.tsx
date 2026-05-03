@@ -1,5 +1,5 @@
-import type { LeaderboardRow, PaperStrategy, SentimentDailyPoint, SentimentSourceSummary } from "../api/types";
-import { formatCurrency, formatNumber, formatPercent, pipelineLabel, toNumber } from "../utils/format";
+import type { LeaderboardRow, PaperStrategy, SentimentDailyPoint, SentimentSourceSummary, TelemetryEventRecord } from "../api/types";
+import { formatCurrency, formatDateTime, formatNumber, formatPercent, pipelineLabel, toNumber } from "../utils/format";
 import { aggregateEquityHistory, orderNotional } from "../utils/quant";
 import type { PaperOrder } from "../api/types";
 
@@ -580,4 +580,291 @@ export function SentimentSourceBars({ sources }: { sources: SentimentSourceSumma
       }))}
     />
   );
+}
+
+function telemetryEventTime(event: TelemetryEventRecord) {
+  const parsed = new Date(event.occurred_at_utc).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function telemetryCategory(event: TelemetryEventRecord) {
+  return String(event.category || "unknown").toLowerCase();
+}
+
+function telemetryIsError(event: TelemetryEventRecord) {
+  const category = telemetryCategory(event);
+  const name = event.name.toLowerCase();
+  const status = String(event.properties?.status ?? event.context?.status ?? "").toLowerCase();
+  return category === "error" || name.includes("error") || name.includes("failed") || status === "failed";
+}
+
+function telemetryLatencyMs(event: TelemetryEventRecord) {
+  const numericKeys = ["latency_ms", "duration_ms", "elapsed_ms", "response_ms", "runtime_ms"];
+  const secondKeys = ["latency_seconds", "duration_seconds", "elapsed_seconds", "runtime_seconds"];
+  for (const source of [event.properties, event.context]) {
+    for (const key of numericKeys) {
+      const value = source?.[key];
+      if (typeof value === "number" || typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+      }
+    }
+    for (const key of secondKeys) {
+      const value = source?.[key];
+      if (typeof value === "number" || typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0) return parsed * 1000;
+      }
+    }
+  }
+  return null;
+}
+
+function telemetryToneForCategory(category: string): "good" | "bad" | "neutral" {
+  if (category === "error" || category === "security") return "bad";
+  if (category === "refresh" || category === "billing") return "good";
+  return "neutral";
+}
+
+function telemetryBucketLabel(timestamp: number, hourly: boolean) {
+  const date = new Date(timestamp);
+  if (hourly) {
+    return date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit" });
+  }
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+export function TelemetryTimelineChart({ events }: { events: TelemetryEventRecord[] }) {
+  const datedEvents = events
+    .map((event) => ({ event, timestamp: telemetryEventTime(event) }))
+    .filter((row): row is { event: TelemetryEventRecord; timestamp: number } => row.timestamp !== null)
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  if (!datedEvents.length) return <EmptyChart label="No telemetry events yet. Interact with the app or run a refresh to populate this chart." />;
+
+  const first = datedEvents[0].timestamp;
+  const last = datedEvents.at(-1)?.timestamp ?? first;
+  const hourly = last - first <= 36 * 60 * 60 * 1000;
+  const buckets = Array.from(
+    datedEvents.reduce((map, row) => {
+      const date = new Date(row.timestamp);
+      const key = hourly ? date.toISOString().slice(0, 13) : date.toISOString().slice(0, 10);
+      const current = map.get(key) ?? {
+        key,
+        label: telemetryBucketLabel(row.timestamp, hourly),
+        product: 0,
+        refresh: 0,
+        error: 0,
+        engineering: 0,
+        other: 0,
+        total: 0
+      };
+      const category = telemetryCategory(row.event);
+      if (telemetryIsError(row.event)) current.error += 1;
+      else if (category === "product") current.product += 1;
+      else if (category === "refresh") current.refresh += 1;
+      else if (category === "engineering") current.engineering += 1;
+      else current.other += 1;
+      current.total += 1;
+      map.set(key, current);
+      return map;
+    }, new Map<string, { key: string; label: string; product: number; refresh: number; error: number; engineering: number; other: number; total: number }>())
+  )
+    .map(([, value]) => value)
+    .sort((a, b) => a.key.localeCompare(b.key))
+    .slice(-14);
+
+  const width = 900;
+  const height = 320;
+  const padding = 48;
+  const bottomPadding = 62;
+  const chartTop = 66;
+  const chartBottom = height - bottomPadding;
+  const maxCount = Math.max(1, ...buckets.map((bucket) => bucket.total));
+  const slotWidth = (width - padding * 2) / Math.max(buckets.length, 1);
+  const barWidth = Math.max(18, Math.min(44, slotWidth * 0.62));
+  const y = (value: number) => scale(value, 0, maxCount, chartBottom, chartTop);
+  const latest = datedEvents.at(-1)?.event;
+  const total = buckets.reduce((sum, bucket) => sum + bucket.total, 0);
+  const errors = buckets.reduce((sum, bucket) => sum + bucket.error, 0);
+
+  return (
+    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Telemetry events over time">
+      <line x1={padding} x2={width - padding} y1={chartBottom} y2={chartBottom} className="chart-axis" />
+      {[0.25, 0.5, 0.75, 1].map((ratio) => (
+        <g key={ratio}>
+          <line x1={padding} x2={width - padding} y1={y(maxCount * ratio)} y2={y(maxCount * ratio)} className="chart-grid" />
+          <text x={padding - 12} y={y(maxCount * ratio) + 4} textAnchor="end" className="chart-tick">
+            {formatNumber(maxCount * ratio, 0)}
+          </text>
+        </g>
+      ))}
+      {buckets.map((bucket, index) => {
+        const x = padding + index * slotWidth + slotWidth / 2 - barWidth / 2;
+        let cursor = chartBottom;
+        const segments = [
+          ["product", bucket.product],
+          ["refresh", bucket.refresh],
+          ["engineering", bucket.engineering],
+          ["other", bucket.other],
+          ["error", bucket.error]
+        ] as const;
+        return (
+          <g key={bucket.key}>
+            {segments.map(([segment, count]) => {
+              if (!count) return null;
+              const segmentHeight = chartBottom - y(count);
+              cursor -= segmentHeight;
+              return (
+                <rect
+                  key={segment}
+                  x={x}
+                  y={cursor}
+                  width={barWidth}
+                  height={Math.max(segmentHeight, 2)}
+                  rx={segment === "error" ? 2 : 4}
+                  className={`telemetry-segment telemetry-segment--${segment}`}
+                >
+                  <title>{`${bucket.label}\n${segment}: ${formatNumber(count, 0)} events\nTotal: ${formatNumber(bucket.total, 0)}`}</title>
+                </rect>
+              );
+            })}
+            <text x={x + barWidth / 2} y={height - 34} textAnchor="middle" className="chart-tick">
+              {bucket.label}
+            </text>
+          </g>
+        );
+      })}
+      <text x={padding} y={28} className="chart-label">
+        Telemetry event volume
+      </text>
+      <text x={padding} y={48} className="chart-sub-label">
+        Stacked by product, refresh, engineering, other, and error events
+      </text>
+      <text x={width - 360} y={28} className="chart-label">
+        {formatNumber(total, 0)} events | {formatNumber(errors, 0)} errors
+      </text>
+      <text x={width - 360} y={48} className="chart-sub-label">
+        Latest: {latest ? `${latest.name} at ${formatDateTime(latest.occurred_at_utc)}` : "No latest event"}
+      </text>
+      <g className="telemetry-chart-legend" transform={`translate(${padding}, ${height - 18})`}>
+        {["product", "refresh", "engineering", "other", "error"].map((segment, index) => (
+          <g key={segment} transform={`translate(${index * 136}, 0)`}>
+            <rect width={10} height={10} rx={3} className={`telemetry-segment telemetry-segment--${segment}`} />
+            <text x={16} y={9} className="chart-tick">
+              {segment}
+            </text>
+          </g>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+export function TelemetryLatencyChart({ events }: { events: TelemetryEventRecord[] }) {
+  const points = events
+    .map((event) => ({ event, timestamp: telemetryEventTime(event), latency: telemetryLatencyMs(event) }))
+    .filter((row): row is { event: TelemetryEventRecord; timestamp: number; latency: number } => row.timestamp !== null && row.latency !== null)
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-40);
+
+  if (!points.length) return <EmptyChart label="No latency fields found yet. Add latency_ms or duration_ms to event properties to monitor performance." />;
+
+  const width = 900;
+  const height = 260;
+  const padding = 48;
+  const bottomPadding = 54;
+  const maxLatency = Math.max(1, ...points.map((point) => point.latency));
+  const x = (index: number) => scale(index, 0, Math.max(points.length - 1, 1), padding, width - padding);
+  const y = (value: number) => scale(value, 0, maxLatency, height - bottomPadding, padding);
+  const path = points.map((point, index) => `${x(index)},${y(point.latency)}`).join(" ");
+  const sortedLatencies = points.map((point) => point.latency).sort((a, b) => a - b);
+  const p95 = sortedLatencies[Math.min(sortedLatencies.length - 1, Math.floor(sortedLatencies.length * 0.95))];
+  const average = sortedLatencies.reduce((sum, value) => sum + value, 0) / sortedLatencies.length;
+
+  return (
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Telemetry latency over time">
+      {[0, 0.5, 1].map((ratio) => (
+        <g key={ratio}>
+          <line x1={padding} x2={width - padding} y1={y(maxLatency * ratio)} y2={y(maxLatency * ratio)} className={ratio === 0 ? "chart-axis" : "chart-grid"} />
+          <text x={padding - 12} y={y(maxLatency * ratio) + 4} textAnchor="end" className="chart-tick">
+            {formatNumber(maxLatency * ratio, 0)}ms
+          </text>
+        </g>
+      ))}
+      <polyline points={path} fill="none" className="chart-line chart-line--accent" />
+      {points.map((point, index) => (
+        <circle
+          key={`${point.event.id}-${index}`}
+          cx={x(index)}
+          cy={y(point.latency)}
+          r={telemetryIsError(point.event) ? 7 : 5}
+          className={telemetryIsError(point.event) ? "chart-bubble chart-bubble--bad" : "chart-bubble chart-bubble--neutral"}
+        >
+          <title>{`${point.event.name}\n${formatNumber(point.latency, 0)}ms\n${formatDateTime(point.event.occurred_at_utc)}`}</title>
+        </circle>
+      ))}
+      <text x={padding} y={26} className="chart-label">
+        Latency trail
+      </text>
+      <text x={padding} y={46} className="chart-sub-label">
+        Reads latency_ms, duration_ms, elapsed_ms, response_ms, or runtime_ms from event properties/context
+      </text>
+      <text x={width - 260} y={26} className="chart-label">
+        Avg {formatNumber(average, 0)}ms | P95 {formatNumber(p95, 0)}ms
+      </text>
+    </svg>
+  );
+}
+
+export function TelemetryCategoryBars({ events }: { events: TelemetryEventRecord[] }) {
+  const rows = Array.from(
+    events.reduce((map, event) => {
+      const key = telemetryCategory(event);
+      map.set(key, (map.get(key) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>())
+  )
+    .map(([label, value]) => ({ label, value, tone: telemetryToneForCategory(label) }))
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+
+  return <HorizontalBars valueKind="number" rows={rows} />;
+}
+
+export function TelemetryConsentBars({ events }: { events: TelemetryEventRecord[] }) {
+  const rows = Array.from(
+    events.reduce((map, event) => {
+      const key = String(event.consent || "unknown").toLowerCase();
+      map.set(key, (map.get(key) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>())
+  )
+    .map(([label, value]) => ({
+      label,
+      value,
+      tone: label === "denied" ? "bad" as const : label === "granted" || label === "system" ? "good" as const : "neutral" as const
+    }))
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+
+  return <HorizontalBars valueKind="number" rows={rows} />;
+}
+
+export function TelemetryTopEventsBars({ events }: { events: TelemetryEventRecord[] }) {
+  const rows = Array.from(
+    events.reduce((map, event) => {
+      const key = event.name || "unknown_event";
+      map.set(key, (map.get(key) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>())
+  )
+    .map(([label, value]) => ({
+      label,
+      value,
+      detail: `${formatNumber((value / Math.max(events.length, 1)) * 100, 0)}% of visible events`,
+      tone: "neutral" as const
+    }))
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label))
+    .slice(0, 8);
+
+  return <HorizontalBars valueKind="number" rows={rows} />;
 }

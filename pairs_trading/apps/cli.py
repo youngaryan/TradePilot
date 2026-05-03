@@ -18,8 +18,10 @@ from ..data.news import (
     CompositeHeadlineProvider,
     DailySentimentFileProvider,
     LocalNewsFileProvider,
+    LocalWebSearchHeadlineProvider,
     NewsAPIHeadlineProvider,
     RSSHeadlineProvider,
+    WebResearchHeadlineProvider,
 )
 from ..engines.backtesting import (
     CostModel,
@@ -163,6 +165,14 @@ def load_daily_sentiment(
     newsapi_api_key: str | None = None,
     news_topics: list[str] | None = None,
     rss_feed_urls: list[str] | None = None,
+    local_web_search_urls: list[str] | None = None,
+    local_web_refresh_minutes: int = 60,
+    local_web_max_pages_per_source: int = 30,
+    web_research_urls: list[str] | None = None,
+    web_research_domains: list[str] | None = None,
+    web_research_query_terms: str = "",
+    web_research_max_articles: int = 4,
+    web_research_fetch_article_text: bool = True,
 ):
     def coerce_list(value) -> list[str] | None:
         if value is None:
@@ -175,6 +185,9 @@ def load_daily_sentiment(
     news_files = coerce_list(news_files)
     news_topics = coerce_list(news_topics)
     rss_feed_urls = coerce_list(rss_feed_urls)
+    local_web_search_urls = coerce_list(local_web_search_urls)
+    web_research_urls = coerce_list(web_research_urls)
+    web_research_domains = coerce_list(web_research_domains)
 
     if daily_sentiment_file:
         provider = DailySentimentFileProvider(daily_sentiment_file)
@@ -184,7 +197,7 @@ def load_daily_sentiment(
         return None
 
     providers = []
-    provider_names = list(dict.fromkeys(news_provider_names))
+    provider_names = list(dict.fromkeys(str(provider).lower() for provider in news_provider_names))
 
     if "local" in provider_names:
         if not news_files:
@@ -211,6 +224,32 @@ def load_daily_sentiment(
 
     if "rss" in provider_names:
         providers.append(RSSHeadlineProvider(feed_urls=rss_feed_urls))
+
+    if "local_web" in provider_names:
+        providers.append(
+            LocalWebSearchHeadlineProvider(
+                feed_urls=local_web_search_urls,
+                source_domains=web_research_domains,
+                direct_urls=web_research_urls,
+                query_terms=web_research_query_terms,
+                cache_dir=Path(sentiment_cache_dir) / "local_web_index",
+                max_results_per_ticker=web_research_max_articles,
+                max_crawl_pages_per_source=local_web_max_pages_per_source,
+                refresh_minutes=local_web_refresh_minutes,
+                fetch_article_text=web_research_fetch_article_text,
+            )
+        )
+
+    if "web" in provider_names:
+        providers.append(
+            WebResearchHeadlineProvider(
+                domains=web_research_domains,
+                research_urls=web_research_urls,
+                query_terms=web_research_query_terms,
+                max_articles_per_ticker=web_research_max_articles,
+                fetch_article_text=web_research_fetch_article_text,
+            )
+        )
 
     if not providers:
         return None
@@ -722,6 +761,14 @@ def run_stat_arb_pipeline(
     newsapi_api_key: str | None = None,
     news_topics: list[str] | None = None,
     rss_feed_urls: list[str] | None = None,
+    local_web_search_urls: list[str] | None = None,
+    local_web_refresh_minutes: int = 60,
+    local_web_max_pages_per_source: int = 30,
+    web_research_urls: list[str] | None = None,
+    web_research_domains: list[str] | None = None,
+    web_research_query_terms: str = "",
+    web_research_max_articles: int = 4,
+    web_research_fetch_article_text: bool = True,
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
@@ -756,6 +803,14 @@ def run_stat_arb_pipeline(
         newsapi_api_key=newsapi_api_key,
         news_topics=news_topics,
         rss_feed_urls=rss_feed_urls,
+        local_web_search_urls=local_web_search_urls,
+        local_web_refresh_minutes=local_web_refresh_minutes,
+        local_web_max_pages_per_source=local_web_max_pages_per_source,
+        web_research_urls=web_research_urls,
+        web_research_domains=web_research_domains,
+        web_research_query_terms=web_research_query_terms,
+        web_research_max_articles=web_research_max_articles,
+        web_research_fetch_article_text=web_research_fetch_article_text,
     )
 
     pipeline = SectorStatArbPipeline(
@@ -1277,6 +1332,14 @@ def run_pead_sentiment_pipeline(
     newsapi_api_key: str | None = None,
     news_topics: list[str] | None = None,
     rss_feed_urls: list[str] | None = None,
+    local_web_search_urls: list[str] | None = None,
+    local_web_refresh_minutes: int = 60,
+    local_web_max_pages_per_source: int = 30,
+    web_research_urls: list[str] | None = None,
+    web_research_domains: list[str] | None = None,
+    web_research_query_terms: str = "",
+    web_research_max_articles: int = 4,
+    web_research_fetch_article_text: bool = True,
     holding_period_bars: int = 5,
     entry_threshold: float = 0.20,
     event_weight: float = 0.45,
@@ -1329,6 +1392,14 @@ def run_pead_sentiment_pipeline(
         newsapi_api_key=newsapi_api_key,
         news_topics=news_topics,
         rss_feed_urls=rss_feed_urls,
+        local_web_search_urls=local_web_search_urls,
+        local_web_refresh_minutes=local_web_refresh_minutes,
+        local_web_max_pages_per_source=local_web_max_pages_per_source,
+        web_research_urls=web_research_urls,
+        web_research_domains=web_research_domains,
+        web_research_query_terms=web_research_query_terms,
+        web_research_max_articles=web_research_max_articles,
+        web_research_fetch_article_text=web_research_fetch_article_text,
     )
 
     pipeline = PEADSentimentPipeline(
@@ -1425,11 +1496,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--news-provider",
         nargs="+",
-        choices=["local", "rss", "newsapi", "alphavantage", "benzinga"],
+        choices=["local", "rss", "local_web", "web", "newsapi", "alphavantage", "benzinga"],
         help="One or more news sources to use before sentiment scoring.",
     )
     parser.add_argument("--news-file", nargs="*", help="One or more CSV/parquet files of raw news headlines.")
     parser.add_argument("--rss-feed", nargs="*", help="Optional RSS feed URLs. Use {ticker} in a URL for per-symbol feeds.")
+    parser.add_argument("--local-web-search-feed", nargs="*", help="Optional RSS/Atom feed URLs for cached local web search. Use {ticker} for per-symbol feeds.")
+    parser.add_argument("--local-web-refresh-minutes", type=int, default=60, help="Refresh interval for the cached local web-search index. Use 0 to refetch.")
+    parser.add_argument("--local-web-max-pages-per-source", type=int, default=30, help="Maximum pages to crawl from each local web seed URL or domain.")
+    parser.add_argument("--web-research-url", nargs="*", help="Optional direct web pages to fetch and summarize. Use {ticker} for per-symbol URLs.")
+    parser.add_argument("--web-research-domain", nargs="*", help="Optional trusted domains for GDELT-backed web research, e.g. reuters.com cnbc.com.")
+    parser.add_argument("--web-research-query-terms", default="", help="Optional extra web research query terms, e.g. earnings OR guidance.")
+    parser.add_argument("--web-research-max-articles", type=int, default=4, help="Maximum discovered web articles per symbol.")
+    parser.add_argument("--web-research-metadata-only", action="store_true", help="Do not fetch article pages; score discovered titles only.")
     parser.add_argument("--daily-sentiment-file", help="CSV or parquet of precomputed daily sentiment.")
     parser.add_argument("--news-api-key", help="API key for the selected remote news provider.")
     parser.add_argument("--alphavantage-api-key", help="API key for Alpha Vantage news.")
@@ -1546,6 +1625,14 @@ def main() -> None:
             newsapi_api_key=args.newsapi_api_key,
             news_topics=args.news_topics,
             rss_feed_urls=args.rss_feed,
+            local_web_search_urls=args.local_web_search_feed,
+            local_web_refresh_minutes=args.local_web_refresh_minutes,
+            local_web_max_pages_per_source=args.local_web_max_pages_per_source,
+            web_research_urls=args.web_research_url,
+            web_research_domains=args.web_research_domain,
+            web_research_query_terms=args.web_research_query_terms,
+            web_research_max_articles=args.web_research_max_articles,
+            web_research_fetch_article_text=not args.web_research_metadata_only,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,
@@ -1611,6 +1698,14 @@ def main() -> None:
             newsapi_api_key=args.newsapi_api_key,
             news_topics=args.news_topics,
             rss_feed_urls=args.rss_feed,
+            local_web_search_urls=args.local_web_search_feed,
+            local_web_refresh_minutes=args.local_web_refresh_minutes,
+            local_web_max_pages_per_source=args.local_web_max_pages_per_source,
+            web_research_urls=args.web_research_url,
+            web_research_domains=args.web_research_domain,
+            web_research_query_terms=args.web_research_query_terms,
+            web_research_max_articles=args.web_research_max_articles,
+            web_research_fetch_article_text=not args.web_research_metadata_only,
             holding_period_bars=args.pead_holding_period_bars,
             entry_threshold=args.pead_entry_threshold,
             event_weight=args.pead_event_weight,

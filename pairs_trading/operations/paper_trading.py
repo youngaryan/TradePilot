@@ -76,6 +76,14 @@ class PaperStrategySpec:
     news_provider_names: tuple[str, ...] = field(default_factory=tuple)
     news_files: tuple[str, ...] = field(default_factory=tuple)
     rss_feed_urls: tuple[str, ...] = field(default_factory=tuple)
+    local_web_search_urls: tuple[str, ...] = field(default_factory=tuple)
+    local_web_refresh_minutes: int = 60
+    local_web_max_pages_per_source: int = 30
+    web_research_urls: tuple[str, ...] = field(default_factory=tuple)
+    web_research_domains: tuple[str, ...] = field(default_factory=tuple)
+    web_research_query_terms: str = ""
+    web_research_max_articles: int = 4
+    web_research_fetch_article_text: bool = True
     newsapi_api_key: str | None = None
     use_finbert: bool = False
     local_finbert_only: bool = False
@@ -102,6 +110,14 @@ class PaperStrategySpec:
             news_provider_names=_coerce_str_tuple(payload.get("news_provider_names")),
             news_files=_coerce_str_tuple(payload.get("news_files")),
             rss_feed_urls=_coerce_str_tuple(payload.get("rss_feed_urls")),
+            local_web_search_urls=_coerce_str_tuple(payload.get("local_web_search_urls")),
+            local_web_refresh_minutes=int(payload.get("local_web_refresh_minutes", 60)),
+            local_web_max_pages_per_source=int(payload.get("local_web_max_pages_per_source", 30)),
+            web_research_urls=_coerce_str_tuple(payload.get("web_research_urls")),
+            web_research_domains=_coerce_str_tuple(payload.get("web_research_domains")),
+            web_research_query_terms=str(payload.get("web_research_query_terms", "")),
+            web_research_max_articles=int(payload.get("web_research_max_articles", 4)),
+            web_research_fetch_article_text=bool(payload.get("web_research_fetch_article_text", True)),
             newsapi_api_key=payload.get("newsapi_api_key"),
             use_finbert=bool(payload.get("use_finbert", False)),
             local_finbert_only=bool(payload.get("local_finbert_only", False)),
@@ -604,6 +620,14 @@ class PaperTradingService:
             newsapi_api_key=spec.newsapi_api_key,
             news_topics=list(spec.news_topics) or None,
             rss_feed_urls=list(spec.rss_feed_urls) or None,
+            local_web_search_urls=list(spec.local_web_search_urls) or None,
+            local_web_refresh_minutes=spec.local_web_refresh_minutes,
+            local_web_max_pages_per_source=spec.local_web_max_pages_per_source,
+            web_research_urls=list(spec.web_research_urls) or None,
+            web_research_domains=list(spec.web_research_domains) or None,
+            web_research_query_terms=spec.web_research_query_terms,
+            web_research_max_articles=spec.web_research_max_articles,
+            web_research_fetch_article_text=spec.web_research_fetch_article_text,
         )
 
         pipeline = PEADSentimentPipeline(
@@ -667,6 +691,14 @@ class PaperTradingService:
             newsapi_api_key=spec.newsapi_api_key,
             news_topics=list(spec.news_topics) or None,
             rss_feed_urls=list(spec.rss_feed_urls) or None,
+            local_web_search_urls=list(spec.local_web_search_urls) or None,
+            local_web_refresh_minutes=spec.local_web_refresh_minutes,
+            local_web_max_pages_per_source=spec.local_web_max_pages_per_source,
+            web_research_urls=list(spec.web_research_urls) or None,
+            web_research_domains=list(spec.web_research_domains) or None,
+            web_research_query_terms=spec.web_research_query_terms,
+            web_research_max_articles=spec.web_research_max_articles,
+            web_research_fetch_article_text=spec.web_research_fetch_article_text,
         )
 
         pipeline = SectorStatArbPipeline(

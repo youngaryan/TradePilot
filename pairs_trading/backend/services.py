@@ -25,7 +25,7 @@ from ..apps.cli import (
     run_stat_arb_pipeline,
 )
 from ..operations.paper_trading import run_paper_batch
-from ..data.news import AlphaVantageNewsProvider, BenzingaNewsProvider, CompositeHeadlineProvider, LocalNewsFileProvider, NewsAPIHeadlineProvider, RSSHeadlineProvider
+from ..data.news import AlphaVantageNewsProvider, BenzingaNewsProvider, CompositeHeadlineProvider, LocalNewsFileProvider, LocalWebSearchHeadlineProvider, NewsAPIHeadlineProvider, RSSHeadlineProvider, WebResearchHeadlineProvider
 from ..data.sentiment_accumulator import ShadowSentimentAccumulator
 from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from ..platform import SQLiteMetadataStore
@@ -766,6 +766,14 @@ class BacktestService:
                 newsapi_api_key=params.get("newsapi_api_key"),
                 news_topics=params.get("news_topics"),
                 rss_feed_urls=params.get("rss_feed_urls"),
+                local_web_search_urls=params.get("local_web_search_urls"),
+                local_web_refresh_minutes=int(params.get("local_web_refresh_minutes", 60)),
+                local_web_max_pages_per_source=int(params.get("local_web_max_pages_per_source", 30)),
+                web_research_urls=params.get("web_research_urls"),
+                web_research_domains=params.get("web_research_domains"),
+                web_research_query_terms=str(params.get("web_research_query_terms", "")),
+                web_research_max_articles=int(params.get("web_research_max_articles", 4)),
+                web_research_fetch_article_text=bool(params.get("web_research_fetch_article_text", True)),
                 use_finbert=bool(params.get("use_finbert", False)),
                 local_finbert_only=bool(params.get("local_finbert_only", False)),
                 purge_bars=request.purge_bars,
@@ -851,6 +859,14 @@ class BacktestService:
                 local_finbert_only=bool(params.get("local_finbert_only", False)),
                 news_topics=params.get("news_topics"),
                 rss_feed_urls=params.get("rss_feed_urls"),
+                local_web_search_urls=params.get("local_web_search_urls"),
+                local_web_refresh_minutes=int(params.get("local_web_refresh_minutes", 60)),
+                local_web_max_pages_per_source=int(params.get("local_web_max_pages_per_source", 30)),
+                web_research_urls=params.get("web_research_urls"),
+                web_research_domains=params.get("web_research_domains"),
+                web_research_query_terms=str(params.get("web_research_query_terms", "")),
+                web_research_max_articles=int(params.get("web_research_max_articles", 4)),
+                web_research_fetch_article_text=bool(params.get("web_research_fetch_article_text", True)),
                 holding_period_bars=int(params.get("holding_period_bars", 5)),
                 entry_threshold=float(params.get("entry_threshold", 0.20)),
                 event_weight=float(params.get("event_weight", 0.45)),
@@ -1109,6 +1125,16 @@ class SentimentService:
         preview = preview.loc[~preview.index.duplicated(keep="first")]
         return cls._sort_headline_frame(preview)
 
+    @staticmethod
+    def validate_request(request: SentimentAccumulationRequest) -> None:
+        if not request.symbols:
+            raise ValueError("Choose at least one symbol for sentiment accumulation.")
+        if not request.providers:
+            raise ValueError("Select at least one sentiment source.")
+        selected = {str(provider).lower() for provider in request.providers}
+        if "local" in selected and not request.news_files:
+            raise ValueError("Local sentiment accumulation requires at least one news file.")
+
     def _headline_provider(self, request: SentimentAccumulationRequest):
         providers = []
         selected = list(dict.fromkeys(provider.lower() for provider in request.providers))
@@ -1117,6 +1143,32 @@ class SentimentService:
 
         if "rss" in selected:
             providers.append(RSSHeadlineProvider(feed_urls=request.rss_feed_urls or None))
+
+        if "local_web" in selected:
+            providers.append(
+                LocalWebSearchHeadlineProvider(
+                    feed_urls=request.local_web_search_urls or None,
+                    source_domains=request.web_research_domains,
+                    direct_urls=request.web_research_urls,
+                    query_terms=request.web_research_query_terms,
+                    cache_dir=self.settings.sentiment_cache_dir / "local_web_index",
+                    max_results_per_ticker=request.web_research_max_articles,
+                    max_crawl_pages_per_source=request.local_web_max_pages_per_source,
+                    refresh_minutes=request.local_web_refresh_minutes,
+                    fetch_article_text=request.web_research_fetch_article_text,
+                )
+            )
+
+        if "web" in selected:
+            providers.append(
+                WebResearchHeadlineProvider(
+                    domains=request.web_research_domains,
+                    research_urls=request.web_research_urls,
+                    query_terms=request.web_research_query_terms,
+                    max_articles_per_ticker=request.web_research_max_articles,
+                    fetch_article_text=request.web_research_fetch_article_text,
+                )
+            )
 
         if "local" in selected:
             if not request.news_files:
@@ -1175,6 +1227,16 @@ class SentimentService:
                     "use a recent window such as the last 7-30 days for Yahoo Finance RSS. "
                     "For FX pairs such as EURUSD, the backend queries Yahoo aliases such as EURUSD=X."
                 )
+            if "web" in selected:
+                warnings.append(
+                    "No lightweight web-research headlines matched. GDELT DOC discovery mainly covers a rolling recent window; "
+                    "try the last 30-90 days, add source domains such as reuters.com or cnbc.com, or provide direct web URLs."
+                )
+            if "local_web" in selected:
+                warnings.append(
+                    "No local web-search headlines matched. This source searches the local RSS/page cache instead of a hosted search API; "
+                    "add RSS/Atom feed URLs, use a recent date range, or provide direct web URLs for specific pages."
+                )
             if "local" in selected:
                 warnings.append("No local news-file rows matched the selected symbols and dates.")
             if selected & {"newsapi", "alphavantage", "benzinga"}:
@@ -1191,26 +1253,51 @@ class SentimentService:
             {
                 "providers": [str(provider).lower() for provider in request.providers],
                 "rss_feed_urls": [str(url) for url in request.rss_feed_urls],
+                "local_web_search_urls": [str(url) for url in request.local_web_search_urls],
+                "local_web_refresh_minutes": request.local_web_refresh_minutes,
+                "local_web_max_pages_per_source": request.local_web_max_pages_per_source,
+                "web_research_urls": [str(url) for url in request.web_research_urls],
+                "web_research_domains": [str(domain) for domain in request.web_research_domains],
+                "web_research_query_terms": request.web_research_query_terms,
+                "web_research_max_articles": request.web_research_max_articles,
+                "web_research_fetch_article_text": request.web_research_fetch_article_text,
                 "news_files": [str(path) for path in request.news_files],
                 "warnings": warnings,
             }
         )
         metadata_path.write_text(json.dumps(json_ready(metadata), indent=2), encoding="utf-8")
 
-    def accumulate(self, request: SentimentAccumulationRequest) -> dict[str, Any]:
-        if not request.symbols:
-            raise ValueError("Choose at least one symbol for sentiment accumulation.")
+    def accumulate(
+        self,
+        request: SentimentAccumulationRequest,
+        progress: Callable[[str, str, float], None] | None = None,
+    ) -> dict[str, Any]:
+        def report(stage: str, message: str, value: float) -> None:
+            if progress is not None:
+                progress(stage, message, float(max(0.0, min(value, 0.98))))
+
+        self.validate_request(request)
+        report("preparing_sources", "Preparing selected headline providers and checking credentials.", 0.08)
         output_dir = self._output_dir(request.output_dir)
         provider = self._headline_provider(request)
+        report("loading_model", "Loading the sentiment scorer. FinBERT is skipped when the lightweight option is selected.", 0.18)
         model = self._sentiment_model(request.use_finbert, request.local_finbert_only)
+        report("accumulating_sentiment", "Fetching, deduplicating, scoring, and aggregating sentiment data.", 0.25)
         result = ShadowSentimentAccumulator(
             headline_provider=provider,
             sentiment_model=model,
             output_dir=output_dir,
-        ).run(tickers=request.symbols, start=request.start, end=request.end)
+        ).run(
+            tickers=request.symbols,
+            start=request.start,
+            end=request.end,
+            progress=lambda stage, message, value: report(stage, message, 0.25 + 0.55 * value),
+        )
         provider_errors = list(getattr(provider, "last_errors", []))
         warnings = self._accumulation_warnings(request, result, provider_errors=provider_errors)
+        report("writing_metadata", "Writing run metadata, provider warnings, and dataset lineage.", 0.84)
         self._write_accumulation_metadata(result, request, warnings)
+        report("registering_dataset", "Registering the sentiment dataset in the workspace metadata store.", 0.90)
         demo_context = self.metadata_store.ensure_demo_workspace()
         daily_path = Path(result.output_dir) / "daily_sentiment.parquet"
         self.metadata_store.upsert_dataset(
@@ -1224,11 +1311,18 @@ class SentimentService:
                     "symbols": list(request.symbols),
                     "start": request.start,
                     "end": request.end,
+                "web_research_domains": list(request.web_research_domains),
+                "web_research_urls": list(request.web_research_urls),
+                "local_web_search_urls": list(request.local_web_search_urls),
+                "local_web_refresh_minutes": request.local_web_refresh_minutes,
+                "local_web_max_pages_per_source": request.local_web_max_pages_per_source,
+                "web_research_model": "lightweight_extractive_v1" if {"web", "local_web"} & {provider.lower() for provider in request.providers} else None,
                 },
                 "schema": {"columns": list(self._read_frame(daily_path).columns) if daily_path.exists() else []},
                 "row_count": int(result.daily_rows),
             },
         )
+        report("loading_results", "Loading the latest sentiment tables and charts for the UI.", 0.95)
         return self.dataset(output_dir=result.output_dir)
 
     def dataset(self, output_dir: str | Path | None = None) -> dict[str, Any]:
@@ -1319,3 +1413,206 @@ class SentimentService:
             "headlines": json_ready(headlines.to_dict("records")),
             "scored_headlines": json_ready(scored_tail.to_dict("records")),
         }
+
+
+@dataclass
+class SentimentAccumulationJob:
+    id: str
+    status: str
+    request: dict[str, Any]
+    created_at_utc: str
+    updated_at_utc: str
+    progress: float = 0.0
+    stage: str = "queued"
+    message: str = "Waiting for a sentiment worker."
+    warnings: list[str] = field(default_factory=list)
+    started_at_utc: str | None = None
+    finished_at_utc: str | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "status": self.status,
+            "request": self.request,
+            "created_at_utc": self.created_at_utc,
+            "updated_at_utc": self.updated_at_utc,
+            "progress": self.progress,
+            "stage": self.stage,
+            "message": self.message,
+            "warnings": self.warnings,
+            "started_at_utc": self.started_at_utc,
+            "finished_at_utc": self.finished_at_utc,
+            "result": self.result,
+            "error": self.error,
+        }
+
+
+class SentimentJobRunner:
+    def __init__(self, settings: BackendSettings, *, max_workers: int = 1, max_history: int = 50) -> None:
+        self.settings = settings
+        self.max_history = max_history
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sentiment-agent")
+        self.lock = Lock()
+        self.jobs: dict[str, SentimentAccumulationJob] = {}
+        self.jobs_dir = settings.sentiment_job_state_dir
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+        self._load_jobs()
+
+    def submit(self, request: SentimentAccumulationRequest) -> dict[str, Any]:
+        SentimentService(self.settings).validate_request(request)
+        now = _utc_now_iso()
+        job = SentimentAccumulationJob(
+            id=uuid4().hex,
+            status="queued",
+            request=json_ready(request.model_dump(mode="json")),
+            created_at_utc=now,
+            updated_at_utc=now,
+            progress=0.02,
+            stage="queued",
+            message="Queued locally. A sentiment worker will start fetching headlines next.",
+        )
+        with self.lock:
+            self.jobs[job.id] = job
+            self._save_locked(job)
+            self._trim_locked()
+
+        future = self.executor.submit(self._run_job, job.id, request)
+        future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        return job.to_dict()
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [
+                job.to_dict()
+                for job in sorted(self.jobs.values(), key=lambda item: item.created_at_utc, reverse=True)
+            ]
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            return None if job is None else job.to_dict()
+
+    def _set_status(self, job_id: str, status: str, **updates: Any) -> None:
+        now = _utc_now_iso()
+        with self.lock:
+            job = self.jobs[job_id]
+            job.status = status
+            job.updated_at_utc = now
+            for key, value in updates.items():
+                setattr(job, key, value)
+            self._save_locked(job)
+
+    def _run_job(self, job_id: str, request: SentimentAccumulationRequest) -> None:
+        def progress(stage: str, message: str, value: float) -> None:
+            self._set_status(
+                job_id,
+                "running",
+                stage=stage,
+                message=message,
+                progress=float(max(0.0, min(value, 0.98))),
+            )
+
+        self._set_status(
+            job_id,
+            "running",
+            started_at_utc=_utc_now_iso(),
+            stage="starting",
+            message="Worker started. Preparing sources, cache paths, and model settings.",
+            progress=0.06,
+        )
+        try:
+            result = SentimentService(self.settings).accumulate(request, progress=progress)
+            summary = result.get("summary", {})
+            warnings = [str(warning) for warning in result.get("warnings", [])]
+            fetched = result.get("metadata", {}).get("fetched_headlines")
+            daily_rows = summary.get("daily_rows")
+            self._set_status(
+                job_id,
+                "completed",
+                result=result,
+                warnings=warnings,
+                finished_at_utc=_utc_now_iso(),
+                progress=1.0,
+                stage="completed",
+                message=f"Sentiment accumulation completed. Fetched {fetched if fetched is not None else 'n/a'} new headlines and built {daily_rows if daily_rows is not None else 'n/a'} daily rows.",
+            )
+        except Exception as exc:  # pragma: no cover - exercised through API tests
+            self._set_status(
+                job_id,
+                "failed",
+                error=str(exc),
+                finished_at_utc=_utc_now_iso(),
+                progress=1.0,
+                stage="failed",
+                message="Sentiment accumulation failed. Review the error, sources, credentials, and date range.",
+            )
+
+    def _finalize_unhandled(self, job_id: str, future: Future[None]) -> None:
+        exception = future.exception()
+        if exception is None:
+            return
+        self._set_status(
+            job_id,
+            "failed",
+            error=str(exception),
+            finished_at_utc=_utc_now_iso(),
+            progress=1.0,
+            stage="failed",
+            message="The sentiment worker crashed before returning a result.",
+        )
+
+    def _save_locked(self, job: SentimentAccumulationJob) -> None:
+        payload = json_ready(job.to_dict())
+        path = self.jobs_dir / f"{job.id}.json"
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+        self.metadata_store.upsert_job(kind="sentiment", payload=payload)
+
+    def _load_jobs(self) -> None:
+        for payload in self.metadata_store.list_jobs(kind="sentiment"):
+            try:
+                job = SentimentAccumulationJob(**payload)
+            except Exception:
+                continue
+            self._load_job_instance(job)
+
+        for path in sorted(self.jobs_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                job = SentimentAccumulationJob(**payload)
+            except Exception:
+                continue
+            if job.id in self.jobs:
+                continue
+            self._load_job_instance(job)
+
+    def _load_job_instance(self, job: SentimentAccumulationJob) -> None:
+        changed = False
+        if job.status in {"queued", "running"}:
+            job.status = "interrupted"
+            job.stage = "interrupted"
+            job.progress = 1.0
+            job.message = "The backend restarted before this sentiment run finished. Please rerun it."
+            job.finished_at_utc = job.finished_at_utc or _utc_now_iso()
+            changed = True
+        self.jobs[job.id] = job
+        if changed:
+            self._save_locked(job)
+        else:
+            self.metadata_store.upsert_job(kind="sentiment", payload=json_ready(job.to_dict()))
+
+    def _trim_locked(self) -> None:
+        if len(self.jobs) <= self.max_history:
+            return
+        removable = sorted(self.jobs.values(), key=lambda item: item.created_at_utc)[: len(self.jobs) - self.max_history]
+        for job in removable:
+            self.jobs.pop(job.id, None)
+            try:
+                (self.jobs_dir / f"{job.id}.json").unlink()
+            except FileNotFoundError:
+                pass
+            self.metadata_store.delete_job(kind="sentiment", job_id=job.id)

@@ -22,6 +22,7 @@ class BackendSettings:
     backtest_job_state_dir: Path = Path("artifacts/backtests/jobs")
     price_cache_dir: Path = Path("data/cache")
     sentiment_cache_dir: Path = Path("data/sentiment_cache")
+    sentiment_job_state_dir: Path = Path("artifacts/sentiment/jobs")
     event_cache_dir: Path = Path("data/event_cache")
     cors_origins: tuple[str, ...] = (
         "http://localhost:5173",
@@ -52,6 +53,7 @@ class BackendSettings:
             backtest_job_state_dir=Path(os.getenv("PAIRS_TRADING_BACKTEST_JOB_STATE_DIR", "artifacts/backtests/jobs")),
             price_cache_dir=Path(os.getenv("PAIRS_TRADING_PRICE_CACHE_DIR", "data/cache")),
             sentiment_cache_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_CACHE_DIR", "data/sentiment_cache")),
+            sentiment_job_state_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_JOB_STATE_DIR", "artifacts/sentiment/jobs")),
             event_cache_dir=Path(os.getenv("PAIRS_TRADING_EVENT_CACHE_DIR", "data/event_cache")),
             cors_origins=_split_env(
                 os.getenv("PAIRS_TRADING_CORS_ORIGINS"),

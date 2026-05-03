@@ -78,16 +78,24 @@ class SentimentAccumulationRequest(BaseModel):
     start: str = Field(default="2024-01-01", description="Start date, formatted as YYYY-MM-DD.")
     end: str = Field(default="2024-02-10", description="End date, formatted as YYYY-MM-DD.")
     providers: list[str] = Field(
-        default_factory=lambda: ["rss"],
-        description="Headline sources: rss, local, newsapi, alphavantage, benzinga. API-key providers need request credentials or backend environment variables.",
+        default_factory=lambda: ["rss", "local_web"],
+        description="Headline sources: rss, local_web, web, local, newsapi, alphavantage, benzinga. API-key providers need request credentials or backend environment variables.",
     )
     rss_feed_urls: list[str] = Field(default_factory=list, description="Optional RSS URLs. Use {ticker} for per-symbol feeds.")
+    local_web_search_urls: list[str] = Field(default_factory=list, description="Optional RSS/Atom URLs for local cached web search. Use {ticker} for per-symbol feeds.")
+    local_web_refresh_minutes: int = Field(default=60, ge=0, description="Refresh interval for the local web-search cache. Set 0 to refetch.")
+    local_web_max_pages_per_source: int = Field(default=30, ge=1, le=250, description="Maximum pages to crawl from each local web seed URL or domain.")
+    web_research_urls: list[str] = Field(default_factory=list, description="Optional direct web pages to fetch and summarize. Use {ticker} for per-symbol pages.")
+    web_research_domains: list[str] = Field(default_factory=list, description="Optional source domains for GDELT-backed web research, for example reuters.com or cnbc.com.")
+    web_research_query_terms: str = Field(default="", description="Optional extra GDELT query terms, such as earnings OR guidance.")
+    web_research_max_articles: int = Field(default=4, ge=1, le=25, description="Maximum discovered web articles per symbol.")
+    web_research_fetch_article_text: bool = Field(default=True, description="Fetch article pages and create lightweight extractive summaries when possible.")
     news_files: list[str] = Field(default_factory=list, description="Optional local CSV/parquet headline files.")
     newsapi_api_key: str | None = Field(default=None, description="Optional NewsAPI.org key. Backend env NEWSAPI_API_KEY is also supported.")
     alphavantage_api_key: str | None = Field(default=None, description="Optional Alpha Vantage key. Backend env ALPHAVANTAGE_API_KEY is also supported.")
     benzinga_api_key: str | None = Field(default=None, description="Optional Benzinga key. Backend env BENZINGA_API_KEY is also supported.")
     output_dir: Path | None = Field(default=None, description="Output directory for raw/scored/daily sentiment files.")
-    use_finbert: bool = Field(default=True, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
+    use_finbert: bool = Field(default=False, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
     local_finbert_only: bool = Field(default=True, description="Do not download FinBERT during UI runs.")
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -101,6 +102,7 @@ class BackendAppTests(unittest.TestCase):
                 paper_artifact_root=workspace / "runs",
                 paper_job_state_dir=workspace / "paper_jobs",
                 backtest_job_state_dir=workspace / "backtest_jobs",
+                sentiment_job_state_dir=workspace / "sentiment_jobs",
                 metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=workspace / "missing.json",
             )
@@ -329,6 +331,105 @@ class BackendAppTests(unittest.TestCase):
         dataset = client.get("/api/sentiment/dataset", params={"output_dir": str(output_dir)})
         self.assertEqual(dataset.status_code, 200)
         self.assertEqual(dataset.json()["summary"]["scored_headline_count"], 2)
+
+    def test_sentiment_job_routes_report_progress_completion_and_failures(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_sentiment_jobs")
+        news_path = workspace / "headlines.csv"
+        output_dir = workspace / "sentiment_shadow"
+        pd.DataFrame(
+            {
+                "timestamp": ["2024-01-01T09:00:00Z"],
+                "ticker": ["AAA"],
+                "headline": ["AAA raises guidance after strong earnings"],
+                "source": ["unit_news"],
+                "url": ["https://example.com/a"],
+                "relevance": [1.0],
+            }
+        ).to_csv(news_path, index=False)
+
+        app = create_app(
+            BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                sentiment_job_state_dir=workspace / "sentiment_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                sentiment_cache_dir=workspace / "sentiment_cache",
+            )
+        )
+        client = TestClient(app)
+
+        with patch("pairs_trading.backend.services.build_best_available_sentiment_model", return_value=FixedBackendSentimentModel()):
+            submitted = client.post(
+                "/api/sentiment/accumulate-job",
+                json={
+                    "symbols": ["AAA"],
+                    "start": "2024-01-01",
+                    "end": "2024-01-02",
+                    "providers": ["local"],
+                    "news_files": [str(news_path)],
+                    "output_dir": str(output_dir),
+                    "use_finbert": False,
+                    "local_finbert_only": True,
+                },
+            )
+            self.assertEqual(submitted.status_code, 202)
+            job_id = submitted.json()["id"]
+
+            completed_payload = None
+            for _ in range(50):
+                job = client.get(f"/api/sentiment/jobs/{job_id}")
+                self.assertEqual(job.status_code, 200)
+                if job.json()["status"] == "completed":
+                    completed_payload = job.json()
+                    break
+                time.sleep(0.05)
+
+        self.assertIsNotNone(completed_payload)
+        assert completed_payload is not None
+        self.assertEqual(completed_payload["progress"], 1.0)
+        self.assertEqual(completed_payload["stage"], "completed")
+        self.assertIn("Sentiment accumulation completed", completed_payload["message"])
+        self.assertEqual(completed_payload["result"]["summary"]["headline_count"], 1)
+        self.assertEqual(completed_payload["result"]["daily_points"][0]["ticker"], "AAA")
+        jobs = client.get("/api/sentiment/jobs")
+        self.assertEqual(jobs.status_code, 200)
+        self.assertIn(job_id, {job["id"] for job in jobs.json()})
+
+        failed = client.post(
+            "/api/sentiment/accumulate-job",
+            json={
+                "symbols": ["AAA"],
+                "start": "2024-01-01",
+                "end": "2024-01-02",
+                "providers": ["newsapi"],
+                "news_files": [],
+                "output_dir": str(output_dir),
+                "use_finbert": False,
+                "local_finbert_only": True,
+            },
+        )
+        self.assertEqual(failed.status_code, 202)
+        failed_id = failed.json()["id"]
+        failed_payload = None
+        for _ in range(50):
+            job = client.get(f"/api/sentiment/jobs/{failed_id}")
+            self.assertEqual(job.status_code, 200)
+            if job.json()["status"] == "failed":
+                failed_payload = job.json()
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(failed_payload)
+        assert failed_payload is not None
+        self.assertEqual(failed_payload["progress"], 1.0)
+        self.assertEqual(failed_payload["stage"], "failed")
+        self.assertIn("NewsAPI accumulation requires", failed_payload["error"])
 
     def test_sentiment_dataset_preview_includes_latest_run_ticker_when_truncated(self) -> None:
         from pairs_trading.backend.app import create_app
