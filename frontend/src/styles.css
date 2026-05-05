@@ -1855,6 +1855,143 @@ textarea:focus {
   line-height: 1.5;
 }
 
+.pricing-page,
+.admin-dashboard {
+  display: grid;
+  gap: 18px;
+}
+
+.payment-wall-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(245, 158, 11, 0.34);
+  border-radius: 24px;
+  color: #78350f;
+  background: linear-gradient(135deg, rgba(255, 251, 235, 0.96), rgba(254, 243, 199, 0.78));
+  box-shadow: var(--shadow-soft);
+}
+
+.payment-wall-banner strong,
+.payment-wall-banner span {
+  display: block;
+}
+
+.payment-wall-banner span {
+  margin-top: 3px;
+  color: #92400e;
+  line-height: 1.5;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.pricing-card {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid rgba(16, 21, 31, 0.08);
+  border-radius: 30px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: var(--shadow-soft);
+}
+
+.pricing-card--featured {
+  border-color: rgba(18, 128, 92, 0.28);
+  background:
+    radial-gradient(circle at top right, rgba(18, 128, 92, 0.16), transparent 18rem),
+    rgba(255, 255, 255, 0.92);
+  box-shadow: 0 30px 80px rgba(16, 21, 31, 0.14);
+}
+
+.pricing-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 850;
+}
+
+.pricing-card h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.5rem;
+  letter-spacing: -0.04em;
+}
+
+.pricing-card > strong {
+  color: var(--ink);
+  font-size: 2.6rem;
+  letter-spacing: -0.06em;
+}
+
+.pricing-card small {
+  color: var(--muted);
+  font-size: 0.95rem;
+  letter-spacing: 0;
+}
+
+.pricing-card p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.pricing-card ul {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.pricing-card li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  color: var(--ink);
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.pricing-card li svg {
+  flex: 0 0 auto;
+  color: #12805c;
+  margin-top: 2px;
+}
+
+.admin-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(120px, 0.55fr)) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 16px;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.table-actions .ghost-button {
+  min-height: 36px;
+  padding: 0 11px;
+  font-size: 0.82rem;
+}
+
+.danger-button {
+  color: #991b1b;
+  border-color: rgba(248, 113, 113, 0.42);
+  background: rgba(254, 226, 226, 0.7);
+}
+
 :root[data-theme="dark"] .nav-rail {
   background:
     linear-gradient(180deg, rgba(7, 16, 29, 0.98), rgba(8, 17, 31, 0.96)),
@@ -1898,6 +2035,30 @@ textarea:focus {
 :root[data-theme="dark"] .job-progress-card--done {
   border-color: rgba(74, 222, 128, 0.26);
   background: linear-gradient(135deg, rgba(12, 35, 26, 0.94), rgba(15, 23, 42, 0.82));
+}
+
+:root[data-theme="dark"] .pricing-card,
+:root[data-theme="dark"] .payment-wall-banner {
+  color: var(--ink);
+  border-color: rgba(255, 255, 255, 0.10);
+  background: rgba(15, 25, 42, 0.84);
+}
+
+:root[data-theme="dark"] .pricing-card--featured {
+  border-color: rgba(167, 243, 208, 0.26);
+  background:
+    radial-gradient(circle at top right, rgba(20, 184, 166, 0.15), transparent 18rem),
+    rgba(15, 25, 42, 0.9);
+}
+
+:root[data-theme="dark"] .payment-wall-banner span {
+  color: #fcd34d;
+}
+
+:root[data-theme="dark"] .danger-button {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(127, 29, 29, 0.25);
 }
 
 :root[data-theme="dark"] .job-progress-card--warning {
@@ -2242,6 +2403,7 @@ textarea:focus {
 }
 
 .marketing-nav nav a,
+.marketing-nav nav button,
 .app-nav-link {
   display: inline-flex;
   align-items: center;
@@ -2255,9 +2417,11 @@ textarea:focus {
   font-size: 0.9rem;
   font-weight: 850;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .marketing-nav nav a:hover,
+.marketing-nav nav button:hover,
 .app-nav-link:hover {
   color: var(--ink);
   background: #f4efe6;
@@ -2326,6 +2490,18 @@ textarea:focus {
   color: var(--ink);
   font-weight: 950;
   text-decoration: none;
+}
+
+button.secondary-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.secondary-link:hover {
+  color: var(--accent);
 }
 
 .marketing-hero,
@@ -2488,7 +2664,20 @@ textarea:focus {
   gap: 16px;
 }
 
-.tool-card {
+.example-grid,
+.faq-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.faq-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tool-card,
+.example-card,
+.faq-card {
   display: grid;
   gap: 12px;
   min-height: 260px;
@@ -2497,6 +2686,21 @@ textarea:focus {
   border-radius: 28px;
   background: rgba(255, 255, 255, 0.76);
   box-shadow: var(--shadow-soft);
+}
+
+.example-card,
+.faq-card {
+  min-height: 220px;
+}
+
+.example-card {
+  background:
+    radial-gradient(circle at top right, rgba(18, 128, 92, 0.10), transparent 16rem),
+    rgba(255, 255, 255, 0.78);
+}
+
+.faq-card {
+  min-height: 170px;
 }
 
 .tool-card > span {
@@ -2510,14 +2714,28 @@ textarea:focus {
   background: rgba(230, 249, 238, 0.92);
 }
 
-.tool-card h3 {
+.tool-card h3,
+.example-card h3,
+.faq-card h3 {
   margin: 0;
   color: var(--ink);
   font-size: 1.08rem;
   letter-spacing: -0.035em;
 }
 
-.tool-card a {
+.example-card p,
+.faq-card p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.example-card strong {
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+.tool-card a,
+.tool-card .link-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2525,6 +2743,13 @@ textarea:focus {
   color: var(--ink);
   font-weight: 950;
   text-decoration: none;
+  justify-self: start;
+}
+
+.auth-mode-switch {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .workflow-band {
@@ -2771,6 +2996,8 @@ textarea {
 :root[data-theme="dark"] .app-nav,
 :root[data-theme="dark"] .signin-card,
 :root[data-theme="dark"] .tool-card,
+:root[data-theme="dark"] .example-card,
+:root[data-theme="dark"] .faq-card,
 :root[data-theme="dark"] .hero-stats div,
 :root[data-theme="dark"] .stat-card,
 :root[data-theme="dark"] .hero-product-card,
@@ -2793,11 +3020,13 @@ textarea {
 }
 
 :root[data-theme="dark"] .marketing-nav nav a,
+:root[data-theme="dark"] .marketing-nav nav button,
 :root[data-theme="dark"] .app-nav-link {
   color: #aebbd0;
 }
 
 :root[data-theme="dark"] .marketing-nav nav a:hover,
+:root[data-theme="dark"] .marketing-nav nav button:hover,
 :root[data-theme="dark"] .app-nav-link:hover,
 :root[data-theme="dark"] .workspace-pill {
   color: var(--ink);
@@ -2844,7 +3073,14 @@ textarea {
   }
 
   .tool-grid,
-  .stat-strip {
+  .stat-strip,
+  .pricing-grid,
+  .example-grid,
+  .faq-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2950,7 +3186,15 @@ textarea {
   .hero-stats,
   .tool-grid,
   .stat-strip,
-  .workflow-steps {
+  .workflow-steps,
+  .pricing-grid,
+  .example-grid,
+  .faq-grid,
+  .admin-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .payment-wall-banner {
     grid-template-columns: 1fr;
   }
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import BackendSettings
@@ -13,6 +13,7 @@ from ..schemas import (
     BillingPortalRequest,
     LoginRequest,
     ProjectCreateRequest,
+    SignupRequest,
 )
 
 
@@ -42,8 +43,17 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
     def login(request: LoginRequest) -> dict[str, Any]:
         try:
             return auth_service.login(email=request.email, password=request.password)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    @router.post("/auth/signup", status_code=201)
+    def signup(request: SignupRequest) -> dict[str, Any]:
+        try:
+            return auth_service.signup(request)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.get("/auth/me")
     def me(
@@ -68,6 +78,14 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
     @router.get("/workspaces")
     def workspace(ctx: RequestContext = Depends(context)) -> dict[str, Any]:
         return saas_service.workspace_payload(organization_id=ctx.organization_id)
+
+    @router.get("/billing/pricing")
+    def pricing() -> dict[str, Any]:
+        return billing_service.pricing()
+
+    @router.get("/billing/status")
+    def billing_status(ctx: RequestContext = Depends(context)) -> dict[str, Any]:
+        return billing_service.status(organization_id=ctx.organization_id)
 
     @router.post("/workspaces/projects", status_code=201)
     def create_project(request: ProjectCreateRequest, ctx: RequestContext = Depends(context)) -> dict[str, Any]:
@@ -119,5 +137,17 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
             return billing_service.portal(organization_id=ctx.organization_id, return_url=request.return_url)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Stripe portal failed: {exc}") from exc
+
+    @router.post("/billing/webhook")
+    async def stripe_webhook(request: Request) -> dict[str, Any]:
+        try:
+            return billing_service.webhook(
+                payload=await request.body(),
+                signature_header=request.headers.get("stripe-signature"),
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..authz import require_paid_context
 from ..config import BackendSettings
+from ..saas import RequestContext
 from ..schemas import PaperRunRequest
 from ..services import PaperRunCommand, PaperRunJobRunner, PaperService
 
@@ -14,6 +16,7 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/paper", tags=["paper"])
     service = PaperService(settings)
     runner = PaperRunJobRunner(settings)
+    paid_context = require_paid_context(settings, feature="Paper trading agents")
 
     @router.get("/summary")
     def get_summary(
@@ -38,7 +41,7 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
         return strategy
 
     @router.post("/run")
-    def run_batch(request: PaperRunRequest) -> dict[str, Any]:
+    def run_batch(request: PaperRunRequest, _: RequestContext = Depends(paid_context)) -> dict[str, Any]:
         try:
             return service.run_paper_batch(
                 PaperRunCommand(
@@ -55,7 +58,7 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/run-job", status_code=202)
-    def run_batch_job(request: PaperRunRequest) -> dict[str, Any]:
+    def run_batch_job(request: PaperRunRequest, _: RequestContext = Depends(paid_context)) -> dict[str, Any]:
         try:
             return runner.submit(
                 PaperRunCommand(

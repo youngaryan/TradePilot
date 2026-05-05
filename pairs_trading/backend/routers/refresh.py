@@ -5,8 +5,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from ..authz import require_admin_context, require_paid_context
 from ..config import BackendSettings
-from ..saas import AuthService
+from ..saas import AuthService, RequestContext
 from ..schemas import DataRefreshRequest, DataRefreshTickRequest
 from ..telemetry import DailyRefreshService
 
@@ -18,6 +19,8 @@ def build_refresh_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/refresh", tags=["refresh"])
     auth_service = AuthService(settings)
     refresh_service = DailyRefreshService(settings)
+    paid_context = require_paid_context(settings, feature="Data refresh")
+    admin_context = require_admin_context(settings)
 
     def context(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -38,12 +41,14 @@ def build_refresh_router(settings: BackendSettings) -> APIRouter:
         return refresh_service.status_payload(organization_id=ctx["organization_id"])
 
     @router.post("/run", status_code=202)
-    def run_refresh(request: DataRefreshRequest, ctx: dict[str, str] = Depends(context)) -> dict[str, Any]:
-        user_id = request.user_id or ctx["user_id"]
-        return refresh_service.run_for_user(user_id=user_id, organization_id=ctx["organization_id"], force=request.force)
+    def run_refresh(request: DataRefreshRequest, ctx: RequestContext = Depends(paid_context)) -> dict[str, Any]:
+        if request.user_id and str(ctx.user.get("role")) != "admin":
+            raise HTTPException(status_code=403, detail="Only admins can refresh another user's data.")
+        user_id = request.user_id or str(ctx.user["id"])
+        return refresh_service.run_for_user(user_id=user_id, organization_id=ctx.organization_id, force=request.force)
 
     @router.post("/tick", status_code=202)
-    def tick(request: DataRefreshTickRequest, ctx: dict[str, str] = Depends(context)) -> dict[str, Any]:
+    def tick(request: DataRefreshTickRequest, _: RequestContext = Depends(admin_context)) -> dict[str, Any]:
         return refresh_service.run_due_users(limit=request.limit, force=request.force)
 
     return router

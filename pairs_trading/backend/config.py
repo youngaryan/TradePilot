@@ -33,6 +33,7 @@ class BackendSettings:
     stripe_pro_price_id: str | None = None
     stripe_success_url: str | None = None
     stripe_cancel_url: str | None = None
+    stripe_webhook_secret: str | None = None
     telemetry_enabled: bool = True
     telemetry_sample_rate: float = 1.0
     refresh_interval_hours: int = 24
@@ -64,6 +65,7 @@ class BackendSettings:
             stripe_pro_price_id=os.getenv("STRIPE_PRO_PRICE_ID"),
             stripe_success_url=os.getenv("STRIPE_SUCCESS_URL"),
             stripe_cancel_url=os.getenv("STRIPE_CANCEL_URL"),
+            stripe_webhook_secret=os.getenv("STRIPE_WEBHOOK_SECRET"),
             telemetry_enabled=os.getenv("PAIRS_TRADING_TELEMETRY_ENABLED", "true").lower() not in {"0", "false", "no"},
             telemetry_sample_rate=float(os.getenv("PAIRS_TRADING_TELEMETRY_SAMPLE_RATE", "1.0")),
             refresh_interval_hours=int(os.getenv("PAIRS_TRADING_REFRESH_INTERVAL_HOURS", "24")),

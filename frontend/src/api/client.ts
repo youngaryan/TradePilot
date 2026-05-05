@@ -2,10 +2,13 @@ import type {
   BacktestJob,
   BacktestRunRequest,
   BacktestTemplate,
+  AdminOverviewPayload,
+  AdminUserRecord,
   AuthResponse,
   ApiKeyCreateRequest,
   BillingCheckoutRequest,
   BillingResponse,
+  BillingStatusPayload,
   ExperimentRecord,
   HealthResponse,
   PaperDashboardPayload,
@@ -19,6 +22,8 @@ import type {
   SentimentAccumulationJob,
   SentimentDatasetPayload,
   PaperStrategy,
+  PricingPayload,
+  SignupRequest,
   StrategyCatalogItem,
   SystemMetadata,
   TelemetryEventRecord,
@@ -100,6 +105,13 @@ export function login(email: string, password: string) {
   });
 }
 
+export function signup(request: SignupRequest) {
+  return requestJson<AuthResponse>("/api/auth/signup", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
 export function getCurrentUser() {
   return requestJson<Omit<AuthResponse, "access_token" | "token_type">>("/api/auth/me");
 }
@@ -110,6 +122,14 @@ export function logout() {
 
 export function getWorkspace() {
   return requestJson<WorkspacePayload>("/api/workspaces");
+}
+
+export function getPricing() {
+  return requestJson<PricingPayload>("/api/billing/pricing");
+}
+
+export function getBillingStatus() {
+  return requestJson<BillingStatusPayload>("/api/billing/status");
 }
 
 export function createProject(request: ProjectCreateRequest) {
@@ -153,6 +173,33 @@ export function openBillingPortal(returnUrl?: string) {
   return requestJson<BillingResponse>("/api/billing/portal", {
     method: "POST",
     body: JSON.stringify({ return_url: returnUrl ?? null })
+  });
+}
+
+export function getAdminOverview() {
+  return requestJson<AdminOverviewPayload>("/api/admin/overview");
+}
+
+export function listAdminUsers(params?: {
+  search?: string;
+  role?: string;
+  status?: string;
+  sort_by?: string;
+  sort_dir?: string;
+  limit?: number;
+}) {
+  const search = new URLSearchParams();
+  Object.entries(params ?? {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value).trim()) search.set(key, String(value));
+  });
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<AdminUserRecord[]>(`/api/admin/users${suffix}`);
+}
+
+export function updateAdminUser(userId: string, request: { role?: string | null; status?: string | null }) {
+  return requestJson<AuthResponse["user"]>(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(request)
   });
 }
 

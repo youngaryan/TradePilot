@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..authz import require_paid_context
 from ..config import BackendSettings
+from ..saas import RequestContext
 from ..schemas import SentimentAccumulationRequest
 from ..services import SentimentJobRunner, SentimentService
 
@@ -13,6 +15,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/sentiment", tags=["sentiment"])
     service = SentimentService(settings)
     runner = SentimentJobRunner(settings)
+    paid_context = require_paid_context(settings, feature="Sentiment accumulation")
 
     @router.get("/dataset")
     def get_dataset(
@@ -21,7 +24,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
         return service.dataset(output_dir=output_dir)
 
     @router.post("/accumulate")
-    def accumulate(request: SentimentAccumulationRequest) -> dict[str, Any]:
+    def accumulate(request: SentimentAccumulationRequest, _: RequestContext = Depends(paid_context)) -> dict[str, Any]:
         try:
             return service.accumulate(request)
         except ValueError as exc:
@@ -30,7 +33,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/accumulate-job", status_code=202)
-    def accumulate_job(request: SentimentAccumulationRequest) -> dict[str, Any]:
+    def accumulate_job(request: SentimentAccumulationRequest, _: RequestContext = Depends(paid_context)) -> dict[str, Any]:
         try:
             return runner.submit(request)
         except ValueError as exc:

@@ -104,10 +104,19 @@ class LoginRequest(BaseModel):
     password: str = Field(default="quantops-demo")
 
 
+class SignupRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=8, max_length=256)
+    display_name: str = Field(min_length=2, max_length=120)
+    organization_name: str = Field(min_length=2, max_length=120)
+
+
 class AuthenticatedUser(BaseModel):
     id: str
     email: str
     display_name: str
+    role: str = "user"
+    status: str = "active"
 
 
 class AuthResponse(BaseModel):
@@ -137,6 +146,11 @@ class BillingCheckoutRequest(BaseModel):
 
 class BillingPortalRequest(BaseModel):
     return_url: str | None = None
+
+
+class AdminUserUpdateRequest(BaseModel):
+    role: str | None = Field(default=None, description="Global app role: admin or user.")
+    status: str | None = Field(default=None, description="Account status: active or inactive.")
 
 
 class TelemetryEventRequest(BaseModel):

@@ -1193,7 +1193,10 @@ class LocalWebSearchHeadlineProvider(RemoteHeadlineProvider):
         indexed = self._normalize_index_frame(frame)
         direct_mask = indexed["is_direct_url"].fillna(False).astype(bool)
         date_mask = (indexed["timestamp"] >= start_ts) & (indexed["timestamp"] <= end_ts)
-        indexed = indexed[date_mask | direct_mask].reset_index(drop=True)
+        # Crawled article pages often do not expose a clean publication date.
+        # Keep them searchable after discovery instead of silently dropping useful text.
+        undated_crawl_mask = indexed["extraction_status"].eq("extracted") & (indexed["article_text_chars"] > 0)
+        indexed = indexed[date_mask | direct_mask | undated_crawl_mask].reset_index(drop=True)
 
         self._active_request_tickers = tuple(request.tickers)
         rows: list[dict[str, object]] = []

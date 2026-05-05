@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from ..authz import require_paid_context
 from ..config import BackendSettings
+from ..saas import RequestContext
 from ..schemas import BacktestRunRequest
 from ..services import BacktestJobRunner, BacktestService
 
@@ -13,13 +15,14 @@ def build_backtest_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/backtests", tags=["backtests"])
     runner = BacktestJobRunner(settings)
     service = BacktestService(settings)
+    paid_context = require_paid_context(settings, feature="Backtest jobs")
 
     @router.get("/templates")
     def list_templates() -> list[dict[str, Any]]:
         return service.templates()
 
     @router.post("/run", status_code=202)
-    def run_backtest(request: BacktestRunRequest) -> dict[str, Any]:
+    def run_backtest(request: BacktestRunRequest, _: RequestContext = Depends(paid_context)) -> dict[str, Any]:
         try:
             return runner.submit(request)
         except ValueError as exc:

@@ -73,6 +73,7 @@ def sanitize_payload(value: Any, *, depth: int = 0) -> Any:
 class TelemetryContext:
     user_id: str | None = None
     organization_id: str | None = None
+    country: str | None = None
 
 
 class TelemetryService:
@@ -95,6 +96,7 @@ class TelemetryService:
                 "anonymous_id": request.anonymous_id,
                 "has_user": bool(scoped.user_id),
                 "has_organization": bool(scoped.organization_id),
+                "visitor_country": scoped.country,
             }
         )
         event = self.store.record_telemetry_event(

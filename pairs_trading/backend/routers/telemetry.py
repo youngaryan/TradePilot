@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import BackendSettings
@@ -22,14 +22,16 @@ def build_telemetry_router(settings: BackendSettings) -> APIRouter:
     def optional_context(
         credentials: HTTPAuthorizationCredentials | None,
         organization_id: str | None,
+        request: Request,
     ) -> TelemetryContext:
+        country = visitor_country(request)
         if credentials is None:
-            return TelemetryContext()
+            return TelemetryContext(country=country)
         try:
             context = auth_service.authenticate(token=credentials.credentials, organization_id=organization_id)
-            return TelemetryContext(user_id=str(context.user["id"]), organization_id=context.organization_id)
+            return TelemetryContext(user_id=str(context.user["id"]), organization_id=context.organization_id, country=country)
         except Exception:
-            return TelemetryContext()
+            return TelemetryContext(country=country)
 
     def required_context(
         credentials: HTTPAuthorizationCredentials | None,
@@ -48,18 +50,20 @@ def build_telemetry_router(settings: BackendSettings) -> APIRouter:
     @router.post("/events")
     def record_event(
         request: TelemetryEventRequest,
+        http_request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
         organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> dict[str, Any]:
-        return telemetry.track(request, context=optional_context(credentials, organization_id))
+        return telemetry.track(request, context=optional_context(credentials, organization_id, http_request))
 
     @router.post("/events/batch")
     def record_batch(
         request: TelemetryBatchRequest,
+        http_request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
         organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> dict[str, Any]:
-        context = optional_context(credentials, organization_id)
+        context = optional_context(credentials, organization_id, http_request)
         results = [telemetry.track(event, context=context) for event in request.events]
         return {"stored_count": sum(1 for result in results if result.get("stored")), "results": results}
 
@@ -73,3 +77,17 @@ def build_telemetry_router(settings: BackendSettings) -> APIRouter:
         return telemetry.list_events(organization_id=context.organization_id, limit=limit)
 
     return router
+
+
+def visitor_country(request: Request) -> str | None:
+    for header in (
+        "cf-ipcountry",
+        "x-vercel-ip-country",
+        "cloudfront-viewer-country",
+        "x-appengine-country",
+        "x-country-code",
+    ):
+        value = request.headers.get(header)
+        if value and value.upper() not in {"XX", "UNKNOWN"}:
+            return value[:8].upper()
+    return None

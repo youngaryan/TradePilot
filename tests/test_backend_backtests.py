@@ -19,6 +19,14 @@ except ImportError:  # pragma: no cover - optional backend dependency
 
 @unittest.skipIf(TestClient is None, "FastAPI backend dependencies are not installed.")
 class BackendBacktestTests(unittest.TestCase):
+    def auth_headers(self, client) -> dict[str, str]:
+        login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+        self.assertEqual(login.status_code, 200)
+        return {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Organization-Id": login.json()["active_organization_id"],
+        }
+
     def test_backtest_job_routes_submit_and_complete(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings
@@ -44,6 +52,7 @@ class BackendBacktestTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         templates = client.get("/api/backtests/templates")
         self.assertEqual(templates.status_code, 200)
@@ -60,6 +69,7 @@ class BackendBacktestTests(unittest.TestCase):
         ) as run_directional:
             submitted = client.post(
                 "/api/backtests/run",
+                headers=headers,
                 json={
                     "pipeline": "ema_cross",
                     "symbols": ["SPY", "QQQ"],
@@ -120,6 +130,7 @@ class BackendBacktestTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         with patch(
             "pairs_trading.backend.services.run_paper_batch",
@@ -131,7 +142,7 @@ class BackendBacktestTests(unittest.TestCase):
                 "leaderboard": [],
             },
         ) as run_paper:
-            submitted = client.post("/api/paper/run-job", json={"asof_date": "2026-04-24"})
+            submitted = client.post("/api/paper/run-job", headers=headers, json={"asof_date": "2026-04-24"})
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
 
@@ -174,6 +185,7 @@ class BackendBacktestTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         inline_config = {
             "execution": {
@@ -218,6 +230,7 @@ class BackendBacktestTests(unittest.TestCase):
         ) as run_paper:
             submitted = client.post(
                 "/api/paper/run-job",
+                headers=headers,
                 json={
                     "deployment_config": inline_config,
                     "asof_start": "2026-04-23",

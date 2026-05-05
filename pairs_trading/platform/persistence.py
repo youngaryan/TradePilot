@@ -117,6 +117,8 @@ class SQLiteMetadataStore:
                     email TEXT NOT NULL UNIQUE,
                     display_name TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    status TEXT NOT NULL DEFAULT 'active',
                     created_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL,
                     last_login_at_utc TEXT
@@ -298,7 +300,35 @@ class SQLiteMetadataStore:
                     ON refresh_runs(user_id, created_at_utc DESC);
                 """
             )
-        self.ensure_demo_workspace()
+        self._migrate_auth_columns()
+        self.ensure_demo_workspace(
+            display_name="Admin Demo Quant",
+            role="admin",
+            plan="pro_trial",
+            subscription_status="trialing",
+            organization_role="owner",
+        )
+        self.ensure_demo_workspace(
+            email="user@quantops.local",
+            display_name="Normal Demo User",
+            password_hash="demo-user-password-hash",
+            role="user",
+            organization_name="QuantOps Free Demo",
+            organization_slug="quantops-free-demo",
+            plan="free",
+            subscription_status="free",
+            organization_role="member",
+        )
+
+    def _migrate_auth_columns(self) -> None:
+        """Keep older local SQLite databases compatible with newer auth rules."""
+
+        with self._connect() as connection:
+            existing = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+            if "role" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+            if "status" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
 
     @staticmethod
     def hash_token(token: str) -> str:
@@ -321,12 +351,23 @@ class SQLiteMetadataStore:
             return f"{secret[:2]}...{secret[-2:]}"
         return f"{secret[:4]}...{secret[-4:]}"
 
+    @staticmethod
+    def _slug(value: str) -> str:
+        slug = "-".join(part for part in value.lower().replace("_", "-").split() if part)
+        return "".join(char for char in slug if char.isalnum() or char == "-").strip("-") or "workspace"
+
     def ensure_demo_workspace(
         self,
         *,
         email: str = "demo@quantops.local",
-        display_name: str = "Demo Quant",
+        display_name: str = "Admin Demo Quant",
         password_hash: str = "demo-password-hash",
+        role: str = "admin",
+        organization_name: str = "QuantOps Demo",
+        organization_slug: str = "quantops-demo",
+        plan: str = "pro_trial",
+        subscription_status: str = "trialing",
+        organization_role: str = "owner",
     ) -> dict[str, Any]:
         """Seed a local-first workspace so the SaaS shell is usable immediately.
 
@@ -337,16 +378,21 @@ class SQLiteMetadataStore:
 
         now = _utc_now_iso()
         user_id = self.stable_id("usr", email.casefold())
-        org_id = self.stable_id("org", "quantops-demo")
-        project_id = self.stable_id("prj", "quantops-demo-research")
+        org_id = self.stable_id("org", organization_slug)
+        project_id = self.stable_id("prj", f"{organization_slug}-research")
         subscription_id = self.stable_id("sub", org_id)
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO users (id, email, display_name, password_hash, created_at_utc, updated_at_utc)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (id, email, display_name, password_hash, role, status, created_at_utc, updated_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    role = excluded.role,
+                    status = COALESCE(users.status, excluded.status),
+                    updated_at_utc = excluded.updated_at_utc
                 """,
-                (user_id, email.casefold(), display_name, password_hash, now, now),
+                (user_id, email.casefold(), display_name, password_hash, role, "active", now, now),
             )
             connection.execute(
                 """
@@ -355,14 +401,14 @@ class SQLiteMetadataStore:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (org_id, "QuantOps Demo", "quantops-demo", user_id, email.casefold(), now, now),
+                (org_id, organization_name, organization_slug, user_id, email.casefold(), now, now),
             )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO organization_members (organization_id, user_id, role, created_at_utc)
                 VALUES (?, ?, ?, ?)
                 """,
-                (org_id, user_id, "owner", now),
+                (org_id, user_id, organization_role, now),
             )
             connection.execute(
                 """
@@ -388,7 +434,7 @@ class SQLiteMetadataStore:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (subscription_id, org_id, "pro_trial", "trialing", _json_dump({"backtests": 0, "paper_runs": 0}), now, now),
+                (subscription_id, org_id, plan, subscription_status, _json_dump({"backtests": 0, "paper_runs": 0}), now, now),
             )
         return {"user_id": user_id, "organization_id": org_id, "project_id": project_id}
 
@@ -401,6 +447,196 @@ class SQLiteMetadataStore:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return self._row_to_dict(row)
+
+    def create_user_workspace(
+        self,
+        *,
+        email: str,
+        display_name: str,
+        password_hash: str,
+        organization_name: str,
+        role: str = "user",
+        plan: str = "free",
+        subscription_status: str = "free",
+    ) -> dict[str, Any]:
+        now = _utc_now_iso()
+        normalized_email = email.casefold().strip()
+        user_id = self.stable_id("usr", normalized_email)
+        base_slug = self._slug(organization_name)
+        org_id = self.stable_id("org", f"{base_slug}:{normalized_email}")
+        project_id = self.stable_id("prj", f"{org_id}:default-research")
+        subscription_id = self.stable_id("sub", org_id)
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO users (
+                        id, email, display_name, password_hash, role, status,
+                        created_at_utc, updated_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, normalized_email, display_name, password_hash, role, "active", now, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("An account already exists for this email.") from exc
+            slug = base_slug
+            suffix = 2
+            while connection.execute("SELECT 1 FROM organizations WHERE slug = ?", (slug,)).fetchone() is not None:
+                slug = f"{base_slug}-{suffix}"
+                suffix += 1
+            connection.execute(
+                """
+                INSERT INTO organizations (
+                    id, name, slug, owner_user_id, billing_email, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (org_id, organization_name, slug, user_id, normalized_email, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO organization_members (organization_id, user_id, role, created_at_utc)
+                VALUES (?, ?, ?, ?)
+                """,
+                (org_id, user_id, "owner", now),
+            )
+            connection.execute(
+                """
+                INSERT INTO projects (
+                    id, organization_id, name, slug, description, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    org_id,
+                    "First Research Workspace",
+                    "first-research-workspace",
+                    "Starter project created during signup for experiments, datasets, and paper agents.",
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO subscriptions (
+                    id, organization_id, plan, status, usage_json, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (subscription_id, org_id, plan, subscription_status, _json_dump({"backtests": 0, "paper_runs": 0}), now, now),
+            )
+        return {"user_id": user_id, "organization_id": org_id, "project_id": project_id}
+
+    def count_active_admins(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'").fetchone()
+        return int(row[0])
+
+    def list_admin_users(
+        self,
+        *,
+        search: str | None = None,
+        role: str | None = None,
+        status: str | None = None,
+        sort_by: str = "created_at_utc",
+        sort_dir: str = "desc",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        allowed_sorts = {
+            "email": "u.email",
+            "display_name": "u.display_name",
+            "role": "u.role",
+            "status": "u.status",
+            "created_at_utc": "u.created_at_utc",
+            "last_login_at_utc": "u.last_login_at_utc",
+            "plan": "s.plan",
+            "subscription_status": "s.status",
+        }
+        clauses: list[str] = []
+        params: list[Any] = []
+        if search:
+            clauses.append("(u.email LIKE ? OR u.display_name LIKE ? OR o.name LIKE ?)")
+            term = f"%{search.strip()}%"
+            params.extend([term, term, term])
+        if role:
+            clauses.append("u.role = ?")
+            params.append(role)
+        if status:
+            clauses.append("u.status = ?")
+            params.append(status)
+        query = """
+            SELECT
+                u.id, u.email, u.display_name, u.role, u.status,
+                u.created_at_utc, u.updated_at_utc, u.last_login_at_utc,
+                o.id AS organization_id, o.name AS organization_name,
+                m.role AS organization_role,
+                s.plan, s.status AS subscription_status, s.current_period_end_utc
+            FROM users u
+            LEFT JOIN organization_members m ON m.user_id = u.id
+            LEFT JOIN organizations o ON o.id = m.organization_id
+            LEFT JOIN subscriptions s ON s.organization_id = o.id
+        """
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        direction = "ASC" if sort_dir.lower() == "asc" else "DESC"
+        query += f" ORDER BY {allowed_sorts.get(sort_by, 'u.created_at_utc')} {direction} LIMIT ?"
+        params.append(int(limit))
+        with self._connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        seen: set[str] = set()
+        users: list[dict[str, Any]] = []
+        for row in rows:
+            payload = dict(row)
+            if payload["id"] in seen:
+                continue
+            seen.add(payload["id"])
+            users.append(payload)
+        return users
+
+    def update_user_role(self, *, user_id: str, role: str) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute("UPDATE users SET role = ?, updated_at_utc = ? WHERE id = ?", (role, now, user_id))
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def update_user_status(self, *, user_id: str, status: str) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute("UPDATE users SET status = ?, updated_at_utc = ? WHERE id = ?", (status, now, user_id))
+            if status != "active":
+                connection.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def admin_metric_snapshot(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            users_total = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            users_active = int(connection.execute("SELECT COUNT(*) FROM users WHERE status = 'active'").fetchone()[0])
+            admins_active = int(connection.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'").fetchone()[0])
+            signups_7d = int(connection.execute("SELECT COUNT(*) FROM users WHERE created_at_utc >= datetime('now', '-7 days')").fetchone()[0])
+            signups_30d = int(connection.execute("SELECT COUNT(*) FROM users WHERE created_at_utc >= datetime('now', '-30 days')").fetchone()[0])
+            active_7d = int(connection.execute("SELECT COUNT(*) FROM users WHERE last_login_at_utc >= datetime('now', '-7 days')").fetchone()[0])
+            subscriptions = {
+                row["status"]: int(row["count"])
+                for row in connection.execute("SELECT status, COUNT(*) AS count FROM subscriptions GROUP BY status").fetchall()
+            }
+            plans = {
+                row["plan"]: int(row["count"])
+                for row in connection.execute("SELECT plan, COUNT(*) AS count FROM subscriptions GROUP BY plan").fetchall()
+            }
+        return {
+            "users_total": users_total,
+            "users_active": users_active,
+            "admins_active": admins_active,
+            "signups_7d": signups_7d,
+            "signups_30d": signups_30d,
+            "active_users_7d": active_7d,
+            "subscriptions_by_status": subscriptions,
+            "plans": plans,
+        }
 
     def create_auth_session(self, *, user_id: str, token: str, expires_at_utc: str | None = None) -> None:
         now = _utc_now_iso()

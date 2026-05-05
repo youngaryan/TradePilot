@@ -16,7 +16,7 @@ import pandas as pd
 
 from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
-from .schemas import ApiKeyCreateRequest, BillingCheckoutRequest
+from .schemas import ApiKeyCreateRequest, BillingCheckoutRequest, SignupRequest
 
 
 DEMO_EMAIL = "demo@quantops.local"
@@ -58,6 +58,8 @@ def hash_password(password: str, *, salt: str | None = None) -> str:
 def verify_password(password: str, stored_hash: str) -> bool:
     if stored_hash == "demo-password-hash":
         return password == DEMO_PASSWORD
+    if stored_hash == "demo-user-password-hash":
+        return password == "quantops-user"
     try:
         algorithm, iterations, salt, expected = stored_hash.split("$", 3)
     except ValueError:
@@ -83,6 +85,8 @@ class AuthService:
         user = self.store.get_user_by_email(email)
         if user is None or not verify_password(password, str(user.get("password_hash", ""))):
             raise ValueError("Invalid email or password.")
+        if str(user.get("status") or "active").lower() != "active":
+            raise PermissionError("This account has been deactivated. Contact an administrator.")
         token = secrets.token_urlsafe(32)
         self.store.create_auth_session(user_id=str(user["id"]), token=token)
         organizations = self.store.list_organizations_for_user(user_id=str(user["id"]))
@@ -94,6 +98,21 @@ class AuthService:
             "active_organization_id": organizations[0]["id"] if organizations else None,
         }
 
+    def signup(self, request: SignupRequest) -> dict[str, Any]:
+        email = request.email.casefold().strip()
+        if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+            raise ValueError("Enter a valid email address.")
+        self.store.create_user_workspace(
+            email=email,
+            display_name=request.display_name.strip(),
+            password_hash=hash_password(request.password),
+            organization_name=request.organization_name.strip(),
+            role="user",
+            plan="free",
+            subscription_status="free",
+        )
+        return self.login(email=email, password=request.password)
+
     def authenticate(self, *, token: str, organization_id: str | None = None) -> RequestContext:
         session = self.store.get_auth_session(token=token)
         if session is None:
@@ -101,6 +120,8 @@ class AuthService:
         user = self.store.get_user_by_id(str(session["user_id"]))
         if user is None:
             raise ValueError("Authentication required.")
+        if str(user.get("status") or "active").lower() != "active":
+            raise PermissionError("This account has been deactivated. Contact an administrator.")
         active_org = organization_id or self.store.get_default_organization_id(user_id=str(user["id"]))
         if active_org is None or not self.store.user_has_organization_access(user_id=str(user["id"]), organization_id=active_org):
             raise PermissionError("You do not have access to this workspace.")
@@ -120,7 +141,13 @@ class AuthService:
 
     @staticmethod
     def public_user(user: dict[str, Any]) -> dict[str, Any]:
-        return {"id": user["id"], "email": user["email"], "display_name": user["display_name"]}
+        return {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user["display_name"],
+            "role": user.get("role", "user"),
+            "status": user.get("status", "active"),
+        }
 
 
 class SaaSService:
@@ -313,6 +340,62 @@ class BillingService:
         self.settings = settings
         self.store = SQLiteMetadataStore(settings.metadata_db_path)
 
+    def pricing(self, *, organization_id: str | None = None) -> dict[str, Any]:
+        subscription = self.store.get_subscription(organization_id=organization_id) if organization_id else None
+        plans = [
+            {
+                "id": "free",
+                "name": "Free",
+                "price_monthly": 0,
+                "currency": "usd",
+                "description": "Explore the workspace, catalog, guides, and saved results without launching premium compute.",
+                "features": [
+                    "Read-only cockpit and strategy catalog",
+                    "Workspace setup and billing status",
+                    "View existing experiments and paper-agent records",
+                ],
+                "premium": False,
+                "cta": "Current free access" if (subscription or {}).get("plan") == "free" else "Start free",
+            },
+            {
+                "id": "pro",
+                "name": "Pro",
+                "price_monthly": 49,
+                "currency": "usd",
+                "description": "For active researchers who need backtests, sentiment collection, refresh jobs, and paper agents.",
+                "features": [
+                    "Launch backtest and sentiment jobs",
+                    "Deploy fake-money paper agents",
+                    "24-hour data refresh and telemetry",
+                    "Experiment artifacts, lineage, and readiness reports",
+                ],
+                "premium": True,
+                "recommended": True,
+                "cta": "Upgrade to Pro",
+            },
+            {
+                "id": "team",
+                "name": "Team",
+                "price_monthly": 149,
+                "currency": "usd",
+                "description": "For teams that need admin controls, shared workspaces, and stronger operating visibility.",
+                "features": [
+                    "Everything in Pro",
+                    "Admin dashboard and user management",
+                    "Usage telemetry and activity monitoring",
+                    "Priority path for future broker/data integrations",
+                ],
+                "premium": True,
+                "cta": "Contact sales workflow",
+            },
+        ]
+        return {"plans": plans, "subscription": subscription}
+
+    def status(self, *, organization_id: str) -> dict[str, Any]:
+        subscription = self.store.get_subscription(organization_id=organization_id)
+        premium = subscription is not None and str(subscription.get("plan")) in {"pro", "team", "enterprise", "pro_trial"} and str(subscription.get("status")) in {"active", "trialing"}
+        return {"subscription": subscription, "premium": premium, "pricing": self.pricing(organization_id=organization_id)["plans"]}
+
     def checkout(self, *, organization_id: str, request: BillingCheckoutRequest) -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id) or {}
         price_id = request.price_id or self.settings.stripe_pro_price_id
@@ -352,6 +435,89 @@ class BillingService:
         response = self._stripe_post("https://api.stripe.com/v1/billing_portal/sessions", data)
         return {"mode": "stripe", "portal_url": response.get("url"), "stripe_session": response}
 
+    def webhook(self, *, payload: bytes, signature_header: str | None) -> dict[str, Any]:
+        if not self.settings.stripe_webhook_secret:
+            raise ValueError("STRIPE_WEBHOOK_SECRET is required before accepting Stripe webhooks.")
+        if not self._verify_stripe_signature(payload=payload, signature_header=signature_header):
+            raise PermissionError("Invalid Stripe webhook signature.")
+        event = json.loads(payload.decode("utf-8"))
+        event_type = str(event.get("type") or "")
+        data = event.get("data", {}).get("object", {}) if isinstance(event.get("data"), dict) else {}
+        organization_id = (
+            data.get("metadata", {}).get("organization_id")
+            if isinstance(data.get("metadata"), dict)
+            else None
+        )
+        if event_type == "checkout.session.completed" and organization_id:
+            self.store.upsert_subscription(
+                organization_id=str(organization_id),
+                payload={
+                    "plan": "pro",
+                    "status": "active",
+                    "stripe_customer_id": data.get("customer"),
+                    "stripe_subscription_id": data.get("subscription"),
+                    "usage": {"source": "stripe_checkout"},
+                },
+            )
+            return {"received": True, "updated": True, "event_type": event_type}
+        if event_type.startswith("customer.subscription."):
+            subscription_id = data.get("id")
+            status = data.get("status") or ("canceled" if event_type.endswith(".deleted") else "active")
+            current_period_end = data.get("current_period_end")
+            organization_id = organization_id or self._organization_id_for_stripe_subscription(str(subscription_id or ""))
+            if organization_id:
+                self.store.upsert_subscription(
+                    organization_id=str(organization_id),
+                    payload={
+                        "plan": "pro",
+                        "status": str(status),
+                        "stripe_customer_id": data.get("customer"),
+                        "stripe_subscription_id": subscription_id,
+                        "current_period_end_utc": current_period_end,
+                        "usage": {"source": "stripe_subscription_webhook"},
+                    },
+                )
+                return {"received": True, "updated": True, "event_type": event_type}
+        return {"received": True, "updated": False, "event_type": event_type}
+
+    def _organization_id_for_stripe_subscription(self, subscription_id: str) -> str | None:
+        if not subscription_id:
+            return None
+        with self.store._connect() as connection:
+            row = connection.execute(
+                "SELECT organization_id FROM subscriptions WHERE stripe_subscription_id = ?",
+                (subscription_id,),
+            ).fetchone()
+        return None if row is None else str(row["organization_id"])
+
+    def _verify_stripe_signature(self, *, payload: bytes, signature_header: str | None, tolerance_seconds: int = 300) -> bool:
+        if not signature_header:
+            return False
+        parts: dict[str, list[str]] = {}
+        for item in signature_header.split(","):
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            parts.setdefault(key.strip(), []).append(value.strip())
+        timestamp = (parts.get("t") or [None])[0]
+        signatures = parts.get("v1") or []
+        if not timestamp or not signatures:
+            return False
+        try:
+            ts = int(timestamp)
+        except ValueError:
+            return False
+        now_ts = int(datetime.now(UTC).timestamp())
+        if abs(now_ts - ts) > tolerance_seconds:
+            return False
+        signed_payload = timestamp.encode("utf-8") + b"." + payload
+        expected = hmac.new(
+            str(self.settings.stripe_webhook_secret).encode("utf-8"),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        return any(hmac.compare_digest(expected, candidate) for candidate in signatures)
+
     def _stripe_post(self, url: str, data: dict[str, str]) -> dict[str, Any]:
         encoded = urlencode(data).encode("utf-8")
         request = Request(
@@ -364,6 +530,136 @@ class BillingService:
         )
         with urlopen(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
+
+
+class AdminService:
+    def __init__(self, settings: BackendSettings) -> None:
+        self.settings = settings
+        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+
+    def overview(self) -> dict[str, Any]:
+        counts = self.store.counts()
+        metrics = self.store.admin_metric_snapshot()
+        telemetry_events = self.store.list_telemetry_events(limit=1000)
+        return {
+            "counts": counts.__dict__,
+            "metrics": metrics,
+            "telemetry": telemetry_events[:100],
+            "landing_analytics": build_landing_analytics(telemetry_events),
+            "refresh_statuses": self.store.list_refresh_statuses(),
+            "recent_refresh_runs": self.store.list_refresh_runs(limit=25),
+            "recent_jobs": {
+                "backtests": self.store.list_jobs(kind="backtest")[:25],
+                "paper": self.store.list_jobs(kind="paper")[:25],
+                "sentiment": self.store.list_jobs(kind="sentiment")[:25],
+            },
+        }
+
+    def list_users(
+        self,
+        *,
+        search: str | None = None,
+        role: str | None = None,
+        status: str | None = None,
+        sort_by: str = "created_at_utc",
+        sort_dir: str = "desc",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        return self.store.list_admin_users(
+            search=search,
+            role=role,
+            status=status,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            limit=limit,
+        )
+
+    def update_user(self, *, user_id: str, role: str | None, status: str | None, actor_user_id: str) -> dict[str, Any]:
+        user = self.store.get_user_by_id(user_id)
+        if user is None:
+            raise KeyError(f"User not found: {user_id}")
+        next_role = role.lower() if role else None
+        next_status = status.lower() if status else None
+        if next_role and next_role not in {"admin", "user"}:
+            raise ValueError("Role must be admin or user.")
+        if next_status and next_status not in {"active", "inactive"}:
+            raise ValueError("Status must be active or inactive.")
+        if user_id == actor_user_id and (next_status == "inactive" or next_role == "user"):
+            raise PermissionError("You cannot remove your own admin access from the admin dashboard.")
+        if str(user.get("role")) == "admin" and self.store.count_active_admins() <= 1:
+            if next_role == "user" or next_status == "inactive":
+                raise PermissionError("At least one active admin must remain.")
+        updated = user
+        if next_role:
+            updated = self.store.update_user_role(user_id=user_id, role=next_role) or updated
+        if next_status:
+            updated = self.store.update_user_status(user_id=user_id, status=next_status) or updated
+        return AuthService.public_user(updated)
+
+
+def build_landing_analytics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    landing_events = [event for event in events if str(event.get("name", "")).startswith(("landing_", "auth_signup", "auth_login", "pricing_viewed"))]
+    by_country: dict[str, int] = {}
+    section_views: dict[str, int] = {}
+    cta_clicks: dict[str, int] = {}
+    trend: dict[str, int] = {}
+    totals = {
+        "landing_page_visits": 0,
+        "pricing_views": 0,
+        "features_views": 0,
+        "examples_views": 0,
+        "faq_views": 0,
+        "login_views": 0,
+        "signup_views": 0,
+        "cta_clicks": 0,
+        "login_starts": 0,
+        "login_completions": 0,
+        "signup_starts": 0,
+        "signup_completions": 0,
+    }
+    for event in landing_events:
+        name = str(event.get("name") or "")
+        properties = event.get("properties") if isinstance(event.get("properties"), dict) else {}
+        context = event.get("context") if isinstance(event.get("context"), dict) else {}
+        country = str(context.get("visitor_country") or properties.get("country") or "Unknown")[:24]
+        by_country[country] = by_country.get(country, 0) + 1
+        occurred = str(event.get("occurred_at_utc") or "")[:10] or "unknown"
+        trend[occurred] = trend.get(occurred, 0) + 1
+        section = str(properties.get("section") or properties.get("target_section") or "")
+        cta = str(properties.get("cta") or properties.get("target") or "")
+        if name == "landing_page_view":
+            totals["landing_page_visits"] += 1
+        is_pricing_interest = name == "pricing_viewed" or section == "pricing"
+        if is_pricing_interest:
+            totals["pricing_views"] += 1
+        if section:
+            section_views[section] = section_views.get(section, 0) + 1
+            key = f"{section}_views"
+            if key in totals and not (section == "pricing" and is_pricing_interest):
+                totals[key] += 1
+        if name == "landing_cta_clicked":
+            totals["cta_clicks"] += 1
+            label = cta or section or "unknown"
+            cta_clicks[label] = cta_clicks.get(label, 0) + 1
+        if name == "auth_login_started":
+            totals["login_starts"] += 1
+        if name == "auth_login_completed":
+            totals["login_completions"] += 1
+        if name == "auth_signup_started":
+            totals["signup_starts"] += 1
+        if name == "auth_signup_completed":
+            totals["signup_completions"] += 1
+    signup_rate = totals["signup_completions"] / totals["signup_starts"] if totals["signup_starts"] else 0.0
+    login_rate = totals["login_completions"] / totals["login_starts"] if totals["login_starts"] else 0.0
+    return {
+        "totals": totals,
+        "conversion_rates": {"signup": signup_rate, "login": login_rate},
+        "visitors_by_country": by_country,
+        "section_views": section_views,
+        "cta_clicks": cta_clicks,
+        "traffic_trend": [{"date": date, "visits": visits} for date, visits in sorted(trend.items())],
+        "recent_events": landing_events[:50],
+    }
 
 
 def build_lineage(*, request: dict[str, Any], artifact_dir: str | None, settings: BackendSettings) -> dict[str, Any]:

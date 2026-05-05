@@ -175,6 +175,8 @@ export interface AuthUser {
   id: string;
   email: string;
   display_name: string;
+  role: "admin" | "user" | string;
+  status: "active" | "inactive" | string;
 }
 
 export interface Organization {
@@ -195,6 +197,13 @@ export interface AuthResponse {
   user: AuthUser;
   organizations: Organization[];
   active_organization_id: string | null;
+}
+
+export interface SignupRequest {
+  email: string;
+  password: string;
+  display_name: string;
+  organization_name: string;
 }
 
 export interface SaaSProject {
@@ -394,6 +403,86 @@ export interface BillingResponse {
   portal_url?: string | null;
   message?: string;
   stripe_session?: Record<string, unknown>;
+}
+
+export interface PricingPlan {
+  id: string;
+  name: string;
+  price_monthly: number;
+  currency: string;
+  description: string;
+  features: string[];
+  premium: boolean;
+  recommended?: boolean;
+  cta: string;
+}
+
+export interface PricingPayload {
+  plans: PricingPlan[];
+  subscription?: SubscriptionRecord | null;
+}
+
+export interface BillingStatusPayload {
+  subscription: SubscriptionRecord | null;
+  premium: boolean;
+  pricing: PricingPlan[];
+}
+
+export interface AdminUserRecord {
+  id: string;
+  email: string;
+  display_name: string;
+  role: "admin" | "user" | string;
+  status: "active" | "inactive" | string;
+  created_at_utc: string;
+  updated_at_utc: string;
+  last_login_at_utc?: string | null;
+  organization_id?: string | null;
+  organization_name?: string | null;
+  organization_role?: string | null;
+  plan?: string | null;
+  subscription_status?: string | null;
+  current_period_end_utc?: string | null;
+}
+
+export interface AdminOverviewPayload {
+  counts: SystemMetadata["counts"];
+  metrics: {
+    users_total: number;
+    users_active: number;
+    admins_active: number;
+    signups_7d: number;
+    signups_30d: number;
+    active_users_7d: number;
+    subscriptions_by_status: Record<string, number>;
+    plans: Record<string, number>;
+  };
+  landing_analytics: {
+    totals: {
+      landing_page_visits: number;
+      pricing_views: number;
+      features_views: number;
+      examples_views: number;
+      faq_views: number;
+      login_views: number;
+      signup_views: number;
+      cta_clicks: number;
+      login_starts: number;
+      login_completions: number;
+      signup_starts: number;
+      signup_completions: number;
+    };
+    conversion_rates: Record<string, number>;
+    visitors_by_country: Record<string, number>;
+    section_views: Record<string, number>;
+    cta_clicks: Record<string, number>;
+    traffic_trend: Array<{ date: string; visits: number }>;
+    recent_events: TelemetryEventRecord[];
+  };
+  telemetry: TelemetryEventRecord[];
+  refresh_statuses: RefreshStatusRecord[];
+  recent_refresh_runs: RefreshRunRecord[];
+  recent_jobs: Record<string, Array<Record<string, unknown>>>;
 }
 
 export interface StrategyCatalogItem {

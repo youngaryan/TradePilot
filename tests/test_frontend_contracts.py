@@ -158,11 +158,87 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("getWorkspacePaperAgent", workspace_source)
         self.assertIn("startBillingCheckout", workspace_source)
         self.assertIn("/api/auth/login", client_source)
+        self.assertIn("/api/auth/signup", client_source)
         self.assertIn("/api/workspaces/experiments", client_source)
         self.assertIn("/api/billing/checkout", client_source)
         self.assertIn("export interface WorkspacePayload", type_source)
         self.assertIn("export interface ExperimentRecord", type_source)
         self.assertIn("export interface PaperAgentRecord", type_source)
+
+    def test_frontend_exposes_admin_pricing_and_payment_wall_contracts(self) -> None:
+        app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        admin_source = PROJECT_ROOT.joinpath("frontend/src/features/AdminDashboard.tsx").read_text(encoding="utf-8")
+        pricing_source = PROJECT_ROOT.joinpath("frontend/src/features/PricingPage.tsx").read_text(encoding="utf-8")
+        client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id: "pricing"', app_source)
+        self.assertIn('id: "admin"', app_source)
+        self.assertIn("adminOnly: true", app_source)
+        self.assertIn("premiumViews", app_source)
+        self.assertIn("paymentWallReason", app_source)
+        self.assertIn("Use admin demo", app_source)
+        self.assertIn("Use free user demo", app_source)
+        self.assertIn("logoutRequest", app_source)
+
+        self.assertIn("AdminDashboard", admin_source)
+        self.assertIn("window.confirm", admin_source)
+        self.assertIn("updateAdminUser", admin_source)
+        self.assertIn("listAdminUsers", admin_source)
+        self.assertIn("getAdminOverview", admin_source)
+
+        self.assertIn("PricingPage", pricing_source)
+        self.assertIn("getBillingStatus", pricing_source)
+        self.assertIn("getPricing", pricing_source)
+        self.assertIn("startBillingCheckout", pricing_source)
+        self.assertIn("server-side", pricing_source)
+
+        self.assertIn("/api/admin/overview", client_source)
+        self.assertIn("/api/admin/users", client_source)
+        self.assertIn("/api/billing/pricing", client_source)
+        self.assertIn("/api/billing/status", client_source)
+        self.assertIn("export interface AdminUserRecord", type_source)
+        self.assertIn("export interface AdminOverviewPayload", type_source)
+        self.assertIn("export interface PricingPlan", type_source)
+        self.assertIn("role:", type_source)
+        self.assertIn("status:", type_source)
+        self.assertIn(".pricing-grid", style_source)
+        self.assertIn(".payment-wall-banner", style_source)
+        self.assertIn(".admin-toolbar", style_source)
+
+    def test_landing_page_default_sections_and_analytics_contract(self) -> None:
+        app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        admin_source = PROJECT_ROOT.joinpath("frontend/src/features/AdminDashboard.tsx").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("return <LoginScreen onLogin={handleLogin} />", app_source)
+        for section in ('"features"', '"examples"', '"pricing"', '"faq"', '"login"', '"signup"'):
+            self.assertIn(section, app_source)
+        for event_name in (
+            "landing_page_view",
+            "landing_section_view",
+            "landing_cta_clicked",
+            "pricing_viewed",
+            "auth_signup_started",
+            "auth_signup_completed",
+            "auth_login_started",
+            "auth_login_completed",
+        ):
+            self.assertIn(event_name, app_source)
+        self.assertIn("IntersectionObserver", app_source)
+        self.assertIn("landingVisitorId", app_source)
+        self.assertIn("Create a free workspace", app_source)
+        self.assertIn("Northstar Quant Lab", app_source)
+        self.assertIn("landing_analytics", type_source)
+        self.assertIn("visitors_by_country", type_source)
+        self.assertIn("Landing page analytics", admin_source)
+        self.assertIn("Visitors by country", admin_source)
+        self.assertIn("CTA clicks", admin_source)
+        self.assertIn("TelemetryTimelineChart", admin_source)
+        self.assertIn(".example-grid", style_source)
+        self.assertIn(".faq-grid", style_source)
 
     def test_frontend_has_theme_refresh_and_telemetry_contracts(self) -> None:
         app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")

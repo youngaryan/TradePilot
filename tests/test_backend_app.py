@@ -50,6 +50,14 @@ class FailingBackendHeadlineProvider:
 
 @unittest.skipIf(TestClient is None, "FastAPI backend dependencies are not installed.")
 class BackendAppTests(unittest.TestCase):
+    def auth_headers(self, client) -> dict[str, str]:
+        login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+        self.assertEqual(login.status_code, 200)
+        return {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Organization-Id": login.json()["active_organization_id"],
+        }
+
     def test_backend_routes_return_paper_payload(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings
@@ -270,6 +278,138 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(status.json()["interval_hours"], 24)
         self.assertGreaterEqual(len(status.json()["recent_runs"]), 1)
 
+    def test_admin_rbac_and_payment_wall_are_enforced_server_side(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_admin_rbac")
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            sentiment_job_state_dir=workspace / "sentiment_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+        )
+        app = create_app(settings)
+        client = TestClient(app)
+
+        admin_login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+        user_login = client.post("/api/auth/login", json={"email": "user@quantops.local", "password": "quantops-user"})
+        self.assertEqual(admin_login.status_code, 200)
+        self.assertEqual(user_login.status_code, 200)
+        self.assertEqual(admin_login.json()["user"]["role"], "admin")
+        self.assertEqual(user_login.json()["user"]["role"], "user")
+
+        admin_headers = {
+            "Authorization": f"Bearer {admin_login.json()['access_token']}",
+            "X-Organization-Id": admin_login.json()["active_organization_id"],
+        }
+        user_headers = {
+            "Authorization": f"Bearer {user_login.json()['access_token']}",
+            "X-Organization-Id": user_login.json()["active_organization_id"],
+        }
+
+        self.assertEqual(client.get("/api/admin/overview", headers=user_headers).status_code, 403)
+        admin_overview = client.get("/api/admin/overview", headers=admin_headers)
+        self.assertEqual(admin_overview.status_code, 200)
+        self.assertGreaterEqual(admin_overview.json()["metrics"]["admins_active"], 1)
+
+        users = client.get("/api/admin/users", headers=admin_headers)
+        self.assertEqual(users.status_code, 200)
+        normal_user = next(row for row in users.json() if row["email"] == "user@quantops.local")
+
+        premium_run = client.post("/api/backtests/run", headers=user_headers, json={})
+        self.assertEqual(premium_run.status_code, 402)
+        self.assertEqual(premium_run.json()["detail"]["code"], "payment_required")
+        self.assertEqual(client.post("/api/refresh/tick", headers=user_headers, json={"limit": 10}).status_code, 403)
+
+        deactivate = client.patch(
+            f"/api/admin/users/{normal_user['id']}",
+            headers=admin_headers,
+            json={"status": "inactive"},
+        )
+        self.assertEqual(deactivate.status_code, 200)
+        inactive_login = client.post("/api/auth/login", json={"email": "user@quantops.local", "password": "quantops-user"})
+        self.assertEqual(inactive_login.status_code, 403)
+
+        reactivate = client.patch(
+            f"/api/admin/users/{normal_user['id']}",
+            headers=admin_headers,
+            json={"status": "active", "role": "admin"},
+        )
+        self.assertEqual(reactivate.status_code, 200)
+        self.assertEqual(reactivate.json()["role"], "admin")
+
+    def test_signup_and_landing_analytics_are_recorded_for_admins(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_landing_analytics")
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            sentiment_job_state_dir=workspace / "sentiment_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+        )
+        app = create_app(settings)
+        client = TestClient(app)
+
+        landing = client.post(
+            "/api/telemetry/events",
+            headers={"cf-ipcountry": "GB"},
+            json={
+                "name": "landing_page_view",
+                "category": "landing",
+                "properties": {"section": "top", "cta": "hero"},
+                "anonymous_id": "visitor-test",
+                "consent": "granted",
+            },
+        )
+        pricing = client.post(
+            "/api/telemetry/events",
+            headers={"cf-ipcountry": "GB"},
+            json={
+                "name": "pricing_viewed",
+                "category": "landing",
+                "properties": {"section": "pricing"},
+                "anonymous_id": "visitor-test",
+                "consent": "granted",
+            },
+        )
+        signup = client.post(
+            "/api/auth/signup",
+            json={
+                "email": "founder@example.com",
+                "password": "safe-password-123",
+                "display_name": "Founder User",
+                "organization_name": "Founder Quant Lab",
+            },
+        )
+        self.assertEqual(landing.status_code, 200)
+        self.assertEqual(pricing.status_code, 200)
+        self.assertEqual(signup.status_code, 201)
+        self.assertEqual(signup.json()["user"]["role"], "user")
+
+        user_headers = {
+            "Authorization": f"Bearer {signup.json()['access_token']}",
+            "X-Organization-Id": signup.json()["active_organization_id"],
+        }
+        self.assertEqual(client.get("/api/admin/overview", headers=user_headers).status_code, 403)
+        self.assertEqual(client.post("/api/backtests/run", headers=user_headers, json={}).status_code, 402)
+
+        admin_headers = self.auth_headers(client)
+        overview = client.get("/api/admin/overview", headers=admin_headers)
+        self.assertEqual(overview.status_code, 200)
+        analytics = overview.json()["landing_analytics"]
+        self.assertGreaterEqual(analytics["totals"]["landing_page_visits"], 1)
+        self.assertGreaterEqual(analytics["totals"]["pricing_views"], 1)
+        self.assertGreaterEqual(analytics["visitors_by_country"]["GB"], 1)
+
     def test_sentiment_routes_accumulate_local_news_dataset(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings
@@ -300,6 +440,7 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         with patch(
             "pairs_trading.backend.services.build_best_available_sentiment_model",
@@ -307,6 +448,7 @@ class BackendAppTests(unittest.TestCase):
         ):
             response = client.post(
                 "/api/sentiment/accumulate",
+                headers=headers,
                 json={
                     "symbols": ["AAA"],
                     "start": "2024-01-01",
@@ -363,10 +505,12 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         with patch("pairs_trading.backend.services.build_best_available_sentiment_model", return_value=FixedBackendSentimentModel()):
             submitted = client.post(
                 "/api/sentiment/accumulate-job",
+                headers=headers,
                 json={
                     "symbols": ["AAA"],
                     "start": "2024-01-01",
@@ -403,6 +547,7 @@ class BackendAppTests(unittest.TestCase):
 
         failed = client.post(
             "/api/sentiment/accumulate-job",
+            headers=headers,
             json={
                 "symbols": ["AAA"],
                 "start": "2024-01-01",
@@ -560,9 +705,11 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         response = client.post(
             "/api/sentiment/accumulate",
+            headers=headers,
             json={
                 "symbols": [],
                 "start": "2026-04-15",
@@ -596,6 +743,7 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         with (
             patch("pairs_trading.backend.services.RSSHeadlineProvider", EmptyBackendHeadlineProvider),
@@ -603,6 +751,7 @@ class BackendAppTests(unittest.TestCase):
         ):
             response = client.post(
                 "/api/sentiment/accumulate",
+                headers=headers,
                 json={
                     "symbols": ["GLD"],
                     "start": "2024-01-01",
@@ -651,6 +800,7 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         with (
             patch("pairs_trading.backend.services.RSSHeadlineProvider", EmptyBackendHeadlineProvider),
@@ -658,6 +808,7 @@ class BackendAppTests(unittest.TestCase):
         ):
             response = client.post(
                 "/api/sentiment/accumulate",
+                headers=headers,
                 json={
                     "symbols": ["EURUSD"],
                     "start": "2026-04-15",
@@ -707,6 +858,7 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         with (
             patch("pairs_trading.backend.services.BenzingaNewsProvider", FailingBackendHeadlineProvider),
@@ -714,6 +866,7 @@ class BackendAppTests(unittest.TestCase):
         ):
             response = client.post(
                 "/api/sentiment/accumulate",
+                headers=headers,
                 json={
                     "symbols": ["GLD"],
                     "start": "2026-04-20",
