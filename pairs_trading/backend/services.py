@@ -54,6 +54,8 @@ class PaperRunJob:
     request: dict[str, Any]
     created_at_utc: str
     updated_at_utc: str
+    organization_id: str | None = None
+    user_id: str | None = None
     progress: float = 0.0
     stage: str = "queued"
     message: str = "Waiting for a paper worker."
@@ -69,6 +71,8 @@ class PaperRunJob:
             "request": self.request,
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
+            "organization_id": self.organization_id,
+            "user_id": self.user_id,
             "progress": self.progress,
             "stage": self.stage,
             "message": self.message,
@@ -91,7 +95,7 @@ class PaperRunJobRunner:
         self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
         self._load_jobs()
 
-    def submit(self, command: PaperRunCommand) -> dict[str, Any]:
+    def submit(self, command: PaperRunCommand, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
         if command.deployment_config is not None:
             strategies = command.deployment_config.get("strategies", [])
             if not isinstance(strategies, list) or not strategies:
@@ -113,6 +117,8 @@ class PaperRunJobRunner:
             },
             created_at_utc=now,
             updated_at_utc=now,
+            organization_id=organization_id,
+            user_id=user_id,
             progress=0.02,
             stage="queued",
             message="Queued paper execution. Waiting for the shadow broker worker.",
@@ -126,13 +132,19 @@ class PaperRunJobRunner:
         future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         return job.to_dict()
 
-    def list_jobs(self) -> list[dict[str, Any]]:
+    def list_jobs(self, *, organization_id: str) -> list[dict[str, Any]]:
         with self.lock:
-            return [job.to_dict() for job in sorted(self.jobs.values(), key=lambda item: item.created_at_utc, reverse=True)]
+            return [
+                job.to_dict()
+                for job in sorted(self.jobs.values(), key=lambda item: item.created_at_utc, reverse=True)
+                if job.organization_id == organization_id
+            ]
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(self, job_id: str, *, organization_id: str) -> dict[str, Any] | None:
         with self.lock:
             job = self.jobs.get(job_id)
+            if job is None or job.organization_id != organization_id:
+                return None
             return None if job is None else job.to_dict()
 
     def _set_status(self, job_id: str, status: str, **updates: Any) -> None:
@@ -412,6 +424,8 @@ class BacktestJob:
     request: dict[str, Any]
     created_at_utc: str
     updated_at_utc: str
+    organization_id: str | None = None
+    user_id: str | None = None
     progress: float = 0.0
     stage: str = "queued"
     message: str = "Waiting for a worker."
@@ -428,6 +442,8 @@ class BacktestJob:
             "request": self.request,
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
+            "organization_id": self.organization_id,
+            "user_id": self.user_id,
             "progress": self.progress,
             "stage": self.stage,
             "message": self.message,
@@ -451,7 +467,7 @@ class BacktestJobRunner:
         self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
         self._load_jobs()
 
-    def submit(self, request: BacktestRunRequest) -> dict[str, Any]:
+    def submit(self, request: BacktestRunRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
         BacktestService(self.settings).validate_request(request)
         now = _utc_now_iso()
         job = BacktestJob(
@@ -460,6 +476,8 @@ class BacktestJobRunner:
             request=json_ready(request.model_dump(mode="json")),
             created_at_utc=now,
             updated_at_utc=now,
+            organization_id=organization_id,
+            user_id=user_id,
             progress=0.02,
             stage="queued",
             message="Queued locally. A backtest worker will pick this up next.",
@@ -469,20 +487,23 @@ class BacktestJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        future = self.executor.submit(self._run_job, job.id, request)
+        future = self.executor.submit(self._run_job, job.id, request, organization_id)
         future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         return job.to_dict()
 
-    def list_jobs(self) -> list[dict[str, Any]]:
+    def list_jobs(self, *, organization_id: str) -> list[dict[str, Any]]:
         with self.lock:
             return [
                 job.to_dict()
                 for job in sorted(self.jobs.values(), key=lambda item: item.created_at_utc, reverse=True)
+                if job.organization_id == organization_id
             ]
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(self, job_id: str, *, organization_id: str) -> dict[str, Any] | None:
         with self.lock:
             job = self.jobs.get(job_id)
+            if job is None or job.organization_id != organization_id:
+                return None
             return None if job is None else job.to_dict()
 
     def _set_status(self, job_id: str, status: str, **updates: Any) -> None:
@@ -495,7 +516,7 @@ class BacktestJobRunner:
                 setattr(job, key, value)
             self._save_locked(job)
 
-    def _run_job(self, job_id: str, request: BacktestRunRequest) -> None:
+    def _run_job(self, job_id: str, request: BacktestRunRequest, organization_id: str) -> None:
         def progress(stage: str, message: str, value: float) -> None:
             self._set_status(
                 job_id,
@@ -524,8 +545,6 @@ class BacktestJobRunner:
                 summary=json_ready(summary),
                 artifact_dir=result.get("artifact_dir"),
             )
-            demo_context = self.metadata_store.ensure_demo_workspace()
-            organization_id = str(demo_context["organization_id"])
             self.metadata_store.upsert_experiment(
                 organization_id=organization_id,
                 payload={
@@ -1422,6 +1441,8 @@ class SentimentAccumulationJob:
     request: dict[str, Any]
     created_at_utc: str
     updated_at_utc: str
+    organization_id: str | None = None
+    user_id: str | None = None
     progress: float = 0.0
     stage: str = "queued"
     message: str = "Waiting for a sentiment worker."
@@ -1438,6 +1459,8 @@ class SentimentAccumulationJob:
             "request": self.request,
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
+            "organization_id": self.organization_id,
+            "user_id": self.user_id,
             "progress": self.progress,
             "stage": self.stage,
             "message": self.message,
@@ -1461,7 +1484,7 @@ class SentimentJobRunner:
         self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
         self._load_jobs()
 
-    def submit(self, request: SentimentAccumulationRequest) -> dict[str, Any]:
+    def submit(self, request: SentimentAccumulationRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
         SentimentService(self.settings).validate_request(request)
         now = _utc_now_iso()
         job = SentimentAccumulationJob(
@@ -1470,6 +1493,8 @@ class SentimentJobRunner:
             request=json_ready(request.model_dump(mode="json")),
             created_at_utc=now,
             updated_at_utc=now,
+            organization_id=organization_id,
+            user_id=user_id,
             progress=0.02,
             stage="queued",
             message="Queued locally. A sentiment worker will start fetching headlines next.",
@@ -1483,16 +1508,19 @@ class SentimentJobRunner:
         future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         return job.to_dict()
 
-    def list_jobs(self) -> list[dict[str, Any]]:
+    def list_jobs(self, *, organization_id: str) -> list[dict[str, Any]]:
         with self.lock:
             return [
                 job.to_dict()
                 for job in sorted(self.jobs.values(), key=lambda item: item.created_at_utc, reverse=True)
+                if job.organization_id == organization_id
             ]
 
-    def get_job(self, job_id: str) -> dict[str, Any] | None:
+    def get_job(self, job_id: str, *, organization_id: str) -> dict[str, Any] | None:
         with self.lock:
             job = self.jobs.get(job_id)
+            if job is None or job.organization_id != organization_id:
+                return None
             return None if job is None else job.to_dict()
 
     def _set_status(self, job_id: str, status: str, **updates: Any) -> None:

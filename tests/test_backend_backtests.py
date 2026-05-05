@@ -19,8 +19,8 @@ except ImportError:  # pragma: no cover - optional backend dependency
 
 @unittest.skipIf(TestClient is None, "FastAPI backend dependencies are not installed.")
 class BackendBacktestTests(unittest.TestCase):
-    def auth_headers(self, client) -> dict[str, str]:
-        login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+    def auth_headers(self, client, *, email: str = "demo@quantops.local", password: str = "quantops-demo") -> dict[str, str]:
+        login = client.post("/api/auth/login", json={"email": email, "password": password})
         self.assertEqual(login.status_code, 200)
         return {
             "Authorization": f"Bearer {login.json()['access_token']}",
@@ -81,10 +81,14 @@ class BackendBacktestTests(unittest.TestCase):
             )
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
+            user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
+            self.assertEqual(client.get(f"/api/backtests/jobs/{job_id}").status_code, 401)
+            self.assertEqual(client.get(f"/api/backtests/jobs/{job_id}", headers=user_headers).status_code, 404)
+            self.assertEqual(client.get("/api/backtests/jobs", headers=user_headers).json(), [])
 
             job_payload = submitted.json()
             for _ in range(40):
-                job = client.get(f"/api/backtests/jobs/{job_id}")
+                job = client.get(f"/api/backtests/jobs/{job_id}", headers=headers)
                 self.assertEqual(job.status_code, 200)
                 job_payload = job.json()
                 if job_payload["status"] in {"completed", "failed"}:
@@ -102,7 +106,7 @@ class BackendBacktestTests(unittest.TestCase):
             self.assertTrue((workspace / "backtest_jobs" / f"{job_id}.json").exists())
             run_directional.assert_called_once()
 
-        jobs = client.get("/api/backtests/jobs")
+        jobs = client.get("/api/backtests/jobs", headers=headers)
         self.assertEqual(jobs.status_code, 200)
         self.assertEqual(jobs.json()[0]["id"], job_id)
         from pairs_trading.platform import SQLiteMetadataStore
@@ -145,10 +149,14 @@ class BackendBacktestTests(unittest.TestCase):
             submitted = client.post("/api/paper/run-job", headers=headers, json={"asof_date": "2026-04-24"})
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
+            user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
+            self.assertEqual(client.get(f"/api/paper/jobs/{job_id}").status_code, 401)
+            self.assertEqual(client.get(f"/api/paper/jobs/{job_id}", headers=user_headers).status_code, 404)
+            self.assertEqual(client.get("/api/paper/jobs", headers=user_headers).json(), [])
 
             job_payload = submitted.json()
             for _ in range(40):
-                job = client.get(f"/api/paper/jobs/{job_id}")
+                job = client.get(f"/api/paper/jobs/{job_id}", headers=headers)
                 self.assertEqual(job.status_code, 200)
                 job_payload = job.json()
                 if job_payload["status"] in {"completed", "failed"}:
@@ -165,7 +173,7 @@ class BackendBacktestTests(unittest.TestCase):
             metadata = SQLiteMetadataStore(workspace / "metadata.sqlite3")
             self.assertEqual(metadata.get_job(kind="paper", job_id=job_id)["status"], "completed")
 
-        jobs = client.get("/api/paper/jobs")
+        jobs = client.get("/api/paper/jobs", headers=headers)
         self.assertEqual(jobs.status_code, 200)
         self.assertEqual(jobs.json()[0]["id"], job_id)
 
@@ -242,7 +250,7 @@ class BackendBacktestTests(unittest.TestCase):
 
             job_payload = submitted.json()
             for _ in range(60):
-                job = client.get(f"/api/paper/jobs/{job_id}")
+                job = client.get(f"/api/paper/jobs/{job_id}", headers=headers)
                 self.assertEqual(job.status_code, 200)
                 job_payload = job.json()
                 if job_payload["status"] in {"completed", "failed"}:

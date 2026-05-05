@@ -259,12 +259,15 @@ class SaaSService:
             experiment_id = str(summary.get("experiment_id") or run["id"])
             if self.store.get_experiment(organization_id=organization_id, experiment_id=experiment_id):
                 continue
-            request = {}
+            matched_job: dict[str, Any] | None = None
             for job in self.store.list_jobs(kind="backtest"):
                 result = job.get("result") or {}
                 if result.get("artifact_dir") == str(artifact_dir):
-                    request = dict(job.get("request") or {})
+                    matched_job = job
                     break
+            if matched_job is None or str(matched_job.get("organization_id") or "") != organization_id:
+                continue
+            request = dict(matched_job.get("request") or {})
             readiness = build_readiness(summary=summary, validation=validation)
             self.store.upsert_experiment(
                 organization_id=organization_id,

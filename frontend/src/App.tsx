@@ -246,6 +246,16 @@ function landingVisitorId() {
   return next;
 }
 
+function appViewHash(view: ViewId) {
+  return `#/app/${view}`;
+}
+
+function viewFromLocationHash(): ViewId | null {
+  const hash = window.location.hash.replace(/^#\/?/, "");
+  const candidate = hash.startsWith("app/") ? hash.slice("app/".length) : "";
+  return views.some((view) => view.id === candidate) ? candidate as ViewId : null;
+}
+
 function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("demo@quantops.local");
@@ -544,7 +554,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
 }
 
 export default function App() {
-  const [activeView, setActiveView] = useState<ViewId>("command");
+  const [activeView, setActiveView] = useState<ViewId>(() => viewFromLocationHash() ?? "command");
   const [auth, setAuth] = useState<AuthResponse | null>(null);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
@@ -599,6 +609,16 @@ export default function App() {
       setIsLoading(false);
     }
   }
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      const nextView = viewFromLocationHash();
+      if (nextView) setActiveView(nextView);
+    };
+    window.addEventListener("hashchange", handleHashChange);
+    handleHashChange();
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
 
   useEffect(() => {
     const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -668,19 +688,31 @@ export default function App() {
     return `${label} is a premium workflow. Free users can explore the workspace and saved records, then upgrade before launching compute or paper agents.`;
   }
 
+  function setRoutedView(view: ViewId, options: { replace?: boolean } = {}) {
+    setActiveView(view);
+    const nextHash = appViewHash(view);
+    if (window.location.hash !== nextHash) {
+      if (options.replace) {
+        window.history.replaceState(null, "", nextHash);
+      } else {
+        window.history.pushState(null, "", nextHash);
+      }
+    }
+  }
+
   function navigateTo(view: ViewId) {
     if (view === "admin" && auth?.user.role !== "admin") {
       setPaymentWallReason("Admin dashboard access requires an admin account.");
-      setActiveView("pricing");
+      setRoutedView("pricing");
       return;
     }
     if (premiumViews.has(view) && !hasPremiumAccess) {
       setPaymentWallReason(premiumReason(view));
-      setActiveView("pricing");
+      setRoutedView("pricing");
       return;
     }
     setPaymentWallReason(null);
-    setActiveView(view);
+    setRoutedView(view);
   }
 
   function track(name: string, properties: Record<string, unknown> = {}) {
@@ -704,11 +736,11 @@ export default function App() {
   useEffect(() => {
     if (auth && premiumViews.has(activeView) && workspace && !hasPremiumAccess) {
       setPaymentWallReason(premiumReason(activeView));
-      setActiveView("pricing");
+      setRoutedView("pricing", { replace: true });
     }
     if (auth && activeView === "admin" && auth.user.role !== "admin") {
       setPaymentWallReason("Admin dashboard access requires an admin account.");
-      setActiveView("pricing");
+      setRoutedView("pricing", { replace: true });
     }
   }, [auth?.user.role, activeView, hasPremiumAccess, workspace?.organization_id]);
 
@@ -719,7 +751,7 @@ export default function App() {
     setApiAuth(nextAuth.access_token, nextAuth.active_organization_id);
     window.localStorage.setItem(TOKEN_STORAGE_KEY, nextAuth.access_token);
     if (nextAuth.active_organization_id) window.localStorage.setItem(ORG_STORAGE_KEY, nextAuth.active_organization_id);
-    setActiveView("workspace");
+    setRoutedView("workspace", { replace: true });
     void trackTelemetryEvent({
       name: "user_logged_in",
       category: "product",
@@ -748,6 +780,7 @@ export default function App() {
     setOrganizations([]);
     setActiveOrgId(null);
     setActiveView("command");
+    window.history.replaceState(null, "", window.location.pathname);
     setApiAuth(null, null);
     window.localStorage.removeItem(TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(ORG_STORAGE_KEY);

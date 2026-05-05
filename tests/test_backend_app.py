@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import time
 import unittest
@@ -50,8 +52,8 @@ class FailingBackendHeadlineProvider:
 
 @unittest.skipIf(TestClient is None, "FastAPI backend dependencies are not installed.")
 class BackendAppTests(unittest.TestCase):
-    def auth_headers(self, client) -> dict[str, str]:
-        login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
+    def auth_headers(self, client, *, email: str = "demo@quantops.local", password: str = "quantops-demo") -> dict[str, str]:
+        login = client.post("/api/auth/login", json={"email": email, "password": password})
         self.assertEqual(login.status_code, 200)
         return {
             "Authorization": f"Bearer {login.json()['access_token']}",
@@ -116,6 +118,7 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
         health = client.get("/api/health")
         summary = client.get("/api/paper/summary")
@@ -123,7 +126,7 @@ class BackendAppTests(unittest.TestCase):
         missing = client.get("/api/paper/strategies/missing")
         catalog = client.get("/api/strategies/catalog")
         catalog_item = client.get("/api/strategies/catalog/ema_cross")
-        paper_jobs = client.get("/api/paper/jobs")
+        paper_jobs = client.get("/api/paper/jobs", headers=headers)
         metadata = client.get("/api/system/metadata")
 
         self.assertEqual(health.status_code, 200)
@@ -410,6 +413,79 @@ class BackendAppTests(unittest.TestCase):
         self.assertGreaterEqual(analytics["totals"]["pricing_views"], 1)
         self.assertGreaterEqual(analytics["visitors_by_country"]["GB"], 1)
 
+    def test_stripe_webhook_updates_subscription_lifecycle(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+        from pairs_trading.platform import SQLiteMetadataStore
+
+        workspace = fresh_test_dir("artifacts/test_backend_stripe_webhook")
+        secret = "whsec_test_secret"
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            sentiment_job_state_dir=workspace / "sentiment_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+            stripe_webhook_secret=secret,
+        )
+        app = create_app(settings)
+        client = TestClient(app)
+        org_id = self.auth_headers(client)["X-Organization-Id"]
+
+        def stripe_signature(payload: bytes) -> str:
+            timestamp = str(int(time.time()))
+            signed = f"{timestamp}.{payload.decode('utf-8')}".encode("utf-8")
+            digest = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+            return f"t={timestamp},v1={digest}"
+
+        checkout_payload = json.dumps(
+            {
+                "type": "checkout.session.completed",
+                "data": {
+                    "object": {
+                        "metadata": {"organization_id": org_id},
+                        "customer": "cus_test_123",
+                        "subscription": "sub_test_123",
+                    }
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        checkout = client.post(
+            "/api/billing/webhook",
+            content=checkout_payload,
+            headers={"stripe-signature": stripe_signature(checkout_payload)},
+        )
+        self.assertEqual(checkout.status_code, 200)
+        self.assertTrue(checkout.json()["updated"])
+
+        store = SQLiteMetadataStore(workspace / "metadata.sqlite3")
+        subscription = store.get_subscription(organization_id=org_id)
+        self.assertEqual(subscription["plan"], "pro")
+        self.assertEqual(subscription["status"], "active")
+        self.assertEqual(subscription["stripe_customer_id"], "cus_test_123")
+        self.assertEqual(subscription["stripe_subscription_id"], "sub_test_123")
+
+        deleted_payload = json.dumps(
+            {
+                "type": "customer.subscription.deleted",
+                "data": {"object": {"id": "sub_test_123", "customer": "cus_test_123"}},
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        deleted = client.post(
+            "/api/billing/webhook",
+            content=deleted_payload,
+            headers={"stripe-signature": stripe_signature(deleted_payload)},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(store.get_subscription(organization_id=org_id)["status"], "canceled")
+
+        rejected = client.post("/api/billing/webhook", content=checkout_payload, headers={"stripe-signature": "t=1,v1=bad"})
+        self.assertEqual(rejected.status_code, 400)
+
     def test_sentiment_routes_accumulate_local_news_dataset(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings
@@ -524,10 +600,14 @@ class BackendAppTests(unittest.TestCase):
             )
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
+            user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
+            self.assertEqual(client.get(f"/api/sentiment/jobs/{job_id}").status_code, 401)
+            self.assertEqual(client.get(f"/api/sentiment/jobs/{job_id}", headers=user_headers).status_code, 404)
+            self.assertEqual(client.get("/api/sentiment/jobs", headers=user_headers).json(), [])
 
             completed_payload = None
             for _ in range(50):
-                job = client.get(f"/api/sentiment/jobs/{job_id}")
+                job = client.get(f"/api/sentiment/jobs/{job_id}", headers=headers)
                 self.assertEqual(job.status_code, 200)
                 if job.json()["status"] == "completed":
                     completed_payload = job.json()
@@ -541,7 +621,7 @@ class BackendAppTests(unittest.TestCase):
         self.assertIn("Sentiment accumulation completed", completed_payload["message"])
         self.assertEqual(completed_payload["result"]["summary"]["headline_count"], 1)
         self.assertEqual(completed_payload["result"]["daily_points"][0]["ticker"], "AAA")
-        jobs = client.get("/api/sentiment/jobs")
+        jobs = client.get("/api/sentiment/jobs", headers=headers)
         self.assertEqual(jobs.status_code, 200)
         self.assertIn(job_id, {job["id"] for job in jobs.json()})
 
@@ -563,7 +643,7 @@ class BackendAppTests(unittest.TestCase):
         failed_id = failed.json()["id"]
         failed_payload = None
         for _ in range(50):
-            job = client.get(f"/api/sentiment/jobs/{failed_id}")
+            job = client.get(f"/api/sentiment/jobs/{failed_id}", headers=headers)
             self.assertEqual(job.status_code, 200)
             if job.json()["status"] == "failed":
                 failed_payload = job.json()
