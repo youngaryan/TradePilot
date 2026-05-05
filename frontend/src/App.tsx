@@ -2,16 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
+  ArrowRight,
   BrainCircuit,
+  CheckCircle2,
   Database,
   FlaskConical,
   Gauge,
   LayoutDashboard,
+  LineChart,
   Monitor,
   Newspaper,
   RefreshCw,
   Rocket,
   ShieldCheck,
+  Sparkles,
   SunMoon
 } from "lucide-react";
 
@@ -50,6 +54,7 @@ import { LiveOps } from "./features/LiveOps";
 import { SaaSWorkspace } from "./features/SaaSWorkspace";
 import { SentimentLab } from "./features/SentimentLab";
 import { SystemGuide } from "./features/SystemGuide";
+import { formatCurrency, formatNumber } from "./utils/format";
 
 type ViewId = "command" | "workspace" | "live" | "sentiment" | "backtests" | "system";
 type ThemeMode = "light" | "dark" | "system";
@@ -94,6 +99,45 @@ const views: Array<{ id: ViewId; label: string; description: string; icon: React
   }
 ];
 
+const landingFeatureCards = [
+  {
+    title: "Launch fake-money agents",
+    body: "Deploy multiple strategy sleeves with symbols, timeframes, sentiment, SEC events, and realistic execution assumptions before risking real capital.",
+    icon: <Rocket size={20} />
+  },
+  {
+    title: "Validate before you trust",
+    body: "Run backtests with purged validation, experiment artifacts, readiness checks, trades, and lineage so every result has an audit trail.",
+    icon: <FlaskConical size={20} />
+  },
+  {
+    title: "Read the news layer",
+    body: "Build RSS, local-web, file, and API sentiment datasets, then inspect headlines, scores, heatmaps, and overlays from the same workspace.",
+    icon: <Newspaper size={20} />
+  },
+  {
+    title: "Operate like a SaaS product",
+    body: "Workspaces, telemetry, refresh status, saved experiments, and paper-agent records are already wired for a future subscription model.",
+    icon: <ShieldCheck size={20} />
+  }
+];
+
+const workflowSteps = [
+  "Choose a strategy sleeve",
+  "Backtest with validation",
+  "Launch paper agents",
+  "Review warnings and lineage"
+];
+
+const viewHeadlines: Record<ViewId, string> = {
+  command: "Understand your fake-money book at a glance.",
+  workspace: "Set up the SaaS workspace behind the research.",
+  live: "Deploy paper agents with clear controls and guardrails.",
+  sentiment: "Build the news dataset before agents trade from it.",
+  backtests: "Test strategy ideas with validation, not vibes.",
+  system: "Learn how the backend, data, and agent flow fit together."
+};
+
 function backendTone(health: HealthResponse | null) {
   return health?.status === "ok" ? "good" : "warn";
 }
@@ -128,34 +172,110 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
   }
 
   return (
-    <div className="login-shell">
-      <section className="login-card">
-        <div className="brand-mark brand-mark--login">
-          <BrainCircuit size={28} />
-          <div>
-            <strong>QuantOps SaaS</strong>
-            <span>Research, validation, and fake-money deployment cockpit</span>
-          </div>
-        </div>
-        <h1>Sign in to your workspace</h1>
-        <p>
-          The local prototype ships with a demo workspace so you can test authentication, organization switching,
-          billing hooks, experiments, datasets, and paper agents immediately.
-        </p>
-        <label>
-          Email
-          <input value={email} onChange={(event) => setEmail(event.target.value)} />
-        </label>
-        <label>
-          Password
-          <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
-        </label>
-        {error ? <span className="form-error">{error}</span> : null}
-        <button type="button" className="primary-button" onClick={() => void submit()} disabled={isLoading}>
-          {isLoading ? "Signing in" : "Enter workspace"}
+    <div className="marketing-shell">
+      <header className="marketing-nav">
+        <a className="marketing-brand" href="#top" aria-label="QuantOps home">
+          <BrainCircuit size={24} />
+          <span>QuantOps</span>
+        </a>
+        <nav aria-label="Landing page navigation">
+          <a href="#tools">Tools</a>
+          <a href="#workflow">Workflow</a>
+          <a href="#signin">Demo</a>
+        </nav>
+        <button type="button" className="nav-cta" onClick={() => void submit()} disabled={isLoading}>
+          Enter demo
         </button>
-        <small>Demo login: demo@quantops.local / quantops-demo</small>
-      </section>
+      </header>
+
+      <main id="top">
+        <section className="marketing-hero">
+          <div className="hero-copy">
+            <span className="hero-kicker">
+              <Sparkles size={16} />
+              AI-powered quant research toolkit
+            </span>
+            <h1>Research, validate, and paper trade strategies from one premium workspace.</h1>
+            <p>
+              QuantOps helps you move from idea to audited fake-money deployment with backtests, sentiment data,
+              strategy agents, saved artifacts, and clear explanations for every important number.
+            </p>
+            <div className="hero-actions">
+              <button type="button" className="primary-button primary-button--xl" onClick={() => void submit()} disabled={isLoading}>
+                {isLoading ? "Opening workspace" : "Start with the demo workspace"}
+                <ArrowRight size={18} />
+              </button>
+              <a className="secondary-link" href="#tools">Browse the toolkit</a>
+            </div>
+            <div className="hero-stats" aria-label="Product highlights">
+              <div><strong>10+</strong><span>Strategy paths</span></div>
+              <div><strong>24h</strong><span>Refresh workflow</span></div>
+              <div><strong>0%</strong><span>Real capital risk</span></div>
+            </div>
+          </div>
+
+          <aside className="signin-card" id="signin">
+            <div className="signin-card__header">
+              <Badge label="local demo" tone="good" />
+              <span>No credit card. No broker connection.</span>
+            </div>
+            <h2>Enter your workspace</h2>
+            <p>Use the demo credentials to explore the full SaaS-style control room immediately.</p>
+            <label>
+              Email
+              <input value={email} onChange={(event) => setEmail(event.target.value)} />
+            </label>
+            <label>
+              Password
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            </label>
+            {error ? <span className="form-error">{error}</span> : null}
+            <button type="button" className="primary-button" onClick={() => void submit()} disabled={isLoading}>
+              {isLoading ? "Signing in" : "Enter workspace"}
+              <ArrowRight size={17} />
+            </button>
+            <small>Demo login: demo@quantops.local / quantops-demo</small>
+          </aside>
+        </section>
+
+        <section className="landing-section" id="tools">
+          <div className="section-heading">
+            <span className="hero-kicker">Everything in one flow</span>
+            <h2>The professional toolkit behind every experiment</h2>
+            <p>Designed for a first-time user to understand what to do next without learning the codebase first.</p>
+          </div>
+          <div className="tool-grid">
+            {landingFeatureCards.map((card) => (
+              <article className="tool-card" key={card.title}>
+                <span>{card.icon}</span>
+                <h3>{card.title}</h3>
+                <p>{card.body}</p>
+                <a href="#signin">Open tool <ArrowRight size={15} /></a>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="workflow-band" id="workflow">
+          <div>
+            <span className="hero-kicker">From idea to paper book</span>
+            <h2>A clear launch path, not a wall of charts</h2>
+          </div>
+          <div className="workflow-steps">
+            {workflowSteps.map((step, index) => (
+              <div key={step}>
+                <strong>{index + 1}</strong>
+                <span>{step}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </main>
+
+      <footer className="marketing-footer">
+        <span>QuantOps research cockpit</span>
+        <span>Fake-money only until you deliberately add a real broker adapter.</span>
+      </footer>
     </div>
   );
 }
@@ -166,7 +286,7 @@ export default function App() {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState<WorkspacePayload | null>(null);
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => (window.localStorage.getItem(THEME_STORAGE_KEY) as ThemeMode | null) ?? "system");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => (window.localStorage.getItem(THEME_STORAGE_KEY) as ThemeMode | null) ?? "light");
   const [telemetryConsent, setTelemetryConsent] = useState<TelemetryConsent>(() => (window.localStorage.getItem(TELEMETRY_STORAGE_KEY) as TelemetryConsent | null) ?? "granted");
   const [payload, setPayload] = useState<PaperDashboardPayload | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -316,23 +436,44 @@ export default function App() {
     return <LoginScreen onLogin={handleLogin} />;
   }
 
-  return (
-    <div className="quant-shell">
-      <aside className="nav-rail" aria-label="Quant cockpit navigation">
-        <div className="brand-mark">
-          <BrainCircuit size={24} />
-          <div>
-            <strong>QuantOps</strong>
-            <span>Research to paper</span>
-          </div>
-        </div>
+  const activeOrganization = organizations.find((organization) => organization.id === activeOrgId) ?? organizations[0];
+  const cockpitStats = [
+    {
+      label: "Paper equity",
+      value: payload ? formatCurrency(payload.totals.equity) : "Not loaded",
+      detail: payload?.asof_date ? `As of ${payload.asof_date}` : "Waiting for a run"
+    },
+    {
+      label: "Strategies",
+      value: formatNumber(payload?.strategies.length ?? 0, 0),
+      detail: "Configured fake-money sleeves"
+    },
+    {
+      label: "Experiments",
+      value: formatNumber(metadata?.counts.experiment_runs ?? 0, 0),
+      detail: "Saved validation records"
+    },
+    {
+      label: "Telemetry",
+      value: formatNumber(metadata?.counts.telemetry_events ?? 0, 0),
+      detail: "Consent-aware events"
+    }
+  ];
 
-        <nav className="nav-stack">
+  return (
+    <div className="app-shell">
+      <header className="app-nav">
+        <button type="button" className="app-brand" onClick={() => setActiveView("command")} aria-label="Go to QuantOps home">
+          <BrainCircuit size={24} />
+          <span>QuantOps</span>
+        </button>
+
+        <nav className="app-nav-links" aria-label="Quant cockpit navigation">
           {views.map((view) => (
             <button
               key={view.id}
               type="button"
-              className={view.id === activeView ? "nav-item nav-item--active" : "nav-item"}
+              className={view.id === activeView ? "app-nav-link app-nav-link--active" : "app-nav-link"}
               onClick={() => setActiveView(view.id)}
             >
               {view.icon}
@@ -341,22 +482,74 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="nav-footer">
+        <div className="app-nav-actions">
           <Badge label={health?.status === "ok" ? "Backend online" : "Backend unknown"} tone={backendTone(health)} />
-          <span>{auth.user.email}</span>
-          <span>{metadata?.counts.experiment_runs ?? 0} saved experiments</span>
+          {organizations.length > 1 ? (
+            <label className="compact-control compact-control--nav">
+              <span>Workspace</span>
+              <select value={activeOrgId ?? ""} onChange={(event) => switchOrganization(event.target.value)} aria-label="Switch workspace">
+                {organizations.map((organization) => (
+                  <option key={organization.id} value={organization.id}>{organization.name}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span className="workspace-pill">{activeOrganization?.name ?? auth.user.email}</span>
+          )}
         </div>
-      </aside>
+      </header>
 
-      <main className="workspace">
-        <header className="topbar">
+      <main className="app-main">
+        <section className="app-hero">
           <div>
-            <p className="eyebrow">Professional Quant Control Room</p>
-            <h1>{activeMeta.label}</h1>
-            <span>{activeMeta.description}</span>
+            <span className="hero-kicker">
+              <Sparkles size={16} />
+              Professional Quant Control Room
+            </span>
+            <h1>{viewHeadlines[activeView]}</h1>
+            <p>{activeMeta.description}</p>
+            <div className="hero-actions">
+              <button type="button" className="primary-button primary-button--xl" onClick={() => setActiveView("live")}>
+                Launch paper agents
+                <ArrowRight size={18} />
+              </button>
+              <button type="button" className="secondary-button" onClick={() => setActiveView("backtests")}>
+                Run a backtest
+              </button>
+            </div>
+          </div>
+
+          <aside className="hero-product-card">
+            <div className="hero-product-card__top">
+              <LineChart size={22} />
+              <Badge label={payload?.run_timestamp_utc ? "state loaded" : "waiting for run"} tone={payload?.run_timestamp_utc ? "good" : "warn"} />
+            </div>
+            <strong>{payload ? formatCurrency(payload.totals.equity) : "No paper ledger yet"}</strong>
+            <span>Current fake-money equity across all saved paper agents.</span>
+            <div className="mini-checklist">
+              {["Backtest", "Sentiment", "Paper run"].map((item) => (
+                <div key={item}><CheckCircle2 size={15} />{item}</div>
+              ))}
+            </div>
+          </aside>
+        </section>
+
+        <section className="stat-strip">
+          {cockpitStats.map((stat) => (
+            <article key={stat.label} className="stat-card">
+              <span>{stat.label}</span>
+              <strong>{stat.value}</strong>
+              <small>{stat.detail}</small>
+            </article>
+          ))}
+        </section>
+
+        <section className="control-strip">
+          <div>
+            <strong>{activeMeta.label}</strong>
+            <span>{auth.user.email}</span>
           </div>
           <div className="topbar-actions">
-            <Badge label={payload?.run_timestamp_utc ? "state loaded" : "waiting for run"} tone={payload?.run_timestamp_utc ? "good" : "warn"} />
             <label className="compact-control">
               <SunMoon size={15} />
               <span>Theme</span>
@@ -400,7 +593,7 @@ export default function App() {
               <span>{isLoading ? "Refreshing" : "Refresh"}</span>
             </button>
           </div>
-        </header>
+        </section>
 
         {error ? (
           <section className="alert-card">
