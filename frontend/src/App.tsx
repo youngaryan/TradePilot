@@ -226,12 +226,34 @@ function backendTone(health: HealthResponse | null) {
   return health?.status === "ok" ? "good" : "warn";
 }
 
-const TOKEN_STORAGE_KEY = "quantops.auth_token";
 const ORG_STORAGE_KEY = "quantops.organization_id";
 const THEME_STORAGE_KEY = "quantops.theme";
 const TELEMETRY_STORAGE_KEY = "quantops.telemetry_consent";
 const LANDING_ANON_STORAGE_KEY = "quantops.landing_visitor";
 const premiumViews = new Set<ViewId>(["live", "sentiment", "backtests"]);
+const legalPages: Record<string, { title: string; body: string[] }> = {
+  "/privacy": {
+    title: "Privacy Policy",
+    body: [
+      "QuantOps stores account, workspace, telemetry, and research metadata needed to operate the product. Telemetry is minimized, consent-aware, and redacts sensitive fields such as passwords, API keys, emails, and tokens.",
+      "Research artifacts are scoped to your workspace. Do not upload confidential third-party data unless you have the right to use it."
+    ]
+  },
+  "/terms": {
+    title: "Terms of Use",
+    body: [
+      "QuantOps is a research and paper-trading tool. You are responsible for your data sources, strategy decisions, and compliance obligations.",
+      "Premium features may require a paid subscription and can be limited by quotas to protect platform reliability."
+    ]
+  },
+  "/risk-disclaimer": {
+    title: "Risk Disclaimer",
+    body: [
+      "Nothing in QuantOps is financial advice. Backtests, sentiment scores, and fake-money paper results are educational and may not predict live trading outcomes.",
+      "The product does not place real-money broker orders in this version. Add real trading only after legal, compliance, and operational review."
+    ]
+  }
+};
 
 function resolveTheme(mode: ThemeMode) {
   if (mode !== "system") return mode;
@@ -264,6 +286,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
   const [organizationName, setOrganizationName] = useState("Northstar Quant Lab");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const legalPage = legalPages[window.location.pathname];
 
   function trackLanding(name: string, properties: Record<string, unknown> = {}) {
     void trackTelemetryEvent({
@@ -355,6 +378,31 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
     }
     setEmail("user@quantops.local");
     setPassword("quantops-user");
+  }
+
+  if (legalPage) {
+    return (
+      <div className="marketing-shell">
+        <header className="marketing-nav">
+          <a className="marketing-brand" href="/" aria-label="QuantOps home">
+            <BrainCircuit size={24} />
+            <span>QuantOps</span>
+          </a>
+          <nav aria-label="Legal navigation">
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+            <a href="/risk-disclaimer">Risk</a>
+            <a href="/">Home</a>
+          </nav>
+        </header>
+        <main className="legal-page">
+          <span className="hero-kicker">QuantOps policy</span>
+          <h1>{legalPage.title}</h1>
+          {legalPage.body.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+          <a className="primary-button" href="/">Back to QuantOps</a>
+        </main>
+      </div>
+    );
   }
 
   return (
@@ -548,6 +596,9 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
         <span>QuantOps research cockpit</span>
         <button type="button" className="secondary-link" onClick={() => goToSection("login", "landing_cta_clicked", "footer_login")}>Login</button>
         <button type="button" className="secondary-link" onClick={() => { setMode("signup"); goToSection("signup", "landing_cta_clicked", "footer_signup"); }}>Sign up</button>
+        <a className="secondary-link" href="/privacy">Privacy</a>
+        <a className="secondary-link" href="/terms">Terms</a>
+        <a className="secondary-link" href="/risk-disclaimer">Risk disclaimer</a>
       </footer>
     </div>
   );
@@ -621,19 +672,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
     const storedOrg = window.localStorage.getItem(ORG_STORAGE_KEY);
-    if (!storedToken) {
-      void refreshAll();
-      return;
-    }
-    setApiAuth(storedToken, storedOrg);
+    setApiAuth(null, storedOrg);
     void (async () => {
       try {
         const me = await getCurrentUser();
         const nextAuth: AuthResponse = {
-          access_token: storedToken,
-          token_type: "bearer",
           user: me.user,
           organizations: me.organizations,
           active_organization_id: me.active_organization_id
@@ -644,7 +688,6 @@ export default function App() {
         setActiveOrganizationId(me.active_organization_id);
         setWorkspace(await getWorkspace());
       } catch {
-        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
         window.localStorage.removeItem(ORG_STORAGE_KEY);
         setApiAuth(null, null);
       } finally {
@@ -748,8 +791,7 @@ export default function App() {
     setAuth(nextAuth);
     setOrganizations(nextAuth.organizations);
     setActiveOrgId(nextAuth.active_organization_id);
-    setApiAuth(nextAuth.access_token, nextAuth.active_organization_id);
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, nextAuth.access_token);
+    setApiAuth(null, nextAuth.active_organization_id);
     if (nextAuth.active_organization_id) window.localStorage.setItem(ORG_STORAGE_KEY, nextAuth.active_organization_id);
     setRoutedView("workspace", { replace: true });
     void trackTelemetryEvent({
@@ -782,7 +824,6 @@ export default function App() {
     setActiveView("command");
     window.history.replaceState(null, "", window.location.pathname);
     setApiAuth(null, null);
-    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
     window.localStorage.removeItem(ORG_STORAGE_KEY);
   }
 

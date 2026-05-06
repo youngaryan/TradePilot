@@ -32,11 +32,9 @@ import type {
 } from "./types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
-let authToken: string | null = null;
 let activeOrganizationId: string | null = null;
 
-export function setApiAuth(token: string | null, organizationId?: string | null) {
-  authToken = token;
+export function setApiAuth(_token: string | null, organizationId?: string | null) {
   if (organizationId !== undefined) activeOrganizationId = organizationId;
 }
 
@@ -46,6 +44,19 @@ export function setActiveOrganizationId(organizationId: string | null) {
 
 function apiPath(path: string) {
   return `${API_BASE_URL}${path}`;
+}
+
+function cookieValue(name: string) {
+  return document.cookie
+    .split(";")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+}
+
+function csrfToken() {
+  const token = cookieValue("quantops_csrf");
+  return token ? decodeURIComponent(token) : null;
 }
 
 async function responseErrorMessage(response: Response) {
@@ -77,9 +88,12 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json"
   };
-  if (authToken) headers.Authorization = `Bearer ${authToken}`;
   if (activeOrganizationId) headers["X-Organization-Id"] = activeOrganizationId;
+  const method = String(init?.method ?? "GET").toUpperCase();
+  const csrf = csrfToken();
+  if (csrf && !["GET", "HEAD", "OPTIONS"].includes(method)) headers["X-CSRF-Token"] = csrf;
   const response = await fetch(apiPath(path), {
+    credentials: "include",
     headers: {
       ...headers,
       ...init?.headers
@@ -282,9 +296,8 @@ export function getBacktestJob(jobId: string) {
   return requestJson<BacktestJob>(`/api/backtests/jobs/${encodeURIComponent(jobId)}`);
 }
 
-export function getSentimentDataset(outputDir?: string | null) {
-  const suffix = outputDir ? `?output_dir=${encodeURIComponent(outputDir)}` : "";
-  return requestJson<SentimentDatasetPayload>(`/api/sentiment/dataset${suffix}`);
+export function getSentimentDataset(_outputDir?: string | null) {
+  return requestJson<SentimentDatasetPayload>("/api/sentiment/dataset");
 }
 
 export function accumulateSentiment(request: SentimentAccumulationRequest) {

@@ -546,7 +546,7 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(payload["source_summary"][0]["source"], "unit_news")
         self.assertTrue(output_dir.joinpath("daily_sentiment.parquet").exists())
 
-        dataset = client.get("/api/sentiment/dataset", params={"output_dir": str(output_dir)})
+        dataset = client.get("/api/sentiment/dataset", headers=headers, params={"output_dir": str(output_dir)})
         self.assertEqual(dataset.status_code, 200)
         self.assertEqual(dataset.json()["summary"]["scored_headline_count"], 2)
 
@@ -601,7 +601,7 @@ class BackendAppTests(unittest.TestCase):
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
             user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
-            self.assertEqual(client.get(f"/api/sentiment/jobs/{job_id}").status_code, 401)
+            self.assertEqual(TestClient(app).get(f"/api/sentiment/jobs/{job_id}").status_code, 401)
             self.assertEqual(client.get(f"/api/sentiment/jobs/{job_id}", headers=user_headers).status_code, 404)
             self.assertEqual(client.get("/api/sentiment/jobs", headers=user_headers).json(), [])
 
@@ -724,8 +724,9 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
-        response = client.get("/api/sentiment/dataset", params={"output_dir": str(output_dir)})
+        response = client.get("/api/sentiment/dataset", headers=headers, params={"output_dir": str(output_dir)})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -756,8 +757,9 @@ class BackendAppTests(unittest.TestCase):
             )
         )
         client = TestClient(app)
+        headers = self.auth_headers(client)
 
-        response = client.get("/api/sentiment/dataset", params={"output_dir": str(output_dir)})
+        response = client.get("/api/sentiment/dataset", headers=headers, params={"output_dir": str(output_dir)})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()

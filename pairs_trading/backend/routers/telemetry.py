@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import BackendSettings
-from ..saas import AuthService
+from ..saas import AuthService, SESSION_COOKIE_NAME
 from ..schemas import TelemetryBatchRequest, TelemetryEventRequest
 from ..telemetry import TelemetryContext, TelemetryService
 
@@ -21,26 +21,29 @@ def build_telemetry_router(settings: BackendSettings) -> APIRouter:
 
     def optional_context(
         credentials: HTTPAuthorizationCredentials | None,
-        organization_id: str | None,
+        active_organization_id: str | None,
         request: Request,
     ) -> TelemetryContext:
         country = visitor_country(request)
-        if credentials is None:
+        token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
             return TelemetryContext(country=country)
         try:
-            context = auth_service.authenticate(token=credentials.credentials, organization_id=organization_id)
+            context = auth_service.authenticate(token=token, organization_id=active_organization_id)
             return TelemetryContext(user_id=str(context.user["id"]), organization_id=context.organization_id, country=country)
         except Exception:
             return TelemetryContext(country=country)
 
     def required_context(
+        request: Request,
         credentials: HTTPAuthorizationCredentials | None,
-        organization_id: str | None,
+        active_organization_id: str | None,
     ) -> TelemetryContext:
-        if credentials is None:
+        token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
             raise HTTPException(status_code=401, detail="Login required.")
         try:
-            context = auth_service.authenticate(token=credentials.credentials, organization_id=organization_id)
+            context = auth_service.authenticate(token=token, organization_id=active_organization_id)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -52,28 +55,29 @@ def build_telemetry_router(settings: BackendSettings) -> APIRouter:
         request: TelemetryEventRequest,
         http_request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-        organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
+        active_organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> dict[str, Any]:
-        return telemetry.track(request, context=optional_context(credentials, organization_id, http_request))
+        return telemetry.track(request, context=optional_context(credentials, active_organization_id, http_request))
 
     @router.post("/events/batch")
     def record_batch(
         request: TelemetryBatchRequest,
         http_request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-        organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
+        active_organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> dict[str, Any]:
-        context = optional_context(credentials, organization_id, http_request)
+        context = optional_context(credentials, active_organization_id, http_request)
         results = [telemetry.track(event, context=context) for event in request.events]
         return {"stored_count": sum(1 for result in results if result.get("stored")), "results": results}
 
     @router.get("/events")
     def list_events(
+        http_request: Request,
         limit: int = Query(default=100, ge=1, le=500),
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-        organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
+        active_organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> list[dict[str, Any]]:
-        context = required_context(credentials, organization_id)
+        context = required_context(http_request, credentials, active_organization_id)
         return telemetry.list_events(organization_id=context.organization_id, limit=limit)
 
     return router

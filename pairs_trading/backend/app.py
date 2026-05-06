@@ -16,11 +16,13 @@ from .routers.sentiment import build_sentiment_router
 from .routers.strategies import router as strategies_router
 from .routers.system import build_system_router
 from .routers.telemetry import build_telemetry_router
+from .security import install_security_middleware
 from .telemetry import DailyRefreshScheduler
 
 
 def create_app(settings: BackendSettings | None = None) -> FastAPI:
     app_settings = settings or BackendSettings.from_env()
+    app_settings.validate_for_startup()
     scheduler = DailyRefreshScheduler(app_settings)
 
     @asynccontextmanager
@@ -41,9 +43,10 @@ def create_app(settings: BackendSettings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=list(app_settings.cors_origins),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
+    install_security_middleware(app, app_settings)
     app.include_router(health_router, prefix="/api")
     app.include_router(strategies_router, prefix="/api")
     app.include_router(build_backtest_router(app_settings), prefix="/api")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import base64
 import hashlib
 import hmac
@@ -16,11 +16,14 @@ import pandas as pd
 
 from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
+from .redaction import redact_paths
 from .schemas import ApiKeyCreateRequest, BillingCheckoutRequest, SignupRequest
 
 
 DEMO_EMAIL = "demo@quantops.local"
 DEMO_PASSWORD = "quantops-demo"
+SESSION_COOKIE_NAME = "quantops_session"
+CSRF_COOKIE_NAME = "quantops_csrf"
 
 
 def utc_now_iso() -> str:
@@ -55,10 +58,10 @@ def hash_password(password: str, *, salt: str | None = None) -> str:
     return f"pbkdf2_sha256$200000${salt}${base64.b64encode(digest).decode('ascii')}"
 
 
-def verify_password(password: str, stored_hash: str) -> bool:
-    if stored_hash == "demo-password-hash":
+def verify_password(password: str, stored_hash: str, *, allow_demo_passwords: bool = True) -> bool:
+    if allow_demo_passwords and stored_hash == "demo-password-hash":
         return password == DEMO_PASSWORD
-    if stored_hash == "demo-user-password-hash":
+    if allow_demo_passwords and stored_hash == "demo-user-password-hash":
         return password == "quantops-user"
     try:
         algorithm, iterations, salt, expected = stored_hash.split("$", 3)
@@ -79,20 +82,27 @@ class RequestContext:
 class AuthService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def login(self, *, email: str, password: str) -> dict[str, Any]:
         user = self.store.get_user_by_email(email)
-        if user is None or not verify_password(password, str(user.get("password_hash", ""))):
+        if user is None or not verify_password(
+            password,
+            str(user.get("password_hash", "")),
+            allow_demo_passwords=self.settings.enable_demo_accounts and not self.settings.is_production,
+        ):
             raise ValueError("Invalid email or password.")
         if str(user.get("status") or "active").lower() != "active":
             raise PermissionError("This account has been deactivated. Contact an administrator.")
         token = secrets.token_urlsafe(32)
-        self.store.create_auth_session(user_id=str(user["id"]), token=token)
+        expires_at = (datetime.now(UTC) + timedelta(hours=self.settings.session_ttl_hours)).isoformat().replace("+00:00", "Z")
+        self.store.create_auth_session(user_id=str(user["id"]), token=token, expires_at_utc=expires_at)
         organizations = self.store.list_organizations_for_user(user_id=str(user["id"]))
         return {
             "access_token": token,
             "token_type": "bearer",
+            "csrf_token": self.csrf_token_for_session(token),
+            "expires_at_utc": expires_at,
             "user": self.public_user(user),
             "organizations": organizations,
             "active_organization_id": organizations[0]["id"] if organizations else None,
@@ -134,10 +144,23 @@ class AuthService:
             "user": context.user,
             "organizations": organizations,
             "active_organization_id": context.organization_id,
+            "csrf_token": self.csrf_token_for_session(token),
         }
 
     def logout(self, *, token: str) -> None:
         self.store.delete_auth_session(token=token)
+
+    def csrf_token_for_session(self, token: str) -> str:
+        return hmac.new(
+            self.settings.csrf_secret.encode("utf-8"),
+            token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def verify_csrf_token(self, *, session_token: str, csrf_token: str | None) -> bool:
+        if not csrf_token:
+            return False
+        return hmac.compare_digest(self.csrf_token_for_session(session_token), csrf_token)
 
     @staticmethod
     def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -153,15 +176,18 @@ class AuthService:
 class SaaSService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def workspace_payload(self, *, organization_id: str) -> dict[str, Any]:
         self.sync_default_datasets(organization_id=organization_id)
+        datasets = self.store.list_datasets(organization_id=organization_id)
+        if self.settings.is_production:
+            datasets = [{**dataset, "path": None} for dataset in datasets]
         return {
             "organization_id": organization_id,
             "projects": self.store.list_projects(organization_id=organization_id),
             "subscription": self.store.get_subscription(organization_id=organization_id),
-            "datasets": self.store.list_datasets(organization_id=organization_id),
+            "datasets": datasets,
             "api_keys": self.store.list_api_keys(organization_id=organization_id),
             "experiments": self.store.list_experiments(organization_id=organization_id, limit=20),
             "paper_agents": self.store.list_paper_agents(organization_id=organization_id),
@@ -202,7 +228,11 @@ class SaaSService:
         )
 
     def sync_default_datasets(self, *, organization_id: str) -> None:
-        sentiment_path = self.settings.sentiment_cache_dir / "shadow" / "daily_sentiment.parquet"
+        sentiment_path = (
+            self.settings.sentiment_cache_dir / "organizations" / organization_id / "shadow" / "daily_sentiment.parquet"
+            if self.settings.is_production
+            else self.settings.sentiment_cache_dir / "shadow" / "daily_sentiment.parquet"
+        )
         if sentiment_path.exists():
             try:
                 daily = pd.read_parquet(sentiment_path)
@@ -242,13 +272,31 @@ class SaaSService:
 
     def list_experiments(self, *, organization_id: str) -> list[dict[str, Any]]:
         self.sync_experiment_runs(organization_id=organization_id)
-        return self.store.list_experiments(organization_id=organization_id, limit=50)
+        experiments = self.store.list_experiments(organization_id=organization_id, limit=50)
+        return redact_paths(experiments) if self.settings.is_production else experiments
+
+    def get_dataset(self, *, organization_id: str, dataset_id: str) -> dict[str, Any] | None:
+        self.sync_default_datasets(organization_id=organization_id)
+        dataset = self.store.get_dataset(organization_id=organization_id, dataset_id=dataset_id)
+        if dataset is not None and self.settings.is_production:
+            dataset = {**dataset, "path": None}
+        return dataset
+
+    def get_artifact(self, *, organization_id: str, artifact_id: str) -> dict[str, Any] | None:
+        # Secure v1 exposes artifact lookup by tenant-owned IDs only. The local
+        # artifact object store migration can hydrate this record later without
+        # reintroducing raw path query parameters.
+        for dataset in self.store.list_datasets(organization_id=organization_id):
+            if dataset.get("id") == artifact_id:
+                return self.get_dataset(organization_id=organization_id, dataset_id=artifact_id)
+        return None
 
     def get_experiment(self, *, organization_id: str, experiment_id: str) -> dict[str, Any] | None:
         self.sync_experiment_runs(organization_id=organization_id)
         experiment = self.store.get_experiment(organization_id=organization_id, experiment_id=experiment_id)
         if experiment is not None:
-            return self.enrich_experiment_detail(experiment)
+            detail = self.enrich_experiment_detail(experiment)
+            return redact_paths(detail) if self.settings.is_production else detail
         return None
 
     def sync_experiment_runs(self, *, organization_id: str) -> None:
@@ -332,16 +380,18 @@ class SaaSService:
             )
 
     def list_paper_agents(self, *, organization_id: str) -> list[dict[str, Any]]:
-        return self.store.list_paper_agents(organization_id=organization_id)
+        agents = self.store.list_paper_agents(organization_id=organization_id)
+        return redact_paths(agents) if self.settings.is_production else agents
 
     def get_paper_agent(self, *, organization_id: str, agent_id: str) -> dict[str, Any] | None:
-        return self.store.get_paper_agent(organization_id=organization_id, agent_id=agent_id)
+        agent = self.store.get_paper_agent(organization_id=organization_id, agent_id=agent_id)
+        return redact_paths(agent) if agent is not None and self.settings.is_production else agent
 
 
 class BillingService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def pricing(self, *, organization_id: str | None = None) -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id) if organization_id else None
@@ -396,13 +446,22 @@ class BillingService:
 
     def status(self, *, organization_id: str) -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id)
-        premium = subscription is not None and str(subscription.get("plan")) in {"pro", "team", "enterprise", "pro_trial"} and str(subscription.get("status")) in {"active", "trialing"}
+        allowed_statuses = {"active"} | ({"trialing"} if self.settings.allow_trial_entitlements else set())
+        premium = (
+            subscription is not None
+            and str(subscription.get("plan")) in {"pro", "team", "enterprise", "pro_trial"}
+            and str(subscription.get("status")) in allowed_statuses
+        )
         return {"subscription": subscription, "premium": premium, "pricing": self.pricing(organization_id=organization_id)["plans"]}
 
     def checkout(self, *, organization_id: str, request: BillingCheckoutRequest) -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id) or {}
-        price_id = request.price_id or self.settings.stripe_pro_price_id
+        if request.price_id and self.settings.is_production:
+            raise ValueError("Client-supplied Stripe price IDs are not accepted in production.")
+        price_id = self.settings.effective_stripe_pro_price_id
         if not self.settings.stripe_secret_key or not price_id:
+            if self.settings.is_production:
+                raise RuntimeError("Stripe checkout is not configured for production.")
             self.store.upsert_subscription(
                 organization_id=organization_id,
                 payload={**subscription, "plan": request.plan, "status": "trialing"},
@@ -444,7 +503,12 @@ class BillingService:
         if not self._verify_stripe_signature(payload=payload, signature_header=signature_header):
             raise PermissionError("Invalid Stripe webhook signature.")
         event = json.loads(payload.decode("utf-8"))
+        event_id = str(event.get("id") or "")
         event_type = str(event.get("type") or "")
+        if event_id:
+            first_seen = self.store.record_stripe_event(event_id=event_id, event_type=event_type, payload=event)
+            if not first_seen:
+                return {"received": True, "updated": False, "duplicate": True, "event_type": event_type}
         data = event.get("data", {}).get("object", {}) if isinstance(event.get("data"), dict) else {}
         organization_id = (
             data.get("metadata", {}).get("organization_id")
@@ -478,6 +542,36 @@ class BillingService:
                         "stripe_subscription_id": subscription_id,
                         "current_period_end_utc": current_period_end,
                         "usage": {"source": "stripe_subscription_webhook"},
+                    },
+                )
+                return {"received": True, "updated": True, "event_type": event_type}
+        if event_type in {"invoice.payment_failed", "charge.refunded", "payment_intent.payment_failed"}:
+            subscription_id = data.get("subscription")
+            organization_id = organization_id or self._organization_id_for_stripe_subscription(str(subscription_id or ""))
+            if organization_id:
+                self.store.upsert_subscription(
+                    organization_id=str(organization_id),
+                    payload={
+                        "plan": "pro",
+                        "status": "past_due",
+                        "stripe_customer_id": data.get("customer"),
+                        "stripe_subscription_id": subscription_id,
+                        "usage": {"source": event_type},
+                    },
+                )
+                return {"received": True, "updated": True, "event_type": event_type}
+        if event_type == "invoice.paid":
+            subscription_id = data.get("subscription")
+            organization_id = organization_id or self._organization_id_for_stripe_subscription(str(subscription_id or ""))
+            if organization_id:
+                self.store.upsert_subscription(
+                    organization_id=str(organization_id),
+                    payload={
+                        "plan": "pro",
+                        "status": "active",
+                        "stripe_customer_id": data.get("customer"),
+                        "stripe_subscription_id": subscription_id,
+                        "usage": {"source": event_type},
                     },
                 )
                 return {"received": True, "updated": True, "event_type": event_type}
@@ -538,7 +632,7 @@ class BillingService:
 class AdminService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def overview(self) -> dict[str, Any]:
         counts = self.store.counts()
@@ -597,7 +691,52 @@ class AdminService:
             updated = self.store.update_user_role(user_id=user_id, role=next_role) or updated
         if next_status:
             updated = self.store.update_user_status(user_id=user_id, status=next_status) or updated
+        self.store.record_audit_log(
+            action="admin.user_updated",
+            actor_user_id=actor_user_id,
+            target_type="user",
+            target_id=user_id,
+            metadata={"role": next_role, "status": next_status},
+        )
         return AuthService.public_user(updated)
+
+    def audit_log(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.store.list_audit_log(limit=limit)
+
+    def system_health(self) -> dict[str, Any]:
+        counts = self.store.counts()
+        return {
+            "status": "ok",
+            "app_env": self.settings.app_env,
+            "database": {"configured": bool(self.settings.database_url), "metadata_store": "sqlite" if not self.settings.database_url else "postgres"},
+            "queue": {"redis_configured": bool(self.settings.redis_url), "in_process_jobs": self.settings.enable_in_process_jobs},
+            "storage": {"s3_configured": bool(self.settings.s3_bucket and self.settings.s3_endpoint_url)},
+            "stripe": {"configured": bool(self.settings.stripe_secret_key and self.settings.stripe_webhook_secret)},
+            "counts": counts.__dict__,
+        }
+
+    def quotas(self) -> dict[str, Any]:
+        return {
+            "defaults": {
+                "backtests_per_day": 20,
+                "sentiment_jobs_per_day": 20,
+                "paper_jobs_per_day": 20,
+                "news_pages_per_day": 500,
+                "artifact_storage_mb": 1024,
+            },
+            "source": "secure_v1_defaults",
+        }
+
+    def update_quotas(self, *, organization_id: str, payload: dict[str, Any], actor_user_id: str) -> dict[str, Any]:
+        self.store.record_audit_log(
+            action="admin.quotas_updated",
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+            target_type="organization",
+            target_id=organization_id,
+            metadata={"quotas": payload},
+        )
+        return {"organization_id": organization_id, "quotas": payload, "status": "recorded"}
 
 
 def build_landing_analytics(events: list[dict[str, Any]]) -> dict[str, Any]:

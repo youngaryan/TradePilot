@@ -25,6 +25,17 @@ def _json_load(value: str | None, default: Any) -> Any:
     return json.loads(value)
 
 
+def _parse_utc_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class MetadataCounts:
     jobs: int
@@ -51,8 +62,9 @@ class SQLiteMetadataStore:
     workers, and future admin screens without reading a directory tree.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, enable_demo_accounts: bool = True) -> None:
         self.path = Path(path)
+        self.enable_demo_accounts = enable_demo_accounts
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -298,27 +310,62 @@ class SQLiteMetadataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_refresh_runs_user_created
                     ON refresh_runs(user_id, created_at_utc DESC);
+
+                CREATE TABLE IF NOT EXISTS stripe_events (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    processed_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    user_id TEXT,
+                    feature TEXT NOT NULL,
+                    quantity REAL NOT NULL DEFAULT 1,
+                    properties_json TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_usage_org_feature_time
+                    ON usage_events(organization_id, feature, occurred_at_utc DESC);
+
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT,
+                    actor_user_id TEXT,
+                    action TEXT NOT NULL,
+                    target_type TEXT,
+                    target_id TEXT,
+                    metadata_json TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_audit_org_time
+                    ON audit_log(organization_id, occurred_at_utc DESC);
                 """
             )
         self._migrate_auth_columns()
-        self.ensure_demo_workspace(
-            display_name="Admin Demo Quant",
-            role="admin",
-            plan="pro_trial",
-            subscription_status="trialing",
-            organization_role="owner",
-        )
-        self.ensure_demo_workspace(
-            email="user@quantops.local",
-            display_name="Normal Demo User",
-            password_hash="demo-user-password-hash",
-            role="user",
-            organization_name="QuantOps Free Demo",
-            organization_slug="quantops-free-demo",
-            plan="free",
-            subscription_status="free",
-            organization_role="member",
-        )
+        if self.enable_demo_accounts:
+            self.ensure_demo_workspace(
+                display_name="Admin Demo Quant",
+                role="admin",
+                plan="pro",
+                subscription_status="active",
+                organization_role="owner",
+            )
+            self.ensure_demo_workspace(
+                email="user@quantops.local",
+                display_name="Normal Demo User",
+                password_hash="demo-user-password-hash",
+                role="user",
+                organization_name="QuantOps Free Demo",
+                organization_slug="quantops-free-demo",
+                plan="free",
+                subscription_status="free",
+                organization_role="member",
+            )
 
     def _migrate_auth_columns(self) -> None:
         """Keep older local SQLite databases compatible with newer auth rules."""
@@ -651,6 +698,7 @@ class SQLiteMetadataStore:
             connection.execute("UPDATE users SET last_login_at_utc = ?, updated_at_utc = ? WHERE id = ?", (now, now, user_id))
 
     def get_auth_session(self, *, token: str) -> dict[str, Any] | None:
+        token_hash = self.hash_token(token)
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -660,9 +708,14 @@ class SQLiteMetadataStore:
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = ?
                 """,
-                (self.hash_token(token),),
+                (token_hash,),
             ).fetchone()
-        return self._row_to_dict(row)
+            payload = self._row_to_dict(row)
+            expires_at = _parse_utc_iso(str(payload.get("expires_at_utc"))) if payload else None
+            if expires_at is not None and expires_at <= datetime.now(UTC):
+                connection.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+                return None
+        return payload
 
     def delete_auth_session(self, *, token: str) -> None:
         with self._connect() as connection:
@@ -782,6 +835,117 @@ class SQLiteMetadataStore:
             )
         return self.get_subscription(organization_id=organization_id) or {}
 
+    def record_stripe_event(self, *, event_id: str, event_type: str, payload: dict[str, Any]) -> bool:
+        """Return True only when a Stripe event is seen for the first time."""
+
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO stripe_events (id, event_type, processed_at_utc, payload_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (event_id, event_type, now, _json_dump(payload)),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def record_usage_event(
+        self,
+        *,
+        organization_id: str,
+        feature: str,
+        quantity: float = 1.0,
+        user_id: str | None = None,
+        properties: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event_id = self.stable_id("use", f"{organization_id}:{feature}:{uuid4().hex}")
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO usage_events (
+                    id, organization_id, user_id, feature, quantity, properties_json, occurred_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, organization_id, user_id, feature, float(quantity), _json_dump(properties or {}), now),
+            )
+        return {
+            "id": event_id,
+            "organization_id": organization_id,
+            "user_id": user_id,
+            "feature": feature,
+            "quantity": float(quantity),
+            "properties": properties or {},
+            "occurred_at_utc": now,
+        }
+
+    def usage_count_since(self, *, organization_id: str, feature: str, since_utc: str) -> float:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(quantity), 0) AS total
+                FROM usage_events
+                WHERE organization_id = ? AND feature = ? AND occurred_at_utc >= ?
+                """,
+                (organization_id, feature, since_utc),
+            ).fetchone()
+        return float(row["total"] if row is not None else 0.0)
+
+    def record_audit_log(
+        self,
+        *,
+        action: str,
+        organization_id: str | None = None,
+        actor_user_id: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event_id = self.stable_id("aud", f"{organization_id}:{actor_user_id}:{action}:{uuid4().hex}")
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_log (
+                    id, organization_id, actor_user_id, action, target_type, target_id, metadata_json, occurred_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, organization_id, actor_user_id, action, target_type, target_id, _json_dump(metadata or {}), now),
+            )
+        return {
+            "id": event_id,
+            "organization_id": organization_id,
+            "actor_user_id": actor_user_id,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "metadata": metadata or {},
+            "occurred_at_utc": now,
+        }
+
+    def list_audit_log(self, *, organization_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM audit_log"
+        params: tuple[Any, ...]
+        if organization_id:
+            query += " WHERE organization_id = ?"
+            params = (organization_id, int(limit))
+        else:
+            params = (int(limit),)
+        query += " ORDER BY occurred_at_utc DESC LIMIT ?"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        records = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = _json_load(item.pop("metadata_json"), {})
+            records.append(item)
+        return records
+
     def upsert_dataset(self, *, organization_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = _utc_now_iso()
         dataset_id = str(payload.get("id") or self.stable_id("dst", f"{organization_id}:{payload.get('path')}:{payload.get('kind')}"))
@@ -832,6 +996,14 @@ class SQLiteMetadataStore:
                 (organization_id,),
             ).fetchall()
         return [self._dataset_row(row) for row in rows]
+
+    def get_dataset(self, *, organization_id: str, dataset_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM datasets WHERE organization_id = ? AND id = ?",
+                (organization_id, dataset_id),
+            ).fetchone()
+        return None if row is None else self._dataset_row(row)
 
     def create_api_key_metadata(
         self,

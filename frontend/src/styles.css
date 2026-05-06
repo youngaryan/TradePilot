@@ -2814,6 +2814,24 @@ button.secondary-link:hover {
   font-weight: 800;
 }
 
+.legal-page {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 6rem 1.5rem;
+}
+
+.legal-page h1 {
+  margin: 1rem 0;
+  font-size: clamp(2.4rem, 6vw, 4.75rem);
+}
+
+.legal-page p {
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  line-height: 1.8;
+  max-width: 72ch;
+}
+
 .app-shell {
   padding-bottom: 42px;
 }

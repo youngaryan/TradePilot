@@ -156,7 +156,7 @@ export function SystemGuide({
       <section className="explain-grid">
         <Explainer title="Where money lives" body="Paper cash, positions, order history, and PnL are saved under artifacts/paper/state and artifacts/paper/runs." />
         <Explainer title="Where experiments live" body="Backtest artifacts are saved under artifacts/backtests/experiments or the configured artifact root." />
-        <Explainer title="Where metadata lives" body={`SQLite metadata is currently at ${metadata?.metadata_db_path ?? "the configured metadata path"}.`} />
+          <Explainer title="Where metadata lives" body={`Metadata is served through authenticated workspace APIs. Environment: ${metadata?.app_env ?? "unknown"}.`} />
       </section>
     </div>
   );

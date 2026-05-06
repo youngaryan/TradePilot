@@ -6,6 +6,7 @@ import unittest
 
 from pairs_trading.backend.config import BackendSettings
 from pairs_trading.backend.services import PaperService
+from pairs_trading.platform import SQLiteMetadataStore
 from tests.common import fresh_test_dir
 
 
@@ -60,21 +61,24 @@ class BackendServiceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        service = PaperService(
-            BackendSettings(
+        settings = BackendSettings(
                 paper_state_dir=state_dir,
                 paper_artifact_root=workspace / "runs",
                 metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=workspace / "missing.json",
             )
-        )
-        payload = service.build_dashboard_payload()
+        service = PaperService(settings)
+        store = SQLiteMetadataStore(settings.metadata_db_path)
+        user = store.get_user_by_email("demo@quantops.local")
+        assert user is not None
+        organization_id = str(store.get_default_organization_id(user_id=str(user["id"])))
+        payload = service.build_dashboard_payload(organization_id=organization_id)
 
         self.assertEqual(service.latest_batch_summary_path(), summary_path)
         self.assertEqual(payload["totals"]["equity"], 102000.0)
         self.assertEqual(payload["leaderboard"][0]["strategy"], "trend")
-        self.assertEqual(service.get_strategy("trend")["pipeline"], "etf_trend")
-        self.assertIsNone(service.get_strategy("missing"))
+        self.assertEqual(service.get_strategy(organization_id=organization_id, strategy_name="trend")["pipeline"], "etf_trend")
+        self.assertIsNone(service.get_strategy(organization_id=organization_id, strategy_name="missing"))
 
 
 if __name__ == "__main__":

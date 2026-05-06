@@ -30,8 +30,10 @@ from ..data.sentiment_accumulator import ShadowSentimentAccumulator
 from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
+from .job_queue import enqueue_quant_job
 from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
+from .validators import validate_relative_path, validate_url
 
 
 SENTIMENT_TABLE_ROW_LIMIT = 2_000
@@ -84,15 +86,16 @@ class PaperRunJob:
 
 
 class PaperRunJobRunner:
-    def __init__(self, settings: BackendSettings, *, max_workers: int = 1, max_history: int = 50) -> None:
+    def __init__(self, settings: BackendSettings, *, max_workers: int = 1, max_history: int = 50, mark_interrupted_on_load: bool = True) -> None:
         self.settings = settings
         self.max_history = max_history
+        self.mark_interrupted_on_load = mark_interrupted_on_load
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="paper-live")
         self.lock = Lock()
         self.jobs: dict[str, PaperRunJob] = {}
         self.jobs_dir = settings.paper_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
         self._load_jobs()
 
     def submit(self, command: PaperRunCommand, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
@@ -101,6 +104,7 @@ class PaperRunJobRunner:
             if not isinstance(strategies, list) or not strategies:
                 raise ValueError("Inline paper deployment config must include at least one strategy.")
         config_path = command.deployment_config_path or (None if command.deployment_config is not None else self.settings.default_paper_config)
+        validate_relative_path(config_path, settings=self.settings, field_name="deployment_config_path")
         if config_path is not None and not config_path.exists():
             raise FileNotFoundError(f"Paper deployment config not found: {config_path}")
 
@@ -128,8 +132,12 @@ class PaperRunJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        future = self.executor.submit(self._run_job, job.id, command)
-        future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        if self.settings.enable_in_process_jobs:
+            future = self.executor.submit(self._run_job, job.id, command, organization_id)
+            future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        else:
+            queue_payload = enqueue_quant_job(self.settings, kind="paper", job_id=job.id)
+            self._set_status(job.id, "queued", message=f"Queued in Redis/RQ ({queue_payload['queue']}). Waiting for worker heartbeat.")
         return job.to_dict()
 
     def list_jobs(self, *, organization_id: str) -> list[dict[str, Any]]:
@@ -180,7 +188,7 @@ class PaperRunJobRunner:
             return [date.strftime("%Y-%m-%d") for date in dates]
         return [command.asof_date]
 
-    def _run_job(self, job_id: str, command: PaperRunCommand) -> None:
+    def _run_job(self, job_id: str, command: PaperRunCommand, organization_id: str) -> None:
         self._set_status(
             job_id,
             "running",
@@ -216,7 +224,8 @@ class PaperRunJobRunner:
                     PaperRunCommand(
                         deployment_config_path=config_path,
                         asof_date=asof_date,
-                    )
+                    ),
+                    organization_id=organization_id,
                 )
                 completed_dates.append(asof_date)
             self._set_status(
@@ -226,7 +235,7 @@ class PaperRunJobRunner:
                 stage="saving_ledgers",
                 message="Saving fake-money ledgers, latest orders, dashboards, and API payload.",
             )
-            result = result or service.build_dashboard_payload()
+            result = result or service.build_dashboard_payload(organization_id=organization_id)
             result["run_sequence"] = {
                 "dates": completed_dates,
                 "count": len(completed_dates),
@@ -295,7 +304,7 @@ class PaperRunJobRunner:
 
     def _load_job_instance(self, job: PaperRunJob) -> None:
         changed = False
-        if job.status in {"queued", "running"}:
+        if self.mark_interrupted_on_load and job.status in {"queued", "running"}:
             job.status = "interrupted"
             job.stage = "interrupted"
             job.progress = 1.0
@@ -456,15 +465,16 @@ class BacktestJob:
 
 
 class BacktestJobRunner:
-    def __init__(self, settings: BackendSettings, *, max_workers: int = 2, max_history: int = 50) -> None:
+    def __init__(self, settings: BackendSettings, *, max_workers: int = 2, max_history: int = 50, mark_interrupted_on_load: bool = True) -> None:
         self.settings = settings
         self.max_history = max_history
+        self.mark_interrupted_on_load = mark_interrupted_on_load
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="backtest-agent")
         self.lock = Lock()
         self.jobs: dict[str, BacktestJob] = {}
         self.jobs_dir = settings.backtest_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
         self._load_jobs()
 
     def submit(self, request: BacktestRunRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
@@ -487,8 +497,12 @@ class BacktestJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        future = self.executor.submit(self._run_job, job.id, request, organization_id)
-        future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        if self.settings.enable_in_process_jobs:
+            future = self.executor.submit(self._run_job, job.id, request, organization_id)
+            future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        else:
+            queue_payload = enqueue_quant_job(self.settings, kind="backtest", job_id=job.id)
+            self._set_status(job.id, "queued", message=f"Queued in Redis/RQ ({queue_payload['queue']}). Waiting for worker heartbeat.")
         return job.to_dict()
 
     def list_jobs(self, *, organization_id: str) -> list[dict[str, Any]]:
@@ -644,7 +658,7 @@ class BacktestJobRunner:
 
     def _load_job_instance(self, job: BacktestJob) -> None:
         changed = False
-        if job.status in {"queued", "running"}:
+        if self.mark_interrupted_on_load and job.status in {"queued", "running"}:
             job.status = "interrupted"
             job.stage = "interrupted"
             job.progress = 1.0
@@ -672,6 +686,9 @@ class BacktestService:
         if request.pipeline in {"stat_arb", "graph_stat_arb"} and request.symbols and request.sector_map_path is None:
             # The stat-arb runner can use its default sector map, but user-supplied symbols would be ignored.
             raise ValueError("Stat-arb symbol lists require a sector map path so sectors are explicit.")
+        validate_relative_path(request.artifact_root, settings=self.settings, field_name="artifact_root")
+        validate_relative_path(request.sector_map_path, settings=self.settings, field_name="sector_map_path")
+        validate_relative_path(request.event_file, settings=self.settings, field_name="event_file")
         if request.train_bars <= request.purge_bars + 5:
             raise ValueError("Training bars must be meaningfully larger than purge bars.")
 
@@ -1004,7 +1021,7 @@ class BacktestService:
 class PaperService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def latest_batch_summary_path(self) -> Path | None:
         root = self.settings.paper_artifact_root
@@ -1015,30 +1032,30 @@ class PaperService:
             return None
         return max(candidates, key=lambda path: path.stat().st_mtime)
 
-    def build_dashboard_payload(self, batch_summary_path: str | Path | None = None) -> dict[str, Any]:
+    def build_dashboard_payload(self, *, organization_id: str, batch_summary_path: str | Path | None = None) -> dict[str, Any]:
+        validate_relative_path(batch_summary_path, settings=self.settings, field_name="batch_summary_path")
         summary_path = Path(batch_summary_path) if batch_summary_path else self.latest_batch_summary_path()
         payload = build_paper_dashboard_payload(
             state_dir=self.settings.paper_state_dir,
             batch_summary_path=summary_path,
         )
-        demo_context = self.metadata_store.ensure_demo_workspace()
         SaaSService(self.settings).sync_paper_agents_from_dashboard(
-            organization_id=str(demo_context["organization_id"]),
+            organization_id=organization_id,
             payload=payload,
         )
         return payload
 
-    def list_strategies(self, batch_summary_path: str | Path | None = None) -> list[dict[str, Any]]:
-        return list(self.build_dashboard_payload(batch_summary_path=batch_summary_path).get("strategies", []))
+    def list_strategies(self, *, organization_id: str, batch_summary_path: str | Path | None = None) -> list[dict[str, Any]]:
+        return list(self.build_dashboard_payload(organization_id=organization_id, batch_summary_path=batch_summary_path).get("strategies", []))
 
-    def get_strategy(self, strategy_name: str, batch_summary_path: str | Path | None = None) -> dict[str, Any] | None:
+    def get_strategy(self, *, organization_id: str, strategy_name: str, batch_summary_path: str | Path | None = None) -> dict[str, Any] | None:
         normalized = strategy_name.casefold()
-        for strategy in self.list_strategies(batch_summary_path=batch_summary_path):
+        for strategy in self.list_strategies(organization_id=organization_id, batch_summary_path=batch_summary_path):
             if str(strategy.get("name", "")).casefold() == normalized:
                 return strategy
         return None
 
-    def run_paper_batch(self, command: PaperRunCommand) -> dict[str, Any]:
+    def run_paper_batch(self, command: PaperRunCommand, *, organization_id: str) -> dict[str, Any]:
         if command.deployment_config is not None:
             deployment_dir = self.settings.paper_artifact_root.parent / "inline_deployments"
             deployment_dir.mkdir(parents=True, exist_ok=True)
@@ -1046,6 +1063,7 @@ class PaperService:
             config_path.write_text(json.dumps(json_ready(command.deployment_config), indent=2), encoding="utf-8")
         else:
             config_path = command.deployment_config_path or self.settings.default_paper_config
+        validate_relative_path(config_path, settings=self.settings, field_name="deployment_config_path")
         if not config_path.exists():
             raise FileNotFoundError(f"Paper deployment config not found: {config_path}")
 
@@ -1069,12 +1087,14 @@ class PaperService:
                 summary=json_ready(summary),
                 artifact_dir=summary.get("artifact_dir"),
             )
-            latest_payload = self.build_dashboard_payload(batch_summary_path=summary.get("artifact_dir") and Path(summary["artifact_dir"]) / "paper_batch_summary.json")
+            latest_payload = self.build_dashboard_payload(
+                organization_id=organization_id,
+                batch_summary_path=summary.get("artifact_dir") and Path(summary["artifact_dir"]) / "paper_batch_summary.json",
+            )
             completed_dates.append(asof_date)
-        latest_payload = latest_payload or self.build_dashboard_payload()
-        demo_context = self.metadata_store.ensure_demo_workspace()
+        latest_payload = latest_payload or self.build_dashboard_payload(organization_id=organization_id)
         SaaSService(self.settings).sync_paper_agents_from_dashboard(
-            organization_id=str(demo_context["organization_id"]),
+            organization_id=organization_id,
             payload=latest_payload,
         )
         latest_payload["run_sequence"] = {
@@ -1088,13 +1108,15 @@ class PaperService:
 class SentimentService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     @property
     def default_output_dir(self) -> Path:
         return self.settings.sentiment_cache_dir / "shadow"
 
-    def _output_dir(self, output_dir: str | Path | None = None) -> Path:
+    def _output_dir(self, output_dir: str | Path | None = None, *, organization_id: str | None = None) -> Path:
+        if output_dir is None and organization_id:
+            return self.settings.sentiment_cache_dir / "organizations" / organization_id / "shadow"
         return Path(output_dir) if output_dir else self.default_output_dir
 
     @staticmethod
@@ -1144,8 +1166,7 @@ class SentimentService:
         preview = preview.loc[~preview.index.duplicated(keep="first")]
         return cls._sort_headline_frame(preview)
 
-    @staticmethod
-    def validate_request(request: SentimentAccumulationRequest) -> None:
+    def validate_request(self, request: SentimentAccumulationRequest) -> None:
         if not request.symbols:
             raise ValueError("Choose at least one symbol for sentiment accumulation.")
         if not request.providers:
@@ -1153,6 +1174,11 @@ class SentimentService:
         selected = {str(provider).lower() for provider in request.providers}
         if "local" in selected and not request.news_files:
             raise ValueError("Local sentiment accumulation requires at least one news file.")
+        validate_relative_path(request.output_dir, settings=self.settings, field_name="output_dir")
+        for path in request.news_files:
+            validate_relative_path(path, settings=self.settings, field_name="news_files")
+        for url in [*request.rss_feed_urls, *request.local_web_search_urls, *request.web_research_urls]:
+            validate_url(url, settings=self.settings, field_name="sentiment URL")
 
     def _headline_provider(self, request: SentimentAccumulationRequest):
         providers = []
@@ -1289,6 +1315,8 @@ class SentimentService:
     def accumulate(
         self,
         request: SentimentAccumulationRequest,
+        *,
+        organization_id: str,
         progress: Callable[[str, str, float], None] | None = None,
     ) -> dict[str, Any]:
         def report(stage: str, message: str, value: float) -> None:
@@ -1297,7 +1325,7 @@ class SentimentService:
 
         self.validate_request(request)
         report("preparing_sources", "Preparing selected headline providers and checking credentials.", 0.08)
-        output_dir = self._output_dir(request.output_dir)
+        output_dir = self._output_dir(request.output_dir, organization_id=organization_id)
         provider = self._headline_provider(request)
         report("loading_model", "Loading the sentiment scorer. FinBERT is skipped when the lightweight option is selected.", 0.18)
         model = self._sentiment_model(request.use_finbert, request.local_finbert_only)
@@ -1317,10 +1345,9 @@ class SentimentService:
         report("writing_metadata", "Writing run metadata, provider warnings, and dataset lineage.", 0.84)
         self._write_accumulation_metadata(result, request, warnings)
         report("registering_dataset", "Registering the sentiment dataset in the workspace metadata store.", 0.90)
-        demo_context = self.metadata_store.ensure_demo_workspace()
         daily_path = Path(result.output_dir) / "daily_sentiment.parquet"
         self.metadata_store.upsert_dataset(
-            organization_id=str(demo_context["organization_id"]),
+            organization_id=organization_id,
             payload={
                 "name": "Shadow Daily Sentiment",
                 "kind": "sentiment_daily",
@@ -1342,10 +1369,11 @@ class SentimentService:
             },
         )
         report("loading_results", "Loading the latest sentiment tables and charts for the UI.", 0.95)
-        return self.dataset(output_dir=result.output_dir)
+        return self.dataset(output_dir=result.output_dir, organization_id=organization_id)
 
-    def dataset(self, output_dir: str | Path | None = None) -> dict[str, Any]:
-        output_path = self._output_dir(output_dir)
+    def dataset(self, output_dir: str | Path | None = None, *, organization_id: str | None = None) -> dict[str, Any]:
+        validate_relative_path(output_dir, settings=self.settings, field_name="output_dir")
+        output_path = self._output_dir(output_dir, organization_id=organization_id)
         raw_path = output_path / "raw_headlines.parquet"
         scored_path = output_path / "scored_headlines.parquet"
         daily_path = output_path / "daily_sentiment.parquet"
@@ -1405,12 +1433,25 @@ class SentimentService:
         if not warnings and raw.empty:
             warnings = ["No headlines are stored in this sentiment dataset yet."]
 
-        return {
+        paths_payload = {
             "output_dir": str(output_path),
             "raw_headlines_path": str(raw_path),
             "scored_headlines_path": str(scored_path),
             "daily_sentiment_path": str(daily_path),
             "metadata_path": str(metadata_path),
+        }
+        if self.settings.is_production:
+            paths_payload = {
+                "output_dir": None,
+                "raw_headlines_path": None,
+                "scored_headlines_path": None,
+                "daily_sentiment_path": None,
+                "metadata_path": None,
+            }
+
+        return {
+            "dataset_id": self.metadata_store.stable_id("dst", f"{organization_id or 'local'}:{daily_path}:sentiment_daily"),
+            **paths_payload,
             "metadata": json_ready(metadata),
             "warnings": json_ready(warnings),
             "summary": {
@@ -1473,15 +1514,16 @@ class SentimentAccumulationJob:
 
 
 class SentimentJobRunner:
-    def __init__(self, settings: BackendSettings, *, max_workers: int = 1, max_history: int = 50) -> None:
+    def __init__(self, settings: BackendSettings, *, max_workers: int = 1, max_history: int = 50, mark_interrupted_on_load: bool = True) -> None:
         self.settings = settings
         self.max_history = max_history
+        self.mark_interrupted_on_load = mark_interrupted_on_load
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sentiment-agent")
         self.lock = Lock()
         self.jobs: dict[str, SentimentAccumulationJob] = {}
         self.jobs_dir = settings.sentiment_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
         self._load_jobs()
 
     def submit(self, request: SentimentAccumulationRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
@@ -1504,8 +1546,12 @@ class SentimentJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        future = self.executor.submit(self._run_job, job.id, request)
-        future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        if self.settings.enable_in_process_jobs:
+            future = self.executor.submit(self._run_job, job.id, request, organization_id)
+            future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
+        else:
+            queue_payload = enqueue_quant_job(self.settings, kind="sentiment", job_id=job.id)
+            self._set_status(job.id, "queued", message=f"Queued in Redis/RQ ({queue_payload['queue']}). Waiting for worker heartbeat.")
         return job.to_dict()
 
     def list_jobs(self, *, organization_id: str) -> list[dict[str, Any]]:
@@ -1533,7 +1579,7 @@ class SentimentJobRunner:
                 setattr(job, key, value)
             self._save_locked(job)
 
-    def _run_job(self, job_id: str, request: SentimentAccumulationRequest) -> None:
+    def _run_job(self, job_id: str, request: SentimentAccumulationRequest, organization_id: str) -> None:
         def progress(stage: str, message: str, value: float) -> None:
             self._set_status(
                 job_id,
@@ -1552,7 +1598,7 @@ class SentimentJobRunner:
             progress=0.06,
         )
         try:
-            result = SentimentService(self.settings).accumulate(request, progress=progress)
+            result = SentimentService(self.settings).accumulate(request, organization_id=organization_id, progress=progress)
             summary = result.get("summary", {})
             warnings = [str(warning) for warning in result.get("warnings", [])]
             fetched = result.get("metadata", {}).get("fetched_headlines")
@@ -1620,7 +1666,7 @@ class SentimentJobRunner:
 
     def _load_job_instance(self, job: SentimentAccumulationJob) -> None:
         changed = False
-        if job.status in {"queued", "running"}:
+        if self.mark_interrupted_on_load and job.status in {"queued", "running"}:
             job.status = "interrupted"
             job.stage = "interrupted"
             job.progress = 1.0

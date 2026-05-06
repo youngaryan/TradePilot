@@ -2,39 +2,44 @@ from __future__ import annotations
 
 from typing import Callable
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
-from .saas import AuthService, RequestContext
+from .saas import AuthService, RequestContext, SESSION_COOKIE_NAME
 
 
 bearer = HTTPBearer(auto_error=False)
 
 PAID_PLANS = {"pro", "team", "enterprise", "pro_trial"}
-PAID_STATUSES = {"active", "trialing"}
+PAID_STATUSES = {"active"}
 
 
-def is_paid_subscription(subscription: dict | None) -> bool:
+def is_paid_subscription(subscription: dict | None, *, allow_trial_entitlements: bool = False) -> bool:
     if not subscription:
         return False
     plan = str(subscription.get("plan") or "free").lower()
     status = str(subscription.get("status") or "").lower()
-    return plan in PAID_PLANS and status in PAID_STATUSES
+    statuses = set(PAID_STATUSES)
+    if allow_trial_entitlements:
+        statuses.add("trialing")
+    return plan in PAID_PLANS and status in statuses
 
 
 def require_auth_context(settings: BackendSettings) -> Callable[..., RequestContext]:
     auth_service = AuthService(settings)
 
     def dependency(
+        request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-        organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
+        active_organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> RequestContext:
-        if credentials is None:
+        token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
             raise HTTPException(status_code=401, detail="Login required.")
         try:
-            return auth_service.authenticate(token=credentials.credentials, organization_id=organization_id)
+            return auth_service.authenticate(token=token, organization_id=active_organization_id)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -43,12 +48,38 @@ def require_auth_context(settings: BackendSettings) -> Callable[..., RequestCont
     return dependency
 
 
+def require_csrf(settings: BackendSettings) -> Callable[..., None]:
+    auth_service = AuthService(settings)
+
+    def dependency(
+        request: Request,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+        csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+    ) -> None:
+        # Bearer clients are kept for API/backward compatibility. Browser cookie
+        # sessions must prove same-origin intent on mutating routes.
+        if credentials is not None:
+            return
+        session_token = request.cookies.get(SESSION_COOKIE_NAME)
+        if not session_token:
+            return
+        if not auth_service.verify_csrf_token(session_token=session_token, csrf_token=csrf_token):
+            raise HTTPException(status_code=403, detail={"code": "csrf_required", "message": "Missing or invalid CSRF token."})
+
+    return dependency
+
+
 def require_admin_context(settings: BackendSettings) -> Callable[..., RequestContext]:
     auth_dependency = require_auth_context(settings)
 
-    def dependency(ctx: RequestContext = Depends(auth_dependency)) -> RequestContext:
+    def dependency(request: Request, ctx: RequestContext = Depends(auth_dependency)) -> RequestContext:
         if str(ctx.user.get("role") or "user").lower() != "admin":
             raise HTTPException(status_code=403, detail="Admin access required.")
+        if settings.is_production and request.cookies.get("quantops_mfa") != "verified":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "admin_mfa_required", "message": "Admin MFA verification is required before accessing admin APIs."},
+            )
         return ctx
 
     return dependency
@@ -56,11 +87,11 @@ def require_admin_context(settings: BackendSettings) -> Callable[..., RequestCon
 
 def require_paid_context(settings: BackendSettings, *, feature: str = "premium feature") -> Callable[..., RequestContext]:
     auth_dependency = require_auth_context(settings)
-    store = SQLiteMetadataStore(settings.metadata_db_path)
+    store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def dependency(ctx: RequestContext = Depends(auth_dependency)) -> RequestContext:
         subscription = store.get_subscription(organization_id=ctx.organization_id)
-        if not is_paid_subscription(subscription):
+        if not is_paid_subscription(subscription, allow_trial_entitlements=settings.allow_trial_entitlements):
             raise HTTPException(
                 status_code=402,
                 detail={

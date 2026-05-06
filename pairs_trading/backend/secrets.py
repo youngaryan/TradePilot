@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+import os
+
+from .config import BackendSettings
+
+
+class SecretProvider:
+    def __init__(self, settings: BackendSettings) -> None:
+        self.settings = settings
+
+    def resolve(self, secret_ref: str) -> str | None:
+        if not secret_ref:
+            return None
+        if self.settings.is_production and not secret_ref.startswith(("env:", "secret-manager:")):
+            raise ValueError("Production secret references must use env: or secret-manager: references.")
+        if secret_ref.startswith("env:"):
+            return os.getenv(secret_ref.removeprefix("env:"))
+        if secret_ref.startswith("secret-manager:"):
+            raise NotImplementedError("Deploy a concrete secret-manager adapter before using this reference.")
+        return os.getenv(secret_ref)

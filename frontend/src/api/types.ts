@@ -152,7 +152,7 @@ export interface HealthResponse {
 }
 
 export interface SystemMetadata {
-  metadata_db_path: string;
+  app_env: string;
   counts: {
     jobs: number;
     deployment_configs: number;
@@ -192,8 +192,10 @@ export interface Organization {
 }
 
 export interface AuthResponse {
-  access_token: string;
-  token_type: string;
+  access_token?: string;
+  token_type?: string;
+  csrf_token?: string;
+  expires_at_utc?: string;
   user: AuthUser;
   organizations: Organization[];
   active_organization_id: string | null;

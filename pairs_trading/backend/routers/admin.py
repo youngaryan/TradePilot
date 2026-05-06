@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..authz import require_admin_context
+from ..authz import require_admin_context, require_csrf
 from ..config import BackendSettings
 from ..saas import AdminService, RequestContext
 from ..schemas import AdminUserUpdateRequest
@@ -14,6 +14,7 @@ def build_admin_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
     admin_service = AdminService(settings)
     admin_context = require_admin_context(settings)
+    csrf_guard = require_csrf(settings)
 
     @router.get("/overview")
     def overview(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:
@@ -38,11 +39,36 @@ def build_admin_router(settings: BackendSettings) -> APIRouter:
             limit=limit,
         )
 
+    @router.get("/audit-log")
+    def audit_log(
+        limit: int = Query(default=100, ge=1, le=500),
+        _: RequestContext = Depends(admin_context),
+    ) -> list[dict[str, Any]]:
+        return admin_service.audit_log(limit=limit)
+
+    @router.get("/system-health")
+    def system_health(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:
+        return admin_service.system_health()
+
+    @router.get("/quotas")
+    def quotas(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:
+        return admin_service.quotas()
+
+    @router.patch("/quotas/{organization_id}")
+    def update_quotas(
+        organization_id: str,
+        payload: dict[str, Any],
+        ctx: RequestContext = Depends(admin_context),
+        __: None = Depends(csrf_guard),
+    ) -> dict[str, Any]:
+        return admin_service.update_quotas(organization_id=organization_id, payload=payload, actor_user_id=str(ctx.user["id"]))
+
     @router.patch("/users/{user_id}")
     def update_user(
         user_id: str,
         request: AdminUserUpdateRequest,
         ctx: RequestContext = Depends(admin_context),
+        _: None = Depends(csrf_guard),
     ) -> dict[str, Any]:
         try:
             return admin_service.update_user(

@@ -2,21 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from ...platform import SQLiteMetadataStore
+from ..authz import require_admin_context
 from ..config import BackendSettings
+from ..saas import RequestContext
 
 
 def build_system_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/system", tags=["system"])
-    metadata_store = SQLiteMetadataStore(settings.metadata_db_path)
+    metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+    admin_context = require_admin_context(settings)
 
     @router.get("/metadata")
-    def get_metadata_summary() -> dict[str, Any]:
+    def get_metadata_summary(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:
         counts = metadata_store.counts()
         return {
-            "metadata_db_path": str(settings.metadata_db_path),
+            "app_env": settings.app_env,
             "counts": {
                 "jobs": counts.jobs,
                 "deployment_configs": counts.deployment_configs,

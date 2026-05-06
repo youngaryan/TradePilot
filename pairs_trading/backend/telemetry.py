@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import logging
 import random
 from threading import Event, Thread
 from time import sleep
@@ -12,6 +13,9 @@ from ..platform import SQLiteMetadataStore
 from .config import BackendSettings
 from .saas import SaaSService
 from .schemas import TelemetryEventRequest
+
+
+logger = logging.getLogger("pairs_trading.telemetry")
 
 
 SENSITIVE_KEY_FRAGMENTS = (
@@ -79,7 +83,7 @@ class TelemetryContext:
 class TelemetryService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
 
     def track(self, request: TelemetryEventRequest, *, context: TelemetryContext | None = None) -> dict[str, Any]:
         if not self.settings.telemetry_enabled:
@@ -126,7 +130,7 @@ class DailyRefreshService:
 
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path)
+        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
         self.telemetry = TelemetryService(settings)
 
     def due_users(self, *, limit: int = 100, force: bool = False) -> list[dict[str, Any]]:
@@ -318,7 +322,7 @@ class DailyRefreshScheduler:
             try:
                 self.service.run_due_users(limit=100)
             except Exception:
-                pass
+                logger.exception("daily_refresh_scheduler_failed")
             self.stop_event.wait(max(60, self.settings.refresh_scheduler_poll_seconds))
 
 

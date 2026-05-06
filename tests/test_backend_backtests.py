@@ -82,7 +82,7 @@ class BackendBacktestTests(unittest.TestCase):
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
             user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
-            self.assertEqual(client.get(f"/api/backtests/jobs/{job_id}").status_code, 401)
+            self.assertEqual(TestClient(app).get(f"/api/backtests/jobs/{job_id}").status_code, 401)
             self.assertEqual(client.get(f"/api/backtests/jobs/{job_id}", headers=user_headers).status_code, 404)
             self.assertEqual(client.get("/api/backtests/jobs", headers=user_headers).json(), [])
 
@@ -150,7 +150,7 @@ class BackendBacktestTests(unittest.TestCase):
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
             user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
-            self.assertEqual(client.get(f"/api/paper/jobs/{job_id}").status_code, 401)
+            self.assertEqual(TestClient(app).get(f"/api/paper/jobs/{job_id}").status_code, 401)
             self.assertEqual(client.get(f"/api/paper/jobs/{job_id}", headers=user_headers).status_code, 404)
             self.assertEqual(client.get("/api/paper/jobs", headers=user_headers).json(), [])
 
