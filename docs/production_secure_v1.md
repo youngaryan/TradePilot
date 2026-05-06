@@ -32,6 +32,9 @@ Set `APP_ENV=production` only after configuring:
 - `S3_BUCKET`
 - `S3_ACCESS_KEY_ID`
 - `S3_SECRET_ACCESS_KEY`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `EMAIL_FROM`
 
 Production also requires:
 - `ENABLE_DEMO_ACCOUNTS=false`
@@ -46,4 +49,14 @@ Artifact-style endpoints require authentication. Normal users cannot access admi
 
 ## Current migration boundary
 
-Alembic/Postgres scaffolding is included for the secure-v1 schema. The app still preserves SQLite for local development and tests while the metadata repository is prepared for a full SQLAlchemy/Postgres store implementation.
+Alembic/Postgres migrations are included for the secure-v1 schema and the backend selects `PostgresMetadataStore` whenever `DATABASE_URL` uses `postgresql://` or `postgresql+psycopg://`. SQLite remains available only for local development and tests.
+
+The API container runs `alembic upgrade head` before starting Gunicorn/Uvicorn workers. Backtest, paper, and sentiment jobs still use local temporary working directories while the job is running, then publish completed artifacts to tenant-scoped S3/MinIO keys such as `organizations/{organization_id}/backtests/{experiment_id}/...`.
+
+## Auth lifecycle and admin MFA
+
+Signup sends an email-verification token through SMTP in production and a local JSON outbox in development. Password reset uses single-use, expiring tokens. Admin MFA uses TOTP and the admin API checks a session-bound HttpOnly MFA cookie in production.
+
+## Quotas and abuse controls
+
+Premium launch endpoints enforce server-side daily quotas before backtest, sentiment, and paper jobs are accepted. Production rate limiting uses Redis when `REDIS_URL` is configured; local development falls back to a single-process limiter.

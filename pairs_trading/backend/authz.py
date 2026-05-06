@@ -5,9 +5,9 @@ from typing import Callable
 from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from ..platform import SQLiteMetadataStore
+from ..platform import build_metadata_store
 from .config import BackendSettings
-from .saas import AuthService, RequestContext, SESSION_COOKIE_NAME
+from .saas import AuthService, MFA_COOKIE_NAME, RequestContext, SESSION_COOKIE_NAME
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -71,11 +71,18 @@ def require_csrf(settings: BackendSettings) -> Callable[..., None]:
 
 def require_admin_context(settings: BackendSettings) -> Callable[..., RequestContext]:
     auth_dependency = require_auth_context(settings)
+    auth_service = AuthService(settings)
 
     def dependency(request: Request, ctx: RequestContext = Depends(auth_dependency)) -> RequestContext:
         if str(ctx.user.get("role") or "user").lower() != "admin":
             raise HTTPException(status_code=403, detail="Admin access required.")
-        if settings.is_production and request.cookies.get("quantops_mfa") != "verified":
+        session_token = request.cookies.get(SESSION_COOKIE_NAME)
+        mfa_ok = auth_service.verify_mfa_cookie(
+            session_token=session_token or "",
+            user_id=str(ctx.user.get("id") or ""),
+            cookie_value=request.cookies.get(MFA_COOKIE_NAME),
+        )
+        if settings.is_production and not mfa_ok:
             raise HTTPException(
                 status_code=403,
                 detail={"code": "admin_mfa_required", "message": "Admin MFA verification is required before accessing admin APIs."},
@@ -87,7 +94,7 @@ def require_admin_context(settings: BackendSettings) -> Callable[..., RequestCon
 
 def require_paid_context(settings: BackendSettings, *, feature: str = "premium feature") -> Callable[..., RequestContext]:
     auth_dependency = require_auth_context(settings)
-    store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+    store = build_metadata_store(settings)
 
     def dependency(ctx: RequestContext = Depends(auth_dependency)) -> RequestContext:
         subscription = store.get_subscription(organization_id=ctx.organization_id)

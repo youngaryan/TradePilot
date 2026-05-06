@@ -9,7 +9,7 @@ from time import sleep
 from typing import Any
 from uuid import uuid4
 
-from ..platform import SQLiteMetadataStore
+from ..platform import build_metadata_store
 from .config import BackendSettings
 from .saas import SaaSService
 from .schemas import TelemetryEventRequest
@@ -83,7 +83,7 @@ class TelemetryContext:
 class TelemetryService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.store = build_metadata_store(settings)
 
     def track(self, request: TelemetryEventRequest, *, context: TelemetryContext | None = None) -> dict[str, Any]:
         if not self.settings.telemetry_enabled:
@@ -130,7 +130,7 @@ class DailyRefreshService:
 
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.store = build_metadata_store(settings)
         self.telemetry = TelemetryService(settings)
 
     def due_users(self, *, limit: int = 100, force: bool = False) -> list[dict[str, Any]]:

@@ -177,6 +177,8 @@ export interface AuthUser {
   display_name: string;
   role: "admin" | "user" | string;
   status: "active" | "inactive" | string;
+  email_verified_at_utc?: string | null;
+  mfa_enabled?: boolean;
 }
 
 export interface Organization {

@@ -40,6 +40,8 @@ class BackendSettings:
     smtp_port: int | None = None
     smtp_username: str | None = None
     smtp_password: str | None = None
+    smtp_starttls: bool = True
+    email_from: str = "no-reply@quantops.local"
     sentry_dsn: str | None = None
     otel_exporter_otlp_endpoint: str | None = None
     max_request_bytes: int = 2_000_000
@@ -114,6 +116,9 @@ class BackendSettings:
             "S3_BUCKET": self.s3_bucket,
             "S3_ACCESS_KEY_ID": self.s3_access_key_id,
             "S3_SECRET_ACCESS_KEY": self.s3_secret_access_key,
+            "SMTP_HOST": self.smtp_host,
+            "SMTP_PORT": self.smtp_port,
+            "EMAIL_FROM": self.email_from,
         }
         for name, value in required.items():
             if not value or str(value).startswith("dev-") or str(value).endswith("change-me"):
@@ -126,6 +131,8 @@ class BackendSettings:
             missing.append("ENABLE_DEMO_ACCOUNTS=false")
         if self.enable_in_process_jobs:
             missing.append("ENABLE_IN_PROCESS_JOBS=false")
+        if not self.cookie_secure:
+            missing.append("COOKIE_SECURE=true")
         if missing:
             raise RuntimeError(
                 "Production startup blocked. Configure secure production settings for: "
@@ -157,6 +164,8 @@ class BackendSettings:
             smtp_port=int(os.getenv("SMTP_PORT")) if os.getenv("SMTP_PORT") else None,
             smtp_username=os.getenv("SMTP_USERNAME"),
             smtp_password=os.getenv("SMTP_PASSWORD"),
+            smtp_starttls=_env_bool("SMTP_STARTTLS", True),
+            email_from=os.getenv("EMAIL_FROM", "no-reply@quantops.local"),
             sentry_dsn=os.getenv("SENTRY_DSN"),
             otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
             max_request_bytes=int(os.getenv("MAX_REQUEST_BYTES", "2000000")),

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..authz import require_auth_context, require_csrf, require_paid_context
 from ..config import BackendSettings
+from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
 from ..schemas import PaperRunRequest
@@ -17,6 +18,7 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/paper", tags=["paper"])
     service = PaperService(settings)
     runner = PaperRunJobRunner(settings)
+    quotas = QuotaService(settings)
     auth_context = require_auth_context(settings)
     paid_context = require_paid_context(settings, feature="Paper trading agents")
     csrf_guard = require_csrf(settings)
@@ -51,6 +53,12 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
     @router.post("/run")
     def run_batch(request: PaperRunRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
+            quotas.check_and_record(
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                feature="paper_job",
+                properties={"mode": "sync", "asof_start": request.asof_start, "asof_end": request.asof_end},
+            )
             payload = service.run_paper_batch(
                 PaperRunCommand(
                     deployment_config_path=Path(request.deployment_config_path) if request.deployment_config_path else None,
@@ -62,6 +70,8 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
                 organization_id=ctx.organization_id,
             )
             return redact_paths(payload) if settings.is_production else payload
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:
@@ -70,6 +80,12 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
     @router.post("/run-job", status_code=202)
     def run_batch_job(request: PaperRunRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
+            quotas.check_and_record(
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                feature="paper_job",
+                properties={"mode": "job", "asof_start": request.asof_start, "asof_end": request.asof_end},
+            )
             job = runner.submit(
                 PaperRunCommand(
                     deployment_config_path=Path(request.deployment_config_path) if request.deployment_config_path else None,
@@ -82,6 +98,8 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
                 user_id=str(ctx.user.get("id") or ""),
             )
             return redact_paths(job) if settings.is_production else job
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:

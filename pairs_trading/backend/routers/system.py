@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from ...platform import SQLiteMetadataStore
+from ...platform import build_metadata_store
 from ..authz import require_admin_context
 from ..config import BackendSettings
 from ..saas import RequestContext
@@ -12,7 +12,7 @@ from ..saas import RequestContext
 
 def build_system_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/system", tags=["system"])
-    metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+    metadata_store = build_metadata_store(settings)
     admin_context = require_admin_context(settings)
 
     @router.get("/metadata")

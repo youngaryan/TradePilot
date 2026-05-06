@@ -60,6 +60,14 @@ services:
       S3_BUCKET: ${S3_BUCKET:-quantops-artifacts}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@quantops.local}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,15 +85,28 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    command: ["python", "-m", "apps.worker.rq_worker"]
+    command: ["sh", "-c", "alembic upgrade head && python -m apps.worker.rq_worker"]
     environment:
       APP_ENV: ${APP_ENV:-development}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://quantops:quantops@postgres:5432/quantops}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me}
       CSRF_SECRET: ${CSRF_SECRET:-dev-csrf-secret-change-me}
       ENABLE_DEMO_ACCOUNTS: ${ENABLE_DEMO_ACCOUNTS:-true}
       ENABLE_IN_PROCESS_JOBS: ${ENABLE_IN_PROCESS_JOBS:-true}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_BUCKET: ${S3_BUCKET:-quantops-artifacts}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@quantops.local}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       redis:
         condition: service_healthy

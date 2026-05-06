@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..platform import SQLiteMetadataStore
+from ..platform import build_metadata_store
 from .config import BackendSettings
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
 from .services import BacktestJobRunner, PaperRunCommand, PaperRunJobRunner, SentimentJobRunner
@@ -11,7 +11,7 @@ from .services import BacktestJobRunner, PaperRunCommand, PaperRunJobRunner, Sen
 
 def run_queued_job(kind: str, job_id: str) -> dict[str, Any]:
     settings = BackendSettings.from_env()
-    store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+    store = build_metadata_store(settings)
     job = next((item for item in store.list_jobs(kind=kind) if item.get("id") == job_id), None)
     if job is None:
         raise ValueError(f"Queued job not found: {kind}/{job_id}")

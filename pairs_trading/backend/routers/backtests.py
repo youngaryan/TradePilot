@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..authz import require_auth_context, require_csrf, require_paid_context
 from ..config import BackendSettings
+from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
 from ..schemas import BacktestRunRequest
@@ -16,6 +17,7 @@ def build_backtest_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/backtests", tags=["backtests"])
     runner = BacktestJobRunner(settings)
     service = BacktestService(settings)
+    quotas = QuotaService(settings)
     auth_context = require_auth_context(settings)
     paid_context = require_paid_context(settings, feature="Backtest jobs")
     csrf_guard = require_csrf(settings)
@@ -27,7 +29,16 @@ def build_backtest_router(settings: BackendSettings) -> APIRouter:
     @router.post("/run", status_code=202)
     def run_backtest(request: BacktestRunRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
+            service.validate_request(request)
+            quotas.check_and_record(
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                feature="backtest_job",
+                properties={"pipeline": request.pipeline, "symbols": request.symbols},
+            )
             return runner.submit(request, organization_id=ctx.organization_id, user_id=str(ctx.user.get("id") or ""))
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

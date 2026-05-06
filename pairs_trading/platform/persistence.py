@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 
@@ -52,6 +53,18 @@ class MetadataCounts:
     telemetry_events: int = 0
     refresh_runs: int = 0
     refresh_statuses: int = 0
+
+
+class MetadataStore(Protocol):
+    """Operational metadata contract shared by API and workers.
+
+    The codebase still uses this class dynamically, so the protocol intentionally
+    stays broad: SQLiteMetadataStore and PostgresMetadataStore expose the same
+    public methods while the backend imports them through build_metadata_store().
+    """
+
+    def counts(self) -> MetadataCounts:
+        ...
 
 
 class SQLiteMetadataStore:
@@ -131,6 +144,9 @@ class SQLiteMetadataStore:
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'user',
                     status TEXT NOT NULL DEFAULT 'active',
+                    email_verified_at_utc TEXT,
+                    mfa_secret TEXT,
+                    mfa_enabled INTEGER NOT NULL DEFAULT 0,
                     created_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL,
                     last_login_at_utc TEXT
@@ -142,6 +158,19 @@ class SQLiteMetadataStore:
                     created_at_utc TEXT NOT NULL,
                     expires_at_utc TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS auth_tokens (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    purpose TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at_utc TEXT NOT NULL,
+                    expires_at_utc TEXT NOT NULL,
+                    consumed_at_utc TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_purpose
+                    ON auth_tokens(user_id, purpose, created_at_utc DESC);
 
                 CREATE TABLE IF NOT EXISTS organizations (
                     id TEXT PRIMARY KEY,
@@ -255,6 +284,12 @@ class SQLiteMetadataStore:
                     current_period_end_utc TEXT,
                     usage_json TEXT NOT NULL,
                     created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS organization_quotas (
+                    organization_id TEXT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+                    quotas_json TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL
                 );
 
@@ -376,6 +411,12 @@ class SQLiteMetadataStore:
                 connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
             if "status" not in existing:
                 connection.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+            if "email_verified_at_utc" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN email_verified_at_utc TEXT")
+            if "mfa_secret" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN mfa_secret TEXT")
+            if "mfa_enabled" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def hash_token(token: str) -> str:
@@ -658,6 +699,81 @@ class SQLiteMetadataStore:
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return self._row_to_dict(row)
 
+    def mark_email_verified(self, *, user_id: str) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET email_verified_at_utc = ?, updated_at_utc = ? WHERE id = ?",
+                (now, now, user_id),
+            )
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def update_user_password(self, *, user_id: str, password_hash: str) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET password_hash = ?, updated_at_utc = ? WHERE id = ?",
+                (password_hash, now, user_id),
+            )
+            connection.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def set_user_mfa_secret(self, *, user_id: str, secret: str, enabled: bool) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET mfa_secret = ?, mfa_enabled = ?, updated_at_utc = ? WHERE id = ?",
+                (secret, 1 if enabled else 0, now, user_id),
+            )
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._row_to_dict(row)
+
+    def create_auth_token(
+        self,
+        *,
+        user_id: str,
+        purpose: str,
+        token: str,
+        expires_at_utc: str,
+    ) -> dict[str, Any]:
+        token_id = self.stable_id("tok", f"{user_id}:{purpose}:{uuid4().hex}")
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO auth_tokens (
+                    id, user_id, purpose, token_hash, created_at_utc, expires_at_utc, consumed_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (token_id, user_id, purpose, self.hash_token(token), now, expires_at_utc, None),
+            )
+            row = connection.execute("SELECT * FROM auth_tokens WHERE id = ?", (token_id,)).fetchone()
+        return dict(row)
+
+    def consume_auth_token(self, *, purpose: str, token: str) -> dict[str, Any] | None:
+        token_hash = self.hash_token(token)
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM auth_tokens
+                WHERE purpose = ? AND token_hash = ? AND consumed_at_utc IS NULL
+                """,
+                (purpose, token_hash),
+            ).fetchone()
+            payload = self._row_to_dict(row)
+            expires_at = _parse_utc_iso(str(payload.get("expires_at_utc"))) if payload else None
+            if payload is None or expires_at is None or expires_at <= datetime.now(UTC):
+                return None
+            connection.execute(
+                "UPDATE auth_tokens SET consumed_at_utc = ? WHERE id = ?",
+                (now, payload["id"]),
+            )
+        return payload
+
     def admin_metric_snapshot(self) -> dict[str, Any]:
         with self._connect() as connection:
             users_total = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
@@ -894,6 +1010,29 @@ class SQLiteMetadataStore:
                 (organization_id, feature, since_utc),
             ).fetchone()
         return float(row["total"] if row is not None else 0.0)
+
+    def get_organization_quotas(self, *, organization_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT quotas_json FROM organization_quotas WHERE organization_id = ?",
+                (organization_id,),
+            ).fetchone()
+        return None if row is None else _json_load(row["quotas_json"], {})
+
+    def upsert_organization_quotas(self, *, organization_id: str, quotas: dict[str, Any]) -> dict[str, Any]:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO organization_quotas (organization_id, quotas_json, updated_at_utc)
+                VALUES (?, ?, ?)
+                ON CONFLICT(organization_id) DO UPDATE SET
+                    quotas_json = excluded.quotas_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (organization_id, _json_dump(quotas), now),
+            )
+        return {"organization_id": organization_id, "quotas": quotas, "updated_at_utc": now}
 
     def record_audit_log(
         self,
@@ -1584,3 +1723,178 @@ class SQLiteMetadataStore:
             refresh_runs=refresh_runs,
             refresh_statuses=refresh_statuses,
         )
+
+
+class _CompatRow(dict):
+    """Dict row with sqlite-like integer indexing for legacy store methods."""
+
+    def __getitem__(self, key):  # type: ignore[override]
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _CompatCursor:
+    def __init__(self, cursor) -> None:
+        self.cursor = cursor
+
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        return None if row is None else _CompatRow(row)
+
+    def fetchall(self):
+        return [_CompatRow(row) for row in self.cursor.fetchall()]
+
+
+class _EmptyCursor:
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class _PostgresCompatConnection:
+    def __init__(self, raw_connection) -> None:
+        self.raw_connection = raw_connection
+
+    @staticmethod
+    def _translate(sql: str) -> tuple[str, bool]:
+        statement = sql.strip()
+        ignored_insert = bool(re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", statement, flags=re.IGNORECASE))
+        statement = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", statement, flags=re.IGNORECASE)
+        if ignored_insert:
+            statement = statement.rstrip(";") + " ON CONFLICT DO NOTHING"
+        statement = statement.replace("?", "%s")
+        return statement, ignored_insert
+
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] | None = None):
+        statement = sql.strip()
+        if not statement:
+            return _EmptyCursor()
+        if statement.upper().startswith("PRAGMA"):
+            return _EmptyCursor()
+        translated, _ = self._translate(statement)
+        try:
+            cursor = self.raw_connection.cursor()
+            cursor.execute(translated, tuple(params or ()))
+            return _CompatCursor(cursor)
+        except Exception as exc:
+            if exc.__class__.__name__ in {"UniqueViolation", "IntegrityError"}:
+                self.raw_connection.rollback()
+                raise sqlite3.IntegrityError(str(exc)) from exc
+            raise
+
+    def executescript(self, script: str) -> None:
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+
+class PostgresMetadataStore(SQLiteMetadataStore):
+    """Postgres-backed metadata store used by production API and workers.
+
+    The application-level methods intentionally remain compatible with
+    SQLiteMetadataStore so the routers/services do not need database-specific
+    branches. Alembic owns production schema creation; this class can also
+    create a compatible schema for local smoke tests and one-off environments.
+    """
+
+    def __init__(self, database_url: str, *, enable_demo_accounts: bool = False, initialize: bool = True) -> None:
+        self.database_url = database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+        self.enable_demo_accounts = enable_demo_accounts
+        if initialize:
+            self._initialize()
+
+    @contextmanager
+    def _connect(self):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except Exception as exc:  # pragma: no cover - dependency checked in production image
+            raise RuntimeError("psycopg is required for PostgresMetadataStore.") from exc
+
+        raw_connection = psycopg.connect(self.database_url, row_factory=dict_row)
+        connection = _PostgresCompatConnection(raw_connection)
+        try:
+            yield connection
+            raw_connection.commit()
+        except Exception:
+            raw_connection.rollback()
+            raise
+        finally:
+            raw_connection.close()
+
+    def _migrate_auth_columns(self) -> None:
+        required_columns = {
+            "role": "TEXT NOT NULL DEFAULT 'user'",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "email_verified_at_utc": "TEXT",
+            "mfa_secret": "TEXT",
+            "mfa_enabled": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                """
+            ).fetchall()
+            existing = {str(row["column_name"]) for row in rows}
+            for column, definition in required_columns.items():
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+
+    def admin_metric_snapshot(self) -> dict[str, Any]:
+        since_7d = datetime.now(UTC).replace(microsecond=0)
+        since_7d = since_7d.replace(tzinfo=UTC)
+        since_30d = since_7d
+        since_7d_iso = (since_7d.timestamp() - 7 * 24 * 3600)
+        since_30d_iso = (since_30d.timestamp() - 30 * 24 * 3600)
+        cutoff_7d = datetime.fromtimestamp(since_7d_iso, tz=UTC).isoformat().replace("+00:00", "Z")
+        cutoff_30d = datetime.fromtimestamp(since_30d_iso, tz=UTC).isoformat().replace("+00:00", "Z")
+        with self._connect() as connection:
+            users_total = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            users_active = int(connection.execute("SELECT COUNT(*) FROM users WHERE status = 'active'").fetchone()[0])
+            admins_active = int(connection.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'").fetchone()[0])
+            signups_7d = int(connection.execute("SELECT COUNT(*) FROM users WHERE created_at_utc >= ?", (cutoff_7d,)).fetchone()[0])
+            signups_30d = int(connection.execute("SELECT COUNT(*) FROM users WHERE created_at_utc >= ?", (cutoff_30d,)).fetchone()[0])
+            active_7d = int(connection.execute("SELECT COUNT(*) FROM users WHERE last_login_at_utc >= ?", (cutoff_7d,)).fetchone()[0])
+            subscriptions = {
+                row["status"]: int(row["count"])
+                for row in connection.execute("SELECT status, COUNT(*) AS count FROM subscriptions GROUP BY status").fetchall()
+            }
+            plans = {
+                row["plan"]: int(row["count"])
+                for row in connection.execute("SELECT plan, COUNT(*) AS count FROM subscriptions GROUP BY plan").fetchall()
+            }
+        return {
+            "users_total": users_total,
+            "users_active": users_active,
+            "admins_active": admins_active,
+            "signups_7d": signups_7d,
+            "signups_30d": signups_30d,
+            "active_users_7d": active_7d,
+            "subscriptions_by_status": subscriptions,
+            "plans": plans,
+        }
+
+
+def build_metadata_store(settings: Any) -> MetadataStore:
+    database_url = getattr(settings, "database_url", None)
+    is_production = bool(getattr(settings, "is_production", False))
+    enable_demo_accounts = bool(getattr(settings, "enable_demo_accounts", False))
+    if database_url:
+        normalized = str(database_url)
+        if normalized.startswith(("postgresql://", "postgresql+psycopg://")):
+            return PostgresMetadataStore(
+                normalized,
+                enable_demo_accounts=enable_demo_accounts,
+                initialize=(not is_production or enable_demo_accounts),
+            )
+        if is_production:
+            raise RuntimeError("Production metadata requires a postgresql DATABASE_URL.")
+    if is_production:
+        raise RuntimeError("Production metadata requires DATABASE_URL.")
+    return SQLiteMetadataStore(getattr(settings, "metadata_db_path"), enable_demo_accounts=enable_demo_accounts)

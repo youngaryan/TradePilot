@@ -95,12 +95,64 @@ class InMemoryRateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class RedisRateLimitMiddleware(BaseHTTPMiddleware):
+    """Redis-backed fixed-window limiter for multi-process deployments."""
+
+    def __init__(self, app, *, settings: BackendSettings) -> None:
+        super().__init__(app)
+        self.settings = settings
+        self.window_seconds = max(1, int(settings.rate_limit_window_seconds))
+        self.max_requests = max(1, int(settings.rate_limit_max_requests))
+        self.client = None
+        if settings.rate_limit_enabled:
+            try:
+                import redis
+
+                self.client = redis.Redis.from_url(str(settings.redis_url), decode_responses=True)
+            except Exception as exc:
+                if settings.is_production:
+                    raise RuntimeError("Redis rate limiting requires a working redis package and REDIS_URL.") from exc
+                logger.warning("redis_rate_limiter_unavailable", exc_info=True)
+
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        if not self.settings.rate_limit_enabled or request.method in {"GET", "HEAD", "OPTIONS"}:
+            return await call_next(request)
+        if self.client is None:
+            return await call_next(request)
+        client_ip = request.client.host if request.client else "unknown"
+        window = int(time.time() // self.window_seconds)
+        key = f"rate-limit:{client_ip}:{request.url.path}:{window}"
+        try:
+            count = int(self.client.incr(key))
+            if count == 1:
+                self.client.expire(key, self.window_seconds + 5)
+        except Exception as exc:
+            logger.exception("redis_rate_limit_failed")
+            if self.settings.is_production:
+                return Response(
+                    content='{"detail":{"code":"rate_limit_unavailable","message":"Rate limiting is temporarily unavailable."}}',
+                    status_code=503,
+                    media_type="application/json",
+                )
+            return await call_next(request)
+        if count > self.max_requests:
+            return Response(
+                content='{"detail":{"code":"rate_limited","message":"Too many requests. Please wait and try again."}}',
+                status_code=429,
+                media_type="application/json",
+            )
+        return await call_next(request)
+
+
 def install_security_middleware(app, settings: BackendSettings) -> None:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
-    app.add_middleware(
-        InMemoryRateLimitMiddleware,
-        enabled=settings.rate_limit_enabled,
-        window_seconds=settings.rate_limit_window_seconds,
-        max_requests=settings.rate_limit_max_requests,
-    )
+    if settings.redis_url:
+        app.add_middleware(RedisRateLimitMiddleware, settings=settings)
+    else:
+        app.add_middleware(
+            InMemoryRateLimitMiddleware,
+            enabled=settings.rate_limit_enabled,
+            window_seconds=settings.rate_limit_window_seconds,
+            max_requests=settings.rate_limit_max_requests,
+        )

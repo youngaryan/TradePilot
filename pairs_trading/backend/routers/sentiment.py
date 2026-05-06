@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..authz import require_auth_context, require_csrf, require_paid_context
 from ..config import BackendSettings
+from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
 from ..schemas import SentimentAccumulationRequest
@@ -16,6 +17,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/sentiment", tags=["sentiment"])
     service = SentimentService(settings)
     runner = SentimentJobRunner(settings)
+    quotas = QuotaService(settings)
     auth_context = require_auth_context(settings)
     paid_context = require_paid_context(settings, feature="Sentiment accumulation")
     csrf_guard = require_csrf(settings)
@@ -30,8 +32,17 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
     @router.post("/accumulate")
     def accumulate(request: SentimentAccumulationRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
+            service.validate_request(request)
+            quotas.check_and_record(
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                feature="sentiment_job",
+                properties={"providers": request.providers, "symbols": request.symbols, "mode": "sync"},
+            )
             payload = service.accumulate(request, organization_id=ctx.organization_id)
             return redact_paths(payload) if settings.is_production else payload
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FileNotFoundError as exc:
@@ -40,8 +51,17 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
     @router.post("/accumulate-job", status_code=202)
     def accumulate_job(request: SentimentAccumulationRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
+            service.validate_request(request)
+            quotas.check_and_record(
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                feature="sentiment_job",
+                properties={"providers": request.providers, "symbols": request.symbols, "mode": "job"},
+            )
             job = runner.submit(request, organization_id=ctx.organization_id, user_id=str(ctx.user.get("id") or ""))
             return redact_paths(job) if settings.is_production else job
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FileNotFoundError as exc:

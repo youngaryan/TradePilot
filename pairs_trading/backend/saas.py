@@ -8,14 +8,18 @@ import hmac
 import json
 from pathlib import Path
 import secrets
+import struct
+import time
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from ..platform import SQLiteMetadataStore
+from ..platform import build_metadata_store
 from .config import BackendSettings
+from .email import EmailService
+from .quotas import DEFAULT_QUOTAS
 from .redaction import redact_paths
 from .schemas import ApiKeyCreateRequest, BillingCheckoutRequest, SignupRequest
 
@@ -24,6 +28,7 @@ DEMO_EMAIL = "demo@quantops.local"
 DEMO_PASSWORD = "quantops-demo"
 SESSION_COOKIE_NAME = "quantops_session"
 CSRF_COOKIE_NAME = "quantops_csrf"
+MFA_COOKIE_NAME = "quantops_mfa"
 
 
 def utc_now_iso() -> str:
@@ -73,6 +78,35 @@ def verify_password(password: str, stored_hash: str, *, allow_demo_passwords: bo
     return hmac.compare_digest(base64.b64encode(digest).decode("ascii"), expected)
 
 
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _totp_digest(secret: str, counter: int, *, digits: int = 6) -> str:
+    padded = secret.upper() + "=" * ((8 - len(secret) % 8) % 8)
+    key = base64.b32decode(padded, casefold=True)
+    message = struct.pack(">Q", counter)
+    digest = hmac.new(key, message, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    return str(code % (10**digits)).zfill(digits)
+
+
+def totp_code(secret: str, *, for_time: int | None = None, step_seconds: int = 30) -> str:
+    return _totp_digest(secret, int((for_time or time.time()) // step_seconds))
+
+
+def verify_totp_code(secret: str, code: str, *, window: int = 1) -> bool:
+    normalized = "".join(ch for ch in str(code) if ch.isdigit())
+    if len(normalized) != 6:
+        return False
+    current_counter = int(time.time() // 30)
+    for offset in range(-window, window + 1):
+        if hmac.compare_digest(_totp_digest(secret, current_counter + offset), normalized):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class RequestContext:
     user: dict[str, Any]
@@ -82,7 +116,8 @@ class RequestContext:
 class AuthService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.store = build_metadata_store(settings)
+        self.email = EmailService(settings)
 
     def login(self, *, email: str, password: str) -> dict[str, Any]:
         user = self.store.get_user_by_email(email)
@@ -94,6 +129,9 @@ class AuthService:
             raise ValueError("Invalid email or password.")
         if str(user.get("status") or "active").lower() != "active":
             raise PermissionError("This account has been deactivated. Contact an administrator.")
+        if self.settings.is_production and not user.get("email_verified_at_utc"):
+            self.request_email_verification(email=str(user["email"]))
+            raise PermissionError("Email verification is required before login. We sent a fresh verification link.")
         token = secrets.token_urlsafe(32)
         expires_at = (datetime.now(UTC) + timedelta(hours=self.settings.session_ttl_hours)).isoformat().replace("+00:00", "Z")
         self.store.create_auth_session(user_id=str(user["id"]), token=token, expires_at_utc=expires_at)
@@ -121,6 +159,16 @@ class AuthService:
             plan="free",
             subscription_status="free",
         )
+        self.request_email_verification(email=email)
+        if self.settings.is_production:
+            user = self.store.get_user_by_email(email) or {}
+            return {
+                "status": "email_verification_required",
+                "message": "Check your email to verify your account before logging in.",
+                "user": self.public_user(user) if user else None,
+                "organizations": [],
+                "active_organization_id": None,
+            }
         return self.login(email=email, password=request.password)
 
     def authenticate(self, *, token: str, organization_id: str | None = None) -> RequestContext:
@@ -162,6 +210,100 @@ class AuthService:
             return False
         return hmac.compare_digest(self.csrf_token_for_session(session_token), csrf_token)
 
+    def mfa_cookie_for_session(self, *, session_token: str, user_id: str) -> str:
+        payload = f"{session_token}:{user_id}:admin-mfa"
+        return hmac.new(
+            self.settings.session_secret.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def verify_mfa_cookie(self, *, session_token: str, user_id: str, cookie_value: str | None) -> bool:
+        if not cookie_value:
+            return False
+        return hmac.compare_digest(self.mfa_cookie_for_session(session_token=session_token, user_id=user_id), cookie_value)
+
+    def request_email_verification(self, *, email: str) -> dict[str, Any]:
+        user = self.store.get_user_by_email(email)
+        if user is None:
+            return {"status": "accepted"}
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+        self.store.create_auth_token(user_id=str(user["id"]), purpose="email_verification", token=token, expires_at_utc=expires_at)
+        verification_url = f"{self.settings.app_base_url.rstrip('/')}/verify-email?token={token}"
+        delivery = self.email.send(
+            to_email=str(user["email"]),
+            subject="Verify your QuantOps account",
+            text=(
+                "Welcome to QuantOps.\n\n"
+                "Verify your email address to activate your account:\n"
+                f"{verification_url}\n\n"
+                "If you did not create this account, you can ignore this email."
+            ),
+            metadata={"purpose": "email_verification", "user_id": user["id"], "expires_at_utc": expires_at},
+        )
+        return {"status": "accepted", "delivery": delivery.__dict__}
+
+    def verify_email(self, *, token: str) -> dict[str, Any]:
+        consumed = self.store.consume_auth_token(purpose="email_verification", token=token)
+        if consumed is None:
+            raise ValueError("Verification link is invalid or expired.")
+        user = self.store.mark_email_verified(user_id=str(consumed["user_id"]))
+        return {"status": "verified", "user": self.public_user(user)} if user else {"status": "verified"}
+
+    def request_password_reset(self, *, email: str) -> dict[str, str]:
+        user = self.store.get_user_by_email(email)
+        if user is not None and str(user.get("status") or "active").lower() == "active":
+            token = secrets.token_urlsafe(32)
+            expires_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+            self.store.create_auth_token(user_id=str(user["id"]), purpose="password_reset", token=token, expires_at_utc=expires_at)
+            reset_url = f"{self.settings.app_base_url.rstrip('/')}/password-reset?token={token}"
+            self.email.send(
+                to_email=str(user["email"]),
+                subject="Reset your QuantOps password",
+                text=(
+                    "Use the link below to reset your QuantOps password:\n"
+                    f"{reset_url}\n\n"
+                    "This link expires in 1 hour. If you did not request it, you can ignore this email."
+                ),
+                metadata={"purpose": "password_reset", "user_id": user["id"], "expires_at_utc": expires_at},
+            )
+        return {"status": "accepted", "message": "If the account exists, reset instructions will be sent."}
+
+    def confirm_password_reset(self, *, token: str, new_password: str) -> dict[str, str]:
+        if len(new_password) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        consumed = self.store.consume_auth_token(purpose="password_reset", token=token)
+        if consumed is None:
+            raise ValueError("Password reset link is invalid or expired.")
+        self.store.update_user_password(user_id=str(consumed["user_id"]), password_hash=hash_password(new_password))
+        return {"status": "updated", "message": "Password updated. Please log in again."}
+
+    def setup_mfa(self, *, user_id: str) -> dict[str, Any]:
+        user = self.store.get_user_by_id(user_id)
+        if user is None:
+            raise ValueError("User not found.")
+        secret = str(user.get("mfa_secret") or generate_totp_secret())
+        self.store.set_user_mfa_secret(user_id=user_id, secret=secret, enabled=bool(user.get("mfa_enabled")))
+        issuer = "QuantOps"
+        account = str(user.get("email") or user_id)
+        otpauth_url = f"otpauth://totp/{issuer}:{account}?secret={secret}&issuer={issuer}&digits=6&period=30"
+        return {
+            "status": "ready",
+            "method": "totp",
+            "secret": secret,
+            "otpauth_url": otpauth_url,
+            "enabled": bool(user.get("mfa_enabled")),
+        }
+
+    def verify_mfa_code(self, *, user_id: str, code: str) -> dict[str, Any]:
+        user = self.store.get_user_by_id(user_id)
+        secret = str((user or {}).get("mfa_secret") or "")
+        if not user or not secret or not verify_totp_code(secret, code):
+            raise PermissionError("Invalid MFA code.")
+        self.store.set_user_mfa_secret(user_id=user_id, secret=secret, enabled=True)
+        return {"status": "verified", "method": "totp"}
+
     @staticmethod
     def public_user(user: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -170,13 +312,15 @@ class AuthService:
             "display_name": user["display_name"],
             "role": user.get("role", "user"),
             "status": user.get("status", "active"),
+            "email_verified_at_utc": user.get("email_verified_at_utc"),
+            "mfa_enabled": bool(user.get("mfa_enabled")),
         }
 
 
 class SaaSService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.store = build_metadata_store(settings)
 
     def workspace_payload(self, *, organization_id: str) -> dict[str, Any]:
         self.sync_default_datasets(organization_id=organization_id)
@@ -391,7 +535,7 @@ class SaaSService:
 class BillingService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.store = build_metadata_store(settings)
 
     def pricing(self, *, organization_id: str | None = None) -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id) if organization_id else None
@@ -455,13 +599,13 @@ class BillingService:
         return {"subscription": subscription, "premium": premium, "pricing": self.pricing(organization_id=organization_id)["plans"]}
 
     def checkout(self, *, organization_id: str, request: BillingCheckoutRequest) -> dict[str, Any]:
-        subscription = self.store.get_subscription(organization_id=organization_id) or {}
         if request.price_id and self.settings.is_production:
             raise ValueError("Client-supplied Stripe price IDs are not accepted in production.")
         price_id = self.settings.effective_stripe_pro_price_id
         if not self.settings.stripe_secret_key or not price_id:
             if self.settings.is_production:
                 raise RuntimeError("Stripe checkout is not configured for production.")
+            subscription = self.store.get_subscription(organization_id=organization_id) or {}
             self.store.upsert_subscription(
                 organization_id=organization_id,
                 payload={**subscription, "plan": request.plan, "status": "trialing"},
@@ -471,6 +615,7 @@ class BillingService:
                 "checkout_url": f"{self.settings.app_base_url}?billing=demo-checkout",
                 "message": "Stripe is not configured. Set STRIPE_SECRET_KEY and STRIPE_PRO_PRICE_ID to create real Checkout sessions.",
             }
+        subscription = self.store.get_subscription(organization_id=organization_id) or {}
         success_url = self.settings.stripe_success_url or f"{self.settings.app_base_url}?billing=success"
         cancel_url = self.settings.stripe_cancel_url or f"{self.settings.app_base_url}?billing=cancelled"
         data = {
@@ -632,7 +777,7 @@ class BillingService:
 class AdminService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.store = build_metadata_store(settings)
 
     def overview(self) -> dict[str, Any]:
         counts = self.store.counts()
@@ -717,17 +862,12 @@ class AdminService:
 
     def quotas(self) -> dict[str, Any]:
         return {
-            "defaults": {
-                "backtests_per_day": 20,
-                "sentiment_jobs_per_day": 20,
-                "paper_jobs_per_day": 20,
-                "news_pages_per_day": 500,
-                "artifact_storage_mb": 1024,
-            },
+            "defaults": DEFAULT_QUOTAS,
             "source": "secure_v1_defaults",
         }
 
     def update_quotas(self, *, organization_id: str, payload: dict[str, Any], actor_user_id: str) -> dict[str, Any]:
+        stored = self.store.upsert_organization_quotas(organization_id=organization_id, quotas=payload)
         self.store.record_audit_log(
             action="admin.quotas_updated",
             organization_id=organization_id,
@@ -736,7 +876,7 @@ class AdminService:
             target_id=organization_id,
             metadata={"quotas": payload},
         )
-        return {"organization_id": organization_id, "quotas": payload, "status": "recorded"}
+        return {"organization_id": organization_id, "quotas": stored["quotas"], "status": "updated"}
 
 
 def build_landing_analytics(events: list[dict[str, Any]]) -> dict[str, Any]:

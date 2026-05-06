@@ -13,7 +13,7 @@ from pairs_trading.data.news import CompositeHeadlineProvider, LocalNewsFileProv
 from pairs_trading.data.sentiment_accumulator import ShadowSentimentAccumulator
 from pairs_trading.engines.backtesting import json_ready
 from pairs_trading.features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
-from pairs_trading.platform import SQLiteMetadataStore
+from pairs_trading.platform import build_metadata_store
 from pairs_trading.backend.telemetry import DailyRefreshService
 
 
@@ -83,7 +83,7 @@ def main() -> None:
         print(json.dumps(json_ready(asdict(result)), indent=2))
         return
 
-    store = SQLiteMetadataStore(settings.metadata_db_path)
+    store = build_metadata_store(settings)
     counts = store.counts()
     payload: dict[str, object] = {
         "metadata_db_path": str(settings.metadata_db_path),

@@ -7,12 +7,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..authz import require_csrf
 from ..config import BackendSettings
-from ..saas import AuthService, BillingService, CSRF_COOKIE_NAME, RequestContext, SaaSService, SESSION_COOKIE_NAME
+from ..saas import AuthService, BillingService, CSRF_COOKIE_NAME, MFA_COOKIE_NAME, RequestContext, SaaSService, SESSION_COOKIE_NAME
 from ..schemas import (
     ApiKeyCreateRequest,
     BillingCheckoutRequest,
     BillingPortalRequest,
+    EmailVerificationRequest,
+    EmailVerificationSendRequest,
     LoginRequest,
+    MfaVerifyRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     ProjectCreateRequest,
     SignupRequest,
 )
@@ -125,6 +130,7 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
             auth_service.logout(token=token)
         response.delete_cookie(SESSION_COOKIE_NAME, path="/", domain=settings.cookie_domain)
         response.delete_cookie(CSRF_COOKIE_NAME, path="/", domain=settings.cookie_domain)
+        response.delete_cookie(MFA_COOKIE_NAME, path="/", domain=settings.cookie_domain)
         return {"status": "ok"}
 
     @router.post("/auth/csrf")
@@ -136,27 +142,47 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
         auth_service.authenticate(token=token)
         return {"csrf_token": auth_service.csrf_token_for_session(token)}
 
+    @router.post("/auth/verify-email/request")
+    def verify_email_request(request: EmailVerificationSendRequest) -> dict[str, Any]:
+        return auth_service.request_email_verification(email=request.email)
+
     @router.post("/auth/verify-email")
-    def verify_email(_: dict[str, Any] | None = None, __: None = Depends(csrf_guard)) -> dict[str, str]:
-        return {"status": "accepted", "message": "Email verification is ready for SMTP-backed delivery."}
+    def verify_email(request: EmailVerificationRequest) -> dict[str, Any]:
+        try:
+            return auth_service.verify_email(token=request.token)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/auth/password-reset/request")
-    def password_reset_request(_: dict[str, Any] | None = None) -> dict[str, str]:
-        return {"status": "accepted", "message": "If the account exists, reset instructions will be sent."}
+    def password_reset_request(request: PasswordResetRequest) -> dict[str, str]:
+        return auth_service.request_password_reset(email=request.email)
 
     @router.post("/auth/password-reset/confirm")
-    def password_reset_confirm(_: dict[str, Any] | None = None) -> dict[str, str]:
-        return {"status": "accepted", "message": "Password reset confirmation endpoint is wired for token validation."}
-
-    @router.post("/auth/mfa/setup")
-    def mfa_setup(_: RequestContext = Depends(context), __: None = Depends(csrf_guard)) -> dict[str, Any]:
-        return {"status": "pending", "method": "totp", "message": "TOTP MFA setup hook is available for admin hardening."}
+    def password_reset_confirm(request: PasswordResetConfirmRequest) -> dict[str, str]:
+        try:
+            return auth_service.confirm_password_reset(token=request.token, new_password=request.new_password)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/auth/mfa/verify")
-    def mfa_verify(response: Response, _: RequestContext = Depends(context), __: None = Depends(csrf_guard)) -> dict[str, Any]:
+    def mfa_verify(
+        request_body: MfaVerifyRequest,
+        response: Response,
+        request: Request,
+        ctx: RequestContext = Depends(context),
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+        __: None = Depends(csrf_guard),
+    ) -> dict[str, Any]:
+        try:
+            payload = auth_service.verify_mfa_code(user_id=str(ctx.user["id"]), code=request_body.code)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
+            raise HTTPException(status_code=401, detail="Login required.")
         response.set_cookie(
-            "quantops_mfa",
-            "verified",
+            MFA_COOKIE_NAME,
+            auth_service.mfa_cookie_for_session(session_token=token, user_id=str(ctx.user["id"])),
             httponly=True,
             secure=settings.cookie_secure,
             samesite=settings.cookie_samesite,
@@ -164,7 +190,14 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
             path="/",
             domain=settings.cookie_domain,
         )
-        return {"status": "verified", "method": "totp"}
+        return payload
+
+    @router.post("/auth/mfa/setup")
+    def mfa_setup(ctx: RequestContext = Depends(context), __: None = Depends(csrf_guard)) -> dict[str, Any]:
+        try:
+            return auth_service.setup_mfa(user_id=str(ctx.user["id"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.get("/workspaces")
     def workspace(ctx: RequestContext = Depends(context)) -> dict[str, Any]:

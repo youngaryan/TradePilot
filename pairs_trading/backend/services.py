@@ -28,11 +28,12 @@ from ..operations.paper_trading import run_paper_batch
 from ..data.news import AlphaVantageNewsProvider, BenzingaNewsProvider, CompositeHeadlineProvider, LocalNewsFileProvider, LocalWebSearchHeadlineProvider, NewsAPIHeadlineProvider, RSSHeadlineProvider, WebResearchHeadlineProvider
 from ..data.sentiment_accumulator import ShadowSentimentAccumulator
 from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
-from ..platform import SQLiteMetadataStore
+from ..platform import build_metadata_store
 from .config import BackendSettings
 from .job_queue import enqueue_quant_job
 from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
+from .storage import build_artifact_storage
 from .validators import validate_relative_path, validate_url
 
 
@@ -95,7 +96,8 @@ class PaperRunJobRunner:
         self.jobs: dict[str, PaperRunJob] = {}
         self.jobs_dir = settings.paper_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.metadata_store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
         self._load_jobs()
 
     def submit(self, command: PaperRunCommand, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
@@ -426,6 +428,27 @@ def _clean_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in parameters.items() if value is not None}
 
 
+def _publish_directory_reference(storage, *, source_dir: str | Path | None, organization_id: str, artifact_type: str, artifact_id: str) -> dict[str, Any] | None:
+    if not source_dir:
+        return None
+    source = Path(str(source_dir))
+    if not source.exists() or not source.is_dir():
+        return None
+    reference = storage.publish_directory(
+        source,
+        organization_id=organization_id,
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+    )
+    return {
+        "provider": reference.provider,
+        "key": reference.key,
+        "uri": reference.uri,
+        "file_count": reference.file_count,
+        "byte_count": reference.byte_count,
+    }
+
+
 @dataclass
 class BacktestJob:
     id: str
@@ -474,7 +497,8 @@ class BacktestJobRunner:
         self.jobs: dict[str, BacktestJob] = {}
         self.jobs_dir = settings.backtest_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.metadata_store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
         self._load_jobs()
 
     def submit(self, request: BacktestRunRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
@@ -553,6 +577,17 @@ class BacktestJobRunner:
             summary = result.get("summary", {})
             validation = result.get("validation", {})
             experiment_id = str(summary.get("experiment_id") or job_id)
+            artifact_reference = _publish_directory_reference(
+                self.artifact_storage,
+                source_dir=result.get("artifact_dir"),
+                organization_id=organization_id,
+                artifact_type="backtests",
+                artifact_id=experiment_id,
+            )
+            if artifact_reference:
+                result["artifact"] = artifact_reference
+                summary = {**summary, "artifact": artifact_reference}
+                result["summary"] = summary
             self.metadata_store.save_experiment_run(
                 experiment_id=experiment_id,
                 kind="backtest",
@@ -1021,7 +1056,8 @@ class BacktestService:
 class PaperService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.metadata_store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
 
     def latest_batch_summary_path(self) -> Path | None:
         root = self.settings.paper_artifact_root
@@ -1081,6 +1117,15 @@ class PaperService:
                 event_cache_dir=str(self.settings.event_cache_dir),
             )
             paper_run_id = f"{summary.get('run_timestamp_utc') or _utc_now_iso()}_{asof_date or 'today'}_{len(completed_dates) + 1}"
+            artifact_reference = _publish_directory_reference(
+                self.artifact_storage,
+                source_dir=summary.get("artifact_dir"),
+                organization_id=organization_id,
+                artifact_type="paper",
+                artifact_id=paper_run_id,
+            )
+            if artifact_reference:
+                summary = {**summary, "artifact": artifact_reference}
             self.metadata_store.save_experiment_run(
                 experiment_id=paper_run_id,
                 kind="paper",
@@ -1108,7 +1153,8 @@ class PaperService:
 class SentimentService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.metadata_store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
 
     @property
     def default_output_dir(self) -> Path:
@@ -1346,23 +1392,33 @@ class SentimentService:
         self._write_accumulation_metadata(result, request, warnings)
         report("registering_dataset", "Registering the sentiment dataset in the workspace metadata store.", 0.90)
         daily_path = Path(result.output_dir) / "daily_sentiment.parquet"
+        dataset_id = self.metadata_store.stable_id("dst", f"{organization_id}:{daily_path}:sentiment_daily")
+        artifact_reference = _publish_directory_reference(
+            self.artifact_storage,
+            source_dir=result.output_dir,
+            organization_id=organization_id,
+            artifact_type="sentiment",
+            artifact_id=dataset_id,
+        )
         self.metadata_store.upsert_dataset(
             organization_id=organization_id,
             payload={
+                "id": dataset_id,
                 "name": "Shadow Daily Sentiment",
                 "kind": "sentiment_daily",
-                "path": str(daily_path),
+                "path": artifact_reference["uri"] if self.settings.is_production and artifact_reference else str(daily_path),
                 "provider": {
                     "providers": list(request.providers),
                     "symbols": list(request.symbols),
                     "start": request.start,
                     "end": request.end,
-                "web_research_domains": list(request.web_research_domains),
-                "web_research_urls": list(request.web_research_urls),
-                "local_web_search_urls": list(request.local_web_search_urls),
-                "local_web_refresh_minutes": request.local_web_refresh_minutes,
-                "local_web_max_pages_per_source": request.local_web_max_pages_per_source,
-                "web_research_model": "lightweight_extractive_v1" if {"web", "local_web"} & {provider.lower() for provider in request.providers} else None,
+                    "web_research_domains": list(request.web_research_domains),
+                    "web_research_urls": list(request.web_research_urls),
+                    "local_web_search_urls": list(request.local_web_search_urls),
+                    "local_web_refresh_minutes": request.local_web_refresh_minutes,
+                    "local_web_max_pages_per_source": request.local_web_max_pages_per_source,
+                    "web_research_model": "lightweight_extractive_v1" if {"web", "local_web"} & {provider.lower() for provider in request.providers} else None,
+                    "artifact": artifact_reference,
                 },
                 "schema": {"columns": list(self._read_frame(daily_path).columns) if daily_path.exists() else []},
                 "row_count": int(result.daily_rows),
@@ -1523,7 +1579,8 @@ class SentimentJobRunner:
         self.jobs: dict[str, SentimentAccumulationJob] = {}
         self.jobs_dir = settings.sentiment_job_state_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_store = SQLiteMetadataStore(settings.metadata_db_path, enable_demo_accounts=settings.enable_demo_accounts)
+        self.metadata_store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
         self._load_jobs()
 
     def submit(self, request: SentimentAccumulationRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:

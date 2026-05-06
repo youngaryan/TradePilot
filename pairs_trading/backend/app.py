@@ -20,9 +20,47 @@ from .security import install_security_middleware
 from .telemetry import DailyRefreshScheduler
 
 
+def configure_observability(settings: BackendSettings) -> None:
+    if settings.sentry_dsn:
+        try:
+            import sentry_sdk
+
+            sentry_sdk.init(
+                dsn=settings.sentry_dsn,
+                environment=settings.app_env,
+                traces_sample_rate=0.1 if settings.is_production else 0.0,
+            )
+        except Exception:  # pragma: no cover - optional exporter
+            import logging
+
+            logging.getLogger("pairs_trading.api").exception("sentry_initialization_failed")
+
+
+def instrument_app(app: FastAPI, settings: BackendSettings) -> None:
+    if not settings.otel_exporter_otlp_endpoint:
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        provider = TracerProvider(resource=Resource.create({"service.name": "quantops-api", "deployment.environment": settings.app_env}))
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint)))
+        trace.set_tracer_provider(provider)
+        FastAPIInstrumentor.instrument_app(app)
+    except Exception:  # pragma: no cover - optional exporter
+        import logging
+
+        logging.getLogger("pairs_trading.api").exception("otel_initialization_failed")
+
+
 def create_app(settings: BackendSettings | None = None) -> FastAPI:
     app_settings = settings or BackendSettings.from_env()
     app_settings.validate_for_startup()
+    configure_observability(app_settings)
     scheduler = DailyRefreshScheduler(app_settings)
 
     @asynccontextmanager
@@ -39,6 +77,7 @@ def create_app(settings: BackendSettings | None = None) -> FastAPI:
         description="Backend API for paper trading dashboards, research artifacts, and future live operations.",
         lifespan=lifespan,
     )
+    instrument_app(app, app_settings)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(app_settings.cors_origins),
