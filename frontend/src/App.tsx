@@ -593,7 +593,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
               <Badge label={mode === "signup" ? "free signup" : "secure login"} tone="good" />
               <span>No broker connection. Fake-money only.</span>
             </div>
-            <h2>{mode === "signup" ? "Create your workspace" : "Enter your workspace"}</h2>
+            <h2 id="login-heading">{mode === "signup" ? "Create your workspace" : "Enter your workspace"}</h2>
             <p>{mode === "signup" ? "Start on the free tier, then upgrade only when you need premium compute." : "Use a demo account or your own account to enter the SaaS-style control room."}</p>
             <div className="auth-mode-switch" id="signup">
               <button type="button" className={mode === "login" ? "chip chip--active" : "chip"} onClick={() => { setMode("login"); trackLanding("landing_section_view", { section: "login" }); }}>Login</button>
