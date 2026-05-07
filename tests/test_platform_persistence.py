@@ -70,7 +70,7 @@ class PlatformPersistenceTests(unittest.TestCase):
             organization_id=org_id,
             name="NewsAPI",
             provider="newsapi",
-            secret="sk_test_123456789",
+            secret="dummy-dummy-dummy",
         )
         experiment = store.upsert_experiment(
             organization_id=org_id,
