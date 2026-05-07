@@ -84,7 +84,13 @@ jobs:
       - name: Accessibility smoke
         working-directory: frontend
         run: |
+          CHROME_VERSION="$(google-chrome --version | grep -oE '[0-9]+(\.[0-9]+){3}')"
+          npx browser-driver-manager install "chrome@${CHROME_VERSION}"
+
           npm run preview -- --host 127.0.0.1 --port 4173 > preview.log 2>&1 &
+          PREVIEW_PID=$!
+          trap 'kill $PREVIEW_PID' EXIT
+
           npx wait-on http://127.0.0.1:4173
           npx axe http://127.0.0.1:4173 --exit
       - name: Frontend audit
@@ -96,3 +102,7 @@ jobs:
         run: docker build -f Dockerfile.api -t quantops-api:ci .
       - name: Docker web build
         run: docker build -f Dockerfile.web -t quantops-web:ci .
+
+
+
+
