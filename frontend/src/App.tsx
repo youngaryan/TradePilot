@@ -588,7 +588,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
             </div>
           </div>
 
-          <aside className="signin-card" id="login">
+          <section className="signin-card" id="login">
             <div className="signin-card__header">
               <Badge label={mode === "signup" ? "free signup" : "secure login"} tone="good" />
               <span>No broker connection. Fake-money only.</span>
@@ -629,7 +629,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
               <ArrowRight size={17} />
             </button>
             <small>Admin demo: demo@quantops.local / quantops-demo. Free user demo: user@quantops.local / quantops-user.</small>
-          </aside>
+          </section>
         </section>
 
         <section className="landing-section" id="features">
