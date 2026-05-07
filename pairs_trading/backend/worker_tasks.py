@@ -12,7 +12,7 @@ from .services import BacktestJobRunner, PaperRunCommand, PaperRunJobRunner, Sen
 def run_queued_job(kind: str, job_id: str) -> dict[str, Any]:
     settings = BackendSettings.from_env()
     store = build_metadata_store(settings)
-    job = next((item for item in store.list_jobs(kind=kind) if item.get("id") == job_id), None)
+    job = store.get_job(kind=kind, job_id=job_id)
     if job is None:
         raise ValueError(f"Queued job not found: {kind}/{job_id}")
     organization_id = str(job.get("organization_id") or "")

@@ -56,9 +56,40 @@ class BackendAppTests(unittest.TestCase):
         login = client.post("/api/auth/login", json={"email": email, "password": password})
         self.assertEqual(login.status_code, 200)
         return {
-            "Authorization": f"Bearer {login.json()['access_token']}",
             "X-Organization-Id": login.json()["active_organization_id"],
+            "X-CSRF-Token": client.cookies.get("quantops_csrf") or "",
         }
+
+    def register_sentiment_dataset(self, *, settings, organization_id: str, output_dir, dataset_id: str = "dst-test-sentiment") -> str:
+        from pairs_trading.platform import SQLiteMetadataStore
+
+        store = SQLiteMetadataStore(settings.metadata_db_path)
+        artifact_id = f"art-{dataset_id}"
+        store.upsert_artifact(
+            organization_id=organization_id,
+            payload={
+                "id": artifact_id,
+                "artifact_type": "sentiment",
+                "source_id": dataset_id,
+                "provider": "local",
+                "storage_key": str(output_dir),
+                "uri": str(output_dir),
+                "metadata": {"test_fixture": True},
+            },
+        )
+        store.upsert_dataset(
+            organization_id=organization_id,
+            payload={
+                "id": dataset_id,
+                "name": "Unit test sentiment dataset",
+                "kind": "sentiment_daily",
+                "path": str(output_dir / "daily_sentiment.parquet"),
+                "provider": {"source": "unit_test", "artifact_id": artifact_id},
+                "schema": {},
+                "row_count": 0,
+            },
+        )
+        return dataset_id
 
     def test_backend_routes_return_paper_payload(self) -> None:
         from pairs_trading.backend.app import create_app
@@ -121,15 +152,18 @@ class BackendAppTests(unittest.TestCase):
         headers = self.auth_headers(client)
 
         health = client.get("/api/health")
-        summary = client.get("/api/paper/summary")
-        strategy = client.get("/api/paper/strategies/trend")
-        missing = client.get("/api/paper/strategies/missing")
+        unauth_summary = TestClient(app).get("/api/paper/summary")
+        summary = client.get("/api/paper/summary", headers=headers)
+        strategy = client.get("/api/paper/strategies/trend", headers=headers)
+        missing = client.get("/api/paper/strategies/missing", headers=headers)
         catalog = client.get("/api/strategies/catalog")
         catalog_item = client.get("/api/strategies/catalog/ema_cross")
         paper_jobs = client.get("/api/paper/jobs", headers=headers)
-        metadata = client.get("/api/system/metadata")
+        unauth_metadata = TestClient(app).get("/api/system/metadata")
+        metadata = client.get("/api/system/metadata", headers=headers)
 
         self.assertEqual(health.status_code, 200)
+        self.assertEqual(unauth_summary.status_code, 401)
         self.assertEqual(summary.status_code, 200)
         self.assertEqual(summary.json()["totals"]["equity"], 101000.0)
         self.assertEqual(strategy.status_code, 200)
@@ -140,6 +174,7 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(catalog_item.status_code, 200)
         self.assertEqual(catalog_item.json()["id"], "ema_cross")
         self.assertEqual(paper_jobs.status_code, 200)
+        self.assertEqual(unauth_metadata.status_code, 401)
         self.assertEqual(metadata.status_code, 200)
         self.assertEqual(metadata.json()["counts"]["jobs"], 0)
         self.assertGreaterEqual(metadata.json()["counts"]["organizations"], 1)
@@ -164,9 +199,15 @@ class BackendAppTests(unittest.TestCase):
 
         login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
         self.assertEqual(login.status_code, 200)
-        token = login.json()["access_token"]
+        self.assertNotIn("access_token", login.json())
         org_id = login.json()["active_organization_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Organization-Id": org_id}
+        headers = {"X-Organization-Id": org_id, "X-CSRF-Token": client.cookies.get("quantops_csrf") or ""}
+        session_token = client.cookies.get("quantops_session")
+        bearer_session = client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {session_token}", "X-Organization-Id": org_id},
+        )
+        self.assertEqual(bearer_session.status_code, 401)
 
         store = SQLiteMetadataStore(settings.metadata_db_path)
         store.upsert_experiment(
@@ -206,6 +247,11 @@ class BackendAppTests(unittest.TestCase):
             headers=headers,
             json={"name": "NewsAPI", "provider": "newsapi", "secret_ref": "NEWSAPI_API_KEY"},
         )
+        machine_key = client.post(
+            "/api/workspaces/api-keys",
+            headers=headers,
+            json={"name": "Worker key", "provider": "machine", "scopes": ["read"]},
+        )
         checkout = client.post("/api/billing/checkout", headers=headers, json={"plan": "pro"})
         experiments = client.get("/api/workspaces/experiments", headers=headers)
         experiment_detail = client.get("/api/workspaces/experiments/exp-api-1", headers=headers)
@@ -219,6 +265,11 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(project.status_code, 201)
         self.assertEqual(api_key.status_code, 201)
         self.assertEqual(api_key.json()["secret_ref"], "NEWSAPI_API_KEY")
+        self.assertEqual(machine_key.status_code, 201)
+        self.assertTrue(machine_key.json()["token"].startswith("qops_"))
+        machine_headers = {"Authorization": f"Bearer {machine_key.json()['token']}", "X-Organization-Id": org_id}
+        self.assertEqual(client.get("/api/auth/me", headers=machine_headers).status_code, 200)
+        self.assertEqual(client.get("/api/account/export", headers=machine_headers).status_code, 403)
         self.assertEqual(checkout.status_code, 200)
         self.assertEqual(checkout.json()["mode"], "demo")
         self.assertEqual(experiments.status_code, 200)
@@ -247,9 +298,8 @@ class BackendAppTests(unittest.TestCase):
         client = TestClient(app)
 
         login = client.post("/api/auth/login", json={"email": "demo@quantops.local", "password": "quantops-demo"})
-        token = login.json()["access_token"]
         org_id = login.json()["active_organization_id"]
-        headers = {"Authorization": f"Bearer {token}", "X-Organization-Id": org_id}
+        headers = {"X-Organization-Id": org_id, "X-CSRF-Token": client.cookies.get("quantops_csrf") or ""}
 
         denied = client.post(
             "/api/telemetry/events",
@@ -305,13 +355,17 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(admin_login.json()["user"]["role"], "admin")
         self.assertEqual(user_login.json()["user"]["role"], "user")
 
+        admin_cookie = "; ".join(f"{key}={value}" for key, value in admin_login.cookies.items())
+        user_cookie = "; ".join(f"{key}={value}" for key, value in user_login.cookies.items())
         admin_headers = {
-            "Authorization": f"Bearer {admin_login.json()['access_token']}",
+            "Cookie": admin_cookie,
             "X-Organization-Id": admin_login.json()["active_organization_id"],
+            "X-CSRF-Token": admin_login.cookies.get("quantops_csrf") or "",
         }
         user_headers = {
-            "Authorization": f"Bearer {user_login.json()['access_token']}",
+            "Cookie": user_cookie,
             "X-Organization-Id": user_login.json()["active_organization_id"],
+            "X-CSRF-Token": user_login.cookies.get("quantops_csrf") or "",
         }
 
         self.assertEqual(client.get("/api/admin/overview", headers=user_headers).status_code, 403)
@@ -398,10 +452,8 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(signup.status_code, 201)
         self.assertEqual(signup.json()["user"]["role"], "user")
 
-        user_headers = {
-            "Authorization": f"Bearer {signup.json()['access_token']}",
-            "X-Organization-Id": signup.json()["active_organization_id"],
-        }
+        user_cookie = "; ".join(f"{key}={value}" for key, value in signup.cookies.items())
+        user_headers = {"Cookie": user_cookie, "X-Organization-Id": signup.json()["active_organization_id"]}
         self.assertEqual(client.get("/api/admin/overview", headers=user_headers).status_code, 403)
         self.assertEqual(client.post("/api/backtests/run", headers=user_headers, json={}).status_code, 402)
 
@@ -546,7 +598,7 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(payload["source_summary"][0]["source"], "unit_news")
         self.assertTrue(output_dir.joinpath("daily_sentiment.parquet").exists())
 
-        dataset = client.get("/api/sentiment/dataset", headers=headers, params={"output_dir": str(output_dir)})
+        dataset = client.get("/api/sentiment/dataset", headers=headers, params={"dataset_id": payload["dataset_id"]})
         self.assertEqual(dataset.status_code, 200)
         self.assertEqual(dataset.json()["summary"]["scored_headline_count"], 2)
 
@@ -600,10 +652,11 @@ class BackendAppTests(unittest.TestCase):
             )
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["id"]
-            user_headers = self.auth_headers(client, email="user@quantops.local", password="quantops-user")
+            user_client = TestClient(app)
+            user_headers = self.auth_headers(user_client, email="user@quantops.local", password="quantops-user")
             self.assertEqual(TestClient(app).get(f"/api/sentiment/jobs/{job_id}").status_code, 401)
-            self.assertEqual(client.get(f"/api/sentiment/jobs/{job_id}", headers=user_headers).status_code, 404)
-            self.assertEqual(client.get("/api/sentiment/jobs", headers=user_headers).json(), [])
+            self.assertEqual(user_client.get(f"/api/sentiment/jobs/{job_id}", headers=user_headers).status_code, 404)
+            self.assertEqual(user_client.get("/api/sentiment/jobs", headers=user_headers).json(), [])
 
             completed_payload = None
             for _ in range(50):
@@ -726,7 +779,21 @@ class BackendAppTests(unittest.TestCase):
         client = TestClient(app)
         headers = self.auth_headers(client)
 
-        response = client.get("/api/sentiment/dataset", headers=headers, params={"output_dir": str(output_dir)})
+        dataset_id = self.register_sentiment_dataset(
+            settings=app.state.settings if hasattr(app.state, "settings") else BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                sentiment_cache_dir=workspace / "sentiment_cache",
+            ),
+            organization_id=headers["X-Organization-Id"],
+            output_dir=output_dir,
+            dataset_id="dst-preview-window",
+        )
+        response = client.get("/api/sentiment/dataset", headers=headers, params={"dataset_id": dataset_id})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -759,7 +826,21 @@ class BackendAppTests(unittest.TestCase):
         client = TestClient(app)
         headers = self.auth_headers(client)
 
-        response = client.get("/api/sentiment/dataset", headers=headers, params={"output_dir": str(output_dir)})
+        dataset_id = self.register_sentiment_dataset(
+            settings=app.state.settings if hasattr(app.state, "settings") else BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                sentiment_cache_dir=workspace / "sentiment_cache",
+            ),
+            organization_id=headers["X-Organization-Id"],
+            output_dir=output_dir,
+            dataset_id="dst-empty-sentiment",
+        )
+        response = client.get("/api/sentiment/dataset", headers=headers, params={"dataset_id": dataset_id})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()

@@ -42,6 +42,7 @@ class MetadataCounts:
     jobs: int
     deployment_configs: int
     experiment_runs: int
+    artifacts: int = 0
     users: int = 0
     organizations: int = 0
     projects: int = 0
@@ -99,6 +100,7 @@ class SQLiteMetadataStore:
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
+                    organization_id TEXT,
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
                     stage TEXT,
@@ -120,6 +122,7 @@ class SQLiteMetadataStore:
 
                 CREATE TABLE IF NOT EXISTS deployment_configs (
                     id TEXT PRIMARY KEY,
+                    organization_id TEXT,
                     source TEXT NOT NULL,
                     path TEXT,
                     config_json TEXT NOT NULL,
@@ -128,6 +131,7 @@ class SQLiteMetadataStore:
 
                 CREATE TABLE IF NOT EXISTS experiment_runs (
                     id TEXT PRIMARY KEY,
+                    organization_id TEXT,
                     kind TEXT NOT NULL,
                     artifact_dir TEXT,
                     summary_json TEXT NOT NULL,
@@ -136,6 +140,24 @@ class SQLiteMetadataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_experiment_runs_kind_created
                     ON experiment_runs(kind, created_at_utc DESC);
+
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    artifact_type TEXT NOT NULL,
+                    source_id TEXT,
+                    provider TEXT NOT NULL,
+                    storage_key TEXT NOT NULL,
+                    uri TEXT NOT NULL,
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    byte_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_artifacts_org_type_updated
+                    ON artifacts(organization_id, artifact_type, updated_at_utc DESC);
 
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
@@ -266,7 +288,10 @@ class SQLiteMetadataStore:
                     provider TEXT NOT NULL,
                     masked_value TEXT NOT NULL,
                     secret_ref TEXT,
+                    token_hash TEXT,
+                    scopes_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL,
+                    last_used_at_utc TEXT,
                     created_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL
                 );
@@ -381,7 +406,7 @@ class SQLiteMetadataStore:
                     ON audit_log(organization_id, occurred_at_utc DESC);
                 """
             )
-        self._migrate_auth_columns()
+        self._migrate_legacy_columns()
         if self.enable_demo_accounts:
             self.ensure_demo_workspace(
                 display_name="Admin Demo Quant",
@@ -402,8 +427,8 @@ class SQLiteMetadataStore:
                 organization_role="member",
             )
 
-    def _migrate_auth_columns(self) -> None:
-        """Keep older local SQLite databases compatible with newer auth rules."""
+    def _migrate_legacy_columns(self) -> None:
+        """Keep older local SQLite databases compatible with newer production rules."""
 
         with self._connect() as connection:
             existing = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
@@ -417,6 +442,34 @@ class SQLiteMetadataStore:
                 connection.execute("ALTER TABLE users ADD COLUMN mfa_secret TEXT")
             if "mfa_enabled" not in existing:
                 connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+            table_columns = {
+                table: {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+                for table in ("jobs", "deployment_configs", "experiment_runs", "api_keys")
+            }
+            if "organization_id" not in table_columns["jobs"]:
+                connection.execute("ALTER TABLE jobs ADD COLUMN organization_id TEXT")
+            if "organization_id" not in table_columns["deployment_configs"]:
+                connection.execute("ALTER TABLE deployment_configs ADD COLUMN organization_id TEXT")
+            if "organization_id" not in table_columns["experiment_runs"]:
+                connection.execute("ALTER TABLE experiment_runs ADD COLUMN organization_id TEXT")
+            if "token_hash" not in table_columns["api_keys"]:
+                connection.execute("ALTER TABLE api_keys ADD COLUMN token_hash TEXT")
+            if "scopes_json" not in table_columns["api_keys"]:
+                connection.execute("ALTER TABLE api_keys ADD COLUMN scopes_json TEXT NOT NULL DEFAULT '[]'")
+            if "last_used_at_utc" not in table_columns["api_keys"]:
+                connection.execute("ALTER TABLE api_keys ADD COLUMN last_used_at_utc TEXT")
+            connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_jobs_org_kind_created
+                    ON jobs(organization_id, kind, created_at_utc DESC);
+                CREATE INDEX IF NOT EXISTS idx_jobs_org_kind_status
+                    ON jobs(organization_id, kind, status);
+                CREATE INDEX IF NOT EXISTS idx_experiment_runs_org_kind_created
+                    ON experiment_runs(organization_id, kind, created_at_utc DESC);
+                CREATE INDEX IF NOT EXISTS idx_api_keys_token_hash
+                    ON api_keys(token_hash);
+                """
+            )
 
     @staticmethod
     def hash_token(token: str) -> str:
@@ -424,7 +477,7 @@ class SQLiteMetadataStore:
 
     @staticmethod
     def stable_id(prefix: str, value: str) -> str:
-        digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:20]
+        digest = hashlib.sha1(value.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
         return f"{prefix}_{digest}"
 
     @staticmethod
@@ -1152,6 +1205,8 @@ class SQLiteMetadataStore:
         provider: str,
         secret: str | None = None,
         secret_ref: str | None = None,
+        token_hash: str | None = None,
+        scopes: list[str] | None = None,
     ) -> dict[str, Any]:
         now = _utc_now_iso()
         key_id = self.stable_id("key", f"{organization_id}:{provider}:{name}:{uuid4().hex}")
@@ -1161,14 +1216,20 @@ class SQLiteMetadataStore:
                 """
                 INSERT INTO api_keys (
                     id, organization_id, name, provider, masked_value, secret_ref,
-                    status, created_at_utc, updated_at_utc
+                    token_hash, scopes_json, status, last_used_at_utc, created_at_utc, updated_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (key_id, organization_id, name, provider, masked, secret_ref, "active", now, now),
+                (key_id, organization_id, name, provider, masked, secret_ref, token_hash, _json_dump(scopes or []), "active", None, now, now),
             )
             row = connection.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
-        return dict(row)
+        return self._api_key_row(row)
+
+    def _api_key_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        payload = dict(row)
+        payload["scopes"] = _json_load(payload.pop("scopes_json", "[]"), [])
+        payload.pop("token_hash", None)
+        return payload
 
     def list_api_keys(self, *, organization_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -1176,7 +1237,20 @@ class SQLiteMetadataStore:
                 "SELECT * FROM api_keys WHERE organization_id = ? ORDER BY created_at_utc DESC",
                 (organization_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._api_key_row(row) for row in rows]
+
+    def get_api_key_by_token_hash(self, *, token_hash: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM api_keys WHERE token_hash = ? AND status = 'active'",
+                (token_hash,),
+            ).fetchone()
+            if row is not None:
+                connection.execute(
+                    "UPDATE api_keys SET last_used_at_utc = ?, updated_at_utc = ? WHERE id = ?",
+                    (_utc_now_iso(), _utc_now_iso(), row["id"]),
+                )
+        return None if row is None else self._api_key_row(row)
 
     def upsert_experiment(self, *, organization_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = _utc_now_iso()
@@ -1539,16 +1613,18 @@ class SQLiteMetadataStore:
         return [self._refresh_run_row(row) for row in rows]
 
     def upsert_job(self, *, kind: str, payload: dict[str, Any]) -> None:
+        organization_id = payload.get("organization_id")
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    id, kind, status, stage, progress, request_json, payload_json,
+                    id, organization_id, kind, status, stage, progress, request_json, payload_json,
                     error, created_at_utc, updated_at_utc, started_at_utc,
                     finished_at_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    organization_id = excluded.organization_id,
                     kind = excluded.kind,
                     status = excluded.status,
                     stage = excluded.stage,
@@ -1563,6 +1639,7 @@ class SQLiteMetadataStore:
                 """,
                 (
                     str(payload["id"]),
+                    str(organization_id) if organization_id else None,
                     kind,
                     str(payload.get("status", "unknown")),
                     payload.get("stage"),
@@ -1577,25 +1654,108 @@ class SQLiteMetadataStore:
                 ),
             )
 
-    def list_jobs(self, *, kind: str) -> list[dict[str, Any]]:
+    def list_jobs(self, *, kind: str, organization_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT payload_json FROM jobs WHERE kind = ?"
+        params: list[Any] = [kind]
+        if organization_id is not None:
+            query += " AND organization_id = ?"
+            params.append(organization_id)
+        query += " ORDER BY created_at_utc DESC"
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT payload_json FROM jobs WHERE kind = ? ORDER BY created_at_utc DESC",
-                (kind,),
-            ).fetchall()
+            rows = connection.execute(query, tuple(params)).fetchall()
         return [_json_load(row["payload_json"], {}) for row in rows]
 
-    def get_job(self, *, kind: str, job_id: str) -> dict[str, Any] | None:
+    def get_job(self, *, kind: str, job_id: str, organization_id: str | None = None) -> dict[str, Any] | None:
+        query = "SELECT payload_json FROM jobs WHERE kind = ? AND id = ?"
+        params: list[Any] = [kind, job_id]
+        if organization_id is not None:
+            query += " AND organization_id = ?"
+            params.append(organization_id)
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM jobs WHERE kind = ? AND id = ?",
-                (kind, job_id),
-            ).fetchone()
+            row = connection.execute(query, tuple(params)).fetchone()
         return None if row is None else _json_load(row["payload_json"], {})
 
-    def delete_job(self, *, kind: str, job_id: str) -> None:
+    def delete_job(self, *, kind: str, job_id: str, organization_id: str | None = None) -> None:
+        query = "DELETE FROM jobs WHERE kind = ? AND id = ?"
+        params: list[Any] = [kind, job_id]
+        if organization_id is not None:
+            query += " AND organization_id = ?"
+            params.append(organization_id)
         with self._connect() as connection:
-            connection.execute("DELETE FROM jobs WHERE kind = ? AND id = ?", (kind, job_id))
+            connection.execute(query, tuple(params))
+
+    def upsert_artifact(self, *, organization_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        now = _utc_now_iso()
+        artifact_type = str(payload.get("artifact_type") or payload.get("type") or "artifact")
+        source_id = payload.get("source_id")
+        key = str(payload.get("key") or payload.get("storage_key") or payload.get("uri") or "")
+        artifact_id = str(payload.get("id") or self.stable_id("art", f"{organization_id}:{artifact_type}:{source_id}:{key}"))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO artifacts (
+                    id, organization_id, artifact_type, source_id, provider, storage_key, uri,
+                    file_count, byte_count, metadata_json, created_at_utc, updated_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    artifact_type = excluded.artifact_type,
+                    source_id = excluded.source_id,
+                    provider = excluded.provider,
+                    storage_key = excluded.storage_key,
+                    uri = excluded.uri,
+                    file_count = excluded.file_count,
+                    byte_count = excluded.byte_count,
+                    metadata_json = excluded.metadata_json,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    artifact_id,
+                    organization_id,
+                    artifact_type,
+                    source_id,
+                    str(payload.get("provider") or "unknown"),
+                    key,
+                    str(payload.get("uri") or ""),
+                    int(payload.get("file_count", 0) or 0),
+                    int(payload.get("byte_count", 0) or 0),
+                    _json_dump(payload.get("metadata", {})),
+                    str(payload.get("created_at_utc") or now),
+                    now,
+                ),
+            )
+            row = connection.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+        return self._artifact_row(row)
+
+    def _artifact_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        payload = dict(row)
+        payload["metadata"] = _json_load(payload.pop("metadata_json"), {})
+        payload["type"] = payload.get("artifact_type")
+        payload["key"] = payload.get("storage_key")
+        return payload
+
+    def get_artifact(self, *, organization_id: str, artifact_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM artifacts WHERE organization_id = ? AND id = ?",
+                (organization_id, artifact_id),
+            ).fetchone()
+        return None if row is None else self._artifact_row(row)
+
+    def list_artifacts(self, *, organization_id: str, artifact_type: str | None = None, source_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM artifacts WHERE organization_id = ?"
+        params: list[Any] = [organization_id]
+        if artifact_type is not None:
+            query += " AND artifact_type = ?"
+            params.append(artifact_type)
+        if source_id is not None:
+            query += " AND source_id = ?"
+            params.append(source_id)
+        query += " ORDER BY updated_at_utc DESC LIMIT ?"
+        params.append(int(limit))
+        with self._connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._artifact_row(row) for row in rows]
 
     def save_deployment_config(
         self,
@@ -1603,15 +1763,17 @@ class SQLiteMetadataStore:
         config_id: str,
         source: str,
         config: dict[str, Any],
+        organization_id: str | None = None,
         path: str | Path | None = None,
         created_at_utc: str | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO deployment_configs (id, source, path, config_json, created_at_utc)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO deployment_configs (id, organization_id, source, path, config_json, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    organization_id = excluded.organization_id,
                     source = excluded.source,
                     path = excluded.path,
                     config_json = excluded.config_json,
@@ -1619,6 +1781,7 @@ class SQLiteMetadataStore:
                 """,
                 (
                     config_id,
+                    organization_id,
                     source,
                     str(path) if path is not None else None,
                     _json_dump(config),
@@ -1629,13 +1792,14 @@ class SQLiteMetadataStore:
     def get_deployment_config(self, *, config_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, source, path, config_json, created_at_utc FROM deployment_configs WHERE id = ?",
+                "SELECT id, organization_id, source, path, config_json, created_at_utc FROM deployment_configs WHERE id = ?",
                 (config_id,),
             ).fetchone()
         if row is None:
             return None
         return {
             "id": row["id"],
+            "organization_id": row["organization_id"],
             "source": row["source"],
             "path": row["path"],
             "config": _json_load(row["config_json"], {}),
@@ -1648,15 +1812,17 @@ class SQLiteMetadataStore:
         experiment_id: str,
         kind: str,
         summary: dict[str, Any],
+        organization_id: str | None = None,
         artifact_dir: str | Path | None = None,
         created_at_utc: str | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO experiment_runs (id, kind, artifact_dir, summary_json, created_at_utc)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO experiment_runs (id, organization_id, kind, artifact_dir, summary_json, created_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    organization_id = excluded.organization_id,
                     kind = excluded.kind,
                     artifact_dir = excluded.artifact_dir,
                     summary_json = excluded.summary_json,
@@ -1664,6 +1830,7 @@ class SQLiteMetadataStore:
                 """,
                 (
                     experiment_id,
+                    organization_id,
                     kind,
                     str(artifact_dir) if artifact_dir is not None else None,
                     _json_dump(summary),
@@ -1671,18 +1838,25 @@ class SQLiteMetadataStore:
                 ),
             )
 
-    def list_experiment_runs(self, *, kind: str | None = None) -> list[dict[str, Any]]:
-        query = "SELECT id, kind, artifact_dir, summary_json, created_at_utc FROM experiment_runs"
-        params: tuple[str, ...] = tuple()
+    def list_experiment_runs(self, *, kind: str | None = None, organization_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT id, organization_id, kind, artifact_dir, summary_json, created_at_utc FROM experiment_runs"
+        clauses: list[str] = []
+        params: list[Any] = []
         if kind is not None:
-            query += " WHERE kind = ?"
-            params = (kind,)
+            clauses.append("kind = ?")
+            params.append(kind)
+        if organization_id is not None:
+            clauses.append("organization_id = ?")
+            params.append(organization_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at_utc DESC"
         with self._connect() as connection:
-            rows = connection.execute(query, params).fetchall()
+            rows = connection.execute(query, tuple(params)).fetchall()
         return [
             {
                 "id": row["id"],
+                "organization_id": row["organization_id"],
                 "kind": row["kind"],
                 "artifact_dir": row["artifact_dir"],
                 "summary": _json_load(row["summary_json"], {}),
@@ -1696,6 +1870,7 @@ class SQLiteMetadataStore:
             jobs = int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
             deployment_configs = int(connection.execute("SELECT COUNT(*) FROM deployment_configs").fetchone()[0])
             experiment_runs = int(connection.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0])
+            artifacts = int(connection.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0])
             users = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
             organizations = int(connection.execute("SELECT COUNT(*) FROM organizations").fetchone()[0])
             projects = int(connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
@@ -1711,6 +1886,7 @@ class SQLiteMetadataStore:
             jobs=jobs,
             deployment_configs=deployment_configs,
             experiment_runs=experiment_runs,
+            artifacts=artifacts,
             users=users,
             organizations=organizations,
             projects=projects,
@@ -1825,26 +2001,38 @@ class PostgresMetadataStore(SQLiteMetadataStore):
         finally:
             raw_connection.close()
 
-    def _migrate_auth_columns(self) -> None:
-        required_columns = {
-            "role": "TEXT NOT NULL DEFAULT 'user'",
-            "status": "TEXT NOT NULL DEFAULT 'active'",
-            "email_verified_at_utc": "TEXT",
-            "mfa_secret": "TEXT",
-            "mfa_enabled": "INTEGER NOT NULL DEFAULT 0",
+    def _migrate_legacy_columns(self) -> None:
+        required_by_table = {
+            "users": {
+                "role": "TEXT NOT NULL DEFAULT 'user'",
+                "status": "TEXT NOT NULL DEFAULT 'active'",
+                "email_verified_at_utc": "TEXT",
+                "mfa_secret": "TEXT",
+                "mfa_enabled": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "jobs": {"organization_id": "TEXT"},
+            "deployment_configs": {"organization_id": "TEXT"},
+            "experiment_runs": {"organization_id": "TEXT"},
+            "api_keys": {
+                "token_hash": "TEXT",
+                "scopes_json": "TEXT NOT NULL DEFAULT '[]'",
+                "last_used_at_utc": "TEXT",
+            },
         }
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'users'
-                """
-            ).fetchall()
-            existing = {str(row["column_name"]) for row in rows}
-            for column, definition in required_columns.items():
-                if column not in existing:
-                    connection.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+            for table, required_columns in required_by_table.items():
+                rows = connection.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = %s
+                    """,
+                    (table,),
+                ).fetchall()
+                existing = {str(row["column_name"]) for row in rows}
+                for column, definition in required_columns.items():
+                    if column not in existing:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def admin_metric_snapshot(self) -> dict[str, Any]:
         since_7d = datetime.now(UTC).replace(microsecond=0)

@@ -34,7 +34,7 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
     csrf_guard = require_csrf(settings)
 
     def set_auth_cookies(response: Response, payload: dict[str, Any]) -> None:
-        token = str(payload.get("access_token") or "")
+        token = str(payload.get("session_token") or "")
         csrf = str(payload.get("csrf_token") or "")
         if not token:
             return
@@ -59,6 +59,12 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
             csrf_kwargs["domain"] = settings.cookie_domain
         response.set_cookie(CSRF_COOKIE_NAME, csrf, **csrf_kwargs)
 
+    def public_auth_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        public = dict(payload)
+        public.pop("session_token", None)
+        public.pop("csrf_token", None)
+        return public
+
     def context(
         request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -79,7 +85,7 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
         try:
             payload = auth_service.login(email=request.email, password=request.password)
             set_auth_cookies(response, payload)
-            return payload
+            return public_auth_payload(payload)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
@@ -90,7 +96,7 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
         try:
             payload = auth_service.signup(request)
             set_auth_cookies(response, payload)
-            return payload
+            return public_auth_payload(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -101,6 +107,11 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
         active_organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> dict[str, Any]:
+        if credentials is not None and not credentials.credentials.startswith("qops_"):
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "machine_api_key_required", "message": "Bearer auth is reserved for scoped machine API keys; browser sessions use HttpOnly cookies."},
+            )
         token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
         if not token:
             raise HTTPException(status_code=401, detail="Login required.")
@@ -125,6 +136,11 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
 
     @router.post("/auth/logout")
     def logout(response: Response, request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict[str, str]:
+        if credentials is not None and not credentials.credentials.startswith("qops_"):
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "machine_api_key_required", "message": "Bearer auth is reserved for scoped machine API keys; browser sessions use HttpOnly cookies."},
+            )
         token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
         if token:
             auth_service.logout(token=token)
@@ -135,12 +151,45 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
 
     @router.post("/auth/csrf")
     def csrf(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict[str, str]:
+        if credentials is not None and not credentials.credentials.startswith("qops_"):
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "machine_api_key_required", "message": "Bearer auth is reserved for scoped machine API keys; browser sessions use HttpOnly cookies."},
+            )
         token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
         if not token:
             raise HTTPException(status_code=401, detail="Login required.")
         # Also verifies that the session still exists before issuing a token.
         auth_service.authenticate(token=token)
         return {"csrf_token": auth_service.csrf_token_for_session(token)}
+
+    @router.get("/account/export")
+    def export_account(ctx: RequestContext = Depends(context)) -> dict[str, Any]:
+        if ctx.user.get("machine"):
+            raise HTTPException(status_code=403, detail="Machine API keys cannot export user accounts.")
+        return saas_service.export_account(context=ctx)
+
+    @router.delete("/account")
+    def delete_account(
+        response: Response,
+        request: Request,
+        ctx: RequestContext = Depends(context),
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+        _: None = Depends(csrf_guard),
+    ) -> dict[str, Any]:
+        if ctx.user.get("machine"):
+            raise HTTPException(status_code=403, detail="Machine API keys cannot delete user accounts.")
+        try:
+            payload = saas_service.delete_account(context=ctx)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
+        if token:
+            auth_service.logout(token=token)
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/", domain=settings.cookie_domain)
+        response.delete_cookie(CSRF_COOKIE_NAME, path="/", domain=settings.cookie_domain)
+        response.delete_cookie(MFA_COOKIE_NAME, path="/", domain=settings.cookie_domain)
+        return payload
 
     @router.post("/auth/verify-email/request")
     def verify_email_request(request: EmailVerificationSendRequest) -> dict[str, Any]:
@@ -275,6 +324,13 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
             return billing_service.portal(organization_id=ctx.organization_id, return_url=request.return_url)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Stripe portal failed: {exc}") from exc
+
+    @router.post("/billing/sync")
+    def sync_billing(ctx: RequestContext = Depends(context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
+        try:
+            return billing_service.sync_subscription(organization_id=ctx.organization_id)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Stripe subscription sync failed: {exc}") from exc
 
     @router.post("/billing/webhook")
     async def stripe_webhook(request: Request) -> dict[str, Any]:

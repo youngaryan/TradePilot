@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, CheckCircle2, CreditCard, LockKeyhole, ShieldCheck } from "lucide-react";
 
-import { getBillingStatus, getPricing, openBillingPortal, startBillingCheckout } from "../api/client";
+import { getBillingStatus, getPricing, openBillingPortal, startBillingCheckout, syncBillingSubscription } from "../api/client";
 import type { BillingStatusPayload, PricingPayload, PricingPlan, WorkspacePayload } from "../api/types";
 import { Badge } from "../components/Badge";
 import { Explainer, MetricCard, Panel, SectionHeader } from "../components/Cards";
@@ -48,7 +48,7 @@ export function PricingPage({
   const subscription = billing?.subscription ?? workspace?.subscription ?? pricing?.subscription ?? null;
   const plans = useMemo(() => pricing?.plans ?? billing?.pricing ?? [], [pricing?.plans, billing?.pricing]);
   const isPremium = billing?.premium ?? (
-    ["active", "trialing"].includes(String(subscription?.status ?? "")) &&
+    String(subscription?.status ?? "") === "active" &&
     String(subscription?.plan ?? "free") !== "free"
   );
 
@@ -146,14 +146,27 @@ export function PricingPage({
             <CreditCard size={16} />
             Manage subscription
           </button>
-          <button type="button" className="ghost-button" onClick={() => void load()} disabled={isBusy}>
-            Refresh billing status
+          <button type="button" className="ghost-button" onClick={() => void (async () => {
+            setIsBusy(true);
+            setError(null);
+            setNotice(null);
+            try {
+              await syncBillingSubscription();
+              setNotice("Billing subscription synced from Stripe.");
+              await load();
+            } catch (caught) {
+              setError(caught instanceof Error ? caught.message : "Could not sync billing subscription.");
+            } finally {
+              setIsBusy(false);
+            }
+          })()} disabled={isBusy}>
+            Sync billing status
           </button>
         </div>
         <Explainer
           icon={<ShieldCheck size={17} />}
           title="Why the payment wall is server-side"
-          body="The frontend explains access, but the backend enforces it. Backtest, sentiment, paper-trading, and refresh run endpoints return payment_required unless the active workspace has a paid or trialing subscription."
+          body="The frontend explains access, but the backend enforces it. Backtest, sentiment, paper-trading, and refresh run endpoints return payment_required unless the active workspace has an active paid subscription."
         />
       </Panel>
     </div>

@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   Sparkles,
   SunMoon,
+  UserCircle,
   UserCog
 } from "lucide-react";
 
@@ -35,6 +36,9 @@ import {
   listBacktestJobs,
   listPaperRunJobs,
   logout as logoutRequest,
+  confirmPasswordReset,
+  verifyEmail,
+  requestPasswordReset,
   setActiveOrganizationId,
   setApiAuth,
   signup as signupRequest,
@@ -54,6 +58,7 @@ import type {
 } from "./api/types";
 import { Badge } from "./components/Badge";
 import { EmptyState } from "./components/Cards";
+import { AccountSecurity } from "./features/AccountSecurity";
 import { AdminDashboard } from "./features/AdminDashboard";
 import { BacktestLab } from "./features/BacktestLab";
 import { CommandCenter } from "./features/CommandCenter";
@@ -64,7 +69,7 @@ import { SentimentLab } from "./features/SentimentLab";
 import { SystemGuide } from "./features/SystemGuide";
 import { formatCurrency, formatNumber } from "./utils/format";
 
-type ViewId = "command" | "workspace" | "pricing" | "live" | "sentiment" | "backtests" | "admin" | "system";
+type ViewId = "command" | "workspace" | "account" | "pricing" | "live" | "sentiment" | "backtests" | "admin" | "system";
 type ThemeMode = "light" | "dark" | "system";
 type TelemetryConsent = "granted" | "denied";
 
@@ -80,6 +85,12 @@ const views: Array<{ id: ViewId; label: string; description: string; icon: React
     label: "Setup",
     description: "Your workspace, onboarding checklist, billing, refresh status, and saved records.",
     icon: <ShieldCheck size={18} />
+  },
+  {
+    id: "account",
+    label: "Account",
+    description: "Manage email verification, password reset, MFA, data export, and account deletion.",
+    icon: <UserCircle size={18} />
   },
   {
     id: "pricing",
@@ -214,6 +225,7 @@ const landingFaqs = [
 const viewHeadlines: Record<ViewId, string> = {
   command: "Understand your fake-money book at a glance.",
   workspace: "Set up the SaaS workspace behind the research.",
+  account: "Manage your account security and data rights.",
   pricing: "Upgrade only when the workflow is worth unlocking.",
   live: "Deploy paper agents with clear controls and guardrails.",
   sentiment: "Build the news dataset before agents trade from it.",
@@ -252,6 +264,13 @@ const legalPages: Record<string, { title: string; body: string[] }> = {
       "Nothing in QuantOps is financial advice. Backtests, sentiment scores, and fake-money paper results are educational and may not predict live trading outcomes.",
       "The product does not place real-money broker orders in this version. Add real trading only after legal, compliance, and operational review."
     ]
+  },
+  "/compliance": {
+    title: "Compliance Boundary",
+    body: [
+      "QuantOps is limited to research workflows and fake-money paper trading. The product should not be marketed as investment advice, guaranteed performance, signal recommendations, or automated real-money trading.",
+      "Commercial deployments must review data-provider terms, maintain risk disclaimers, honor privacy/export/delete requests, and keep billing, telemetry, and user-management audit logs."
+    ]
   }
 };
 
@@ -282,11 +301,13 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("demo@quantops.local");
   const [password, setPassword] = useState("quantops-demo");
+  const [newPassword, setNewPassword] = useState("");
   const [displayName, setDisplayName] = useState("Research Lead");
   const [organizationName, setOrganizationName] = useState("Northstar Quant Lab");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const legalPage = legalPages[window.location.pathname];
+  const authToken = new URLSearchParams(window.location.search).get("token") ?? "";
 
   function trackLanding(name: string, properties: Record<string, unknown> = {}) {
     void trackTelemetryEvent({
@@ -380,6 +401,119 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
     setPassword("quantops-user");
   }
 
+  async function submitVerifyEmail() {
+    setIsLoading(true);
+    setError(null);
+    try {
+      await verifyEmail(authToken);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Email verification failed.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function submitPasswordResetRequest() {
+    setIsLoading(true);
+    setError(null);
+    try {
+      await requestPasswordReset(email);
+      setError("If the account exists, reset instructions were sent. In development, check artifacts/email_outbox.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Password reset request failed.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function submitPasswordResetConfirm() {
+    setIsLoading(true);
+    setError(null);
+    try {
+      await confirmPasswordReset(authToken, newPassword);
+      setError("Password updated. You can log in now.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Password reset failed.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  if (window.location.pathname === "/verify-email") {
+    return (
+      <div className="marketing-shell">
+        <header className="marketing-nav">
+          <a className="marketing-brand" href="/" aria-label="QuantOps home"><BrainCircuit size={24} /><span>QuantOps</span></a>
+          <nav aria-label="Auth navigation"><a href="/">Home</a><a href="/terms">Terms</a></nav>
+        </header>
+        <main className="auth-utility-page">
+          <section className="signin-card">
+            <Badge label="email verification" tone="good" />
+            <h1>Verify your email</h1>
+            <p>Use the secure one-time token from your email to activate production login.</p>
+            <label>
+              Verification token
+              <input value={authToken} readOnly />
+            </label>
+            {error ? <span className="form-error">{error}</span> : null}
+            <button type="button" className="primary-button" onClick={() => void submitVerifyEmail()} disabled={isLoading || !authToken}>
+              {isLoading ? "Verifying" : "Verify email"}
+              <ArrowRight size={17} />
+            </button>
+            <a className="secondary-link" href="/">Back to login</a>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (window.location.pathname === "/password-reset") {
+    return (
+      <div className="marketing-shell">
+        <header className="marketing-nav">
+          <a className="marketing-brand" href="/" aria-label="QuantOps home"><BrainCircuit size={24} /><span>QuantOps</span></a>
+          <nav aria-label="Auth navigation"><a href="/">Home</a><a href="/terms">Terms</a></nav>
+        </header>
+        <main className="auth-utility-page">
+          <section className="signin-card">
+            <Badge label="password reset" tone="warn" />
+            <h1>{authToken ? "Choose a new password" : "Request a reset link"}</h1>
+            {authToken ? (
+              <>
+                <label>
+                  Reset token
+                  <input value={authToken} readOnly />
+                </label>
+                <label>
+                  New password
+                  <input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+                </label>
+                <button type="button" className="primary-button" onClick={() => void submitPasswordResetConfirm()} disabled={isLoading || newPassword.length < 8}>
+                  {isLoading ? "Updating" : "Update password"}
+                  <ArrowRight size={17} />
+                </button>
+              </>
+            ) : (
+              <>
+                <label>
+                  Account email
+                  <input value={email} onChange={(event) => setEmail(event.target.value)} />
+                </label>
+                <button type="button" className="primary-button" onClick={() => void submitPasswordResetRequest()} disabled={isLoading}>
+                  {isLoading ? "Sending" : "Send reset link"}
+                  <ArrowRight size={17} />
+                </button>
+              </>
+            )}
+            {error ? <span className="form-error">{error}</span> : null}
+            <a className="secondary-link" href="/">Back to login</a>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   if (legalPage) {
     return (
       <div className="marketing-shell">
@@ -392,6 +526,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
             <a href="/privacy">Privacy</a>
             <a href="/terms">Terms</a>
             <a href="/risk-disclaimer">Risk</a>
+            <a href="/compliance">Compliance</a>
             <a href="/">Home</a>
           </nav>
         </header>
@@ -599,6 +734,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
         <a className="secondary-link" href="/privacy">Privacy</a>
         <a className="secondary-link" href="/terms">Terms</a>
         <a className="secondary-link" href="/risk-disclaimer">Risk disclaimer</a>
+        <a className="secondary-link" href="/compliance">Compliance</a>
       </footer>
     </div>
   );
@@ -719,7 +855,7 @@ export default function App() {
     const subscription = workspace?.subscription;
     const plan = String(subscription?.plan ?? "free");
     const status = String(subscription?.status ?? "");
-    return plan !== "free" && ["active", "trialing"].includes(status);
+    return plan !== "free" && status === "active";
   }, [workspace?.subscription]);
   const visibleViews = useMemo(
     () => views.filter((view) => !view.adminOnly || auth?.user.role === "admin"),
@@ -1000,7 +1136,7 @@ export default function App() {
             <LockKeyhole size={20} />
             <div>
               <strong>Free workspace active</strong>
-              <span>Premium runs are locked until this workspace has an active paid or trialing subscription.</span>
+              <span>Premium runs are locked until this workspace has an active paid subscription.</span>
             </div>
             <button type="button" className="primary-button" onClick={() => navigateTo("pricing")}>View pricing</button>
           </section>
@@ -1056,6 +1192,8 @@ export default function App() {
             onNavigate={navigateTo}
           />
         ) : null}
+
+        {activeView === "account" ? <AccountSecurity auth={auth} onDeleted={() => void handleLogout()} /> : null}
 
         {activeView === "pricing" ? (
           <PricingPage workspace={workspace} reason={paymentWallReason} onRefresh={refreshAll} />

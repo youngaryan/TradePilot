@@ -77,6 +77,7 @@ class BackendSettings:
     stripe_secret_key: str | None = None
     stripe_pro_price_id: str | None = None
     stripe_price_pro_monthly: str | None = None
+    stripe_price_team_monthly: str | None = None
     stripe_success_url: str | None = None
     stripe_cancel_url: str | None = None
     stripe_webhook_secret: str | None = None
@@ -95,6 +96,13 @@ class BackendSettings:
     @property
     def effective_stripe_pro_price_id(self) -> str | None:
         return self.stripe_price_pro_monthly or self.stripe_pro_price_id
+
+    @property
+    def stripe_plan_price_ids(self) -> dict[str, str | None]:
+        return {
+            "pro": self.effective_stripe_pro_price_id,
+            "team": self.stripe_price_team_monthly,
+        }
 
     def validate_for_startup(self) -> None:
         """Fail closed when the API is explicitly started in production mode."""
@@ -192,6 +200,7 @@ class BackendSettings:
             stripe_secret_key=os.getenv("STRIPE_SECRET_KEY"),
             stripe_pro_price_id=os.getenv("STRIPE_PRO_PRICE_ID"),
             stripe_price_pro_monthly=os.getenv("STRIPE_PRICE_PRO_MONTHLY"),
+            stripe_price_team_monthly=os.getenv("STRIPE_PRICE_TEAM_MONTHLY"),
             stripe_success_url=os.getenv("STRIPE_SUCCESS_URL"),
             stripe_cancel_url=os.getenv("STRIPE_CANCEL_URL"),
             stripe_webhook_secret=os.getenv("STRIPE_WEBHOOK_SECRET"),

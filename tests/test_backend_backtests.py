@@ -22,9 +22,11 @@ class BackendBacktestTests(unittest.TestCase):
     def auth_headers(self, client, *, email: str = "demo@quantops.local", password: str = "quantops-demo") -> dict[str, str]:
         login = client.post("/api/auth/login", json={"email": email, "password": password})
         self.assertEqual(login.status_code, 200)
+        cookie = "; ".join(f"{key}={value}" for key, value in login.cookies.items())
         return {
-            "Authorization": f"Bearer {login.json()['access_token']}",
+            "Cookie": cookie,
             "X-Organization-Id": login.json()["active_organization_id"],
+            "X-CSRF-Token": login.cookies.get("quantops_csrf") or "",
         }
 
     def test_backtest_job_routes_submit_and_complete(self) -> None:

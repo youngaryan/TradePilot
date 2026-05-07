@@ -77,6 +77,7 @@ def create_app(settings: BackendSettings | None = None) -> FastAPI:
         description="Backend API for paper trading dashboards, research artifacts, and future live operations.",
         lifespan=lifespan,
     )
+    app.state.settings = app_settings
     instrument_app(app, app_settings)
     app.add_middleware(
         CORSMiddleware,

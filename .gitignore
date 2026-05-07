@@ -1,5 +1,6 @@
 *venv
 *.pyc
+*.env
 __pycache__/
 .coverage
 .pytest_cache/
@@ -14,3 +15,5 @@ data/sentiment_cache/
 data/yfinance_tz_cache/
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/

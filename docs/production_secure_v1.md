@@ -41,9 +41,14 @@ Production also requires:
 - `ENABLE_IN_PROCESS_JOBS=false`
 - HTTPS cookies through `COOKIE_SECURE=true`
 
+Operational runbooks:
+- `docs/production_operations.md`
+- `docs/rate_limit_policies.md`
+- `docs/legal_compliance_launch.md`
+
 ## Security model
 
-Browser auth uses HttpOnly `quantops_session` cookies. Mutating browser requests must include `X-CSRF-Token`, sourced from the non-HttpOnly `quantops_csrf` cookie. Bearer tokens are still accepted for CLI/test compatibility but should not be stored by the frontend.
+Browser auth uses HttpOnly `quantops_session` cookies. Mutating browser requests must include `X-CSRF-Token`, sourced from the non-HttpOnly `quantops_csrf` cookie. `Authorization: Bearer` is reserved for scoped `qops_...` machine API keys; user session tokens are rejected when sent as bearer credentials.
 
 Artifact-style endpoints require authentication. Normal users cannot access admin routes, and production admin APIs require an MFA verification cookie.
 

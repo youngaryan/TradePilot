@@ -48,8 +48,11 @@ class BacktestRunRequest(BaseModel):
     interval: str = Field(default="1d", description="Market data interval.")
     experiment_name: str | None = Field(default=None, description="Optional experiment name.")
     artifact_root: Path | None = Field(default=None, description="Optional artifact root. Defaults to backend settings.")
+    artifact_id: str | None = Field(default=None, description="Tenant-owned artifact id for production reads.")
     sector_map_path: Path | None = Field(default=None, description="Sector map path for stat-arb runs.")
+    sector_dataset_id: str | None = Field(default=None, description="Tenant-owned sector-map dataset id for production runs.")
     event_file: Path | None = Field(default=None, description="Event file path for event-driven runs.")
+    event_dataset_id: str | None = Field(default=None, description="Tenant-owned event dataset id for production event runs.")
     use_sec_companyfacts: bool = Field(default=False, description="Use SEC company facts for event-driven runs.")
     include_sec_filings: bool = Field(default=False, description="Include official SEC filing events such as 8-K, 10-Q, and 10-K.")
     sec_filing_forms: list[str] = Field(
@@ -94,7 +97,7 @@ class SentimentAccumulationRequest(BaseModel):
     newsapi_api_key: str | None = Field(default=None, description="Optional NewsAPI.org key. Backend env NEWSAPI_API_KEY is also supported.")
     alphavantage_api_key: str | None = Field(default=None, description="Optional Alpha Vantage key. Backend env ALPHAVANTAGE_API_KEY is also supported.")
     benzinga_api_key: str | None = Field(default=None, description="Optional Benzinga key. Backend env BENZINGA_API_KEY is also supported.")
-    output_dir: Path | None = Field(default=None, description="Output directory for raw/scored/daily sentiment files.")
+    output_dir: Path | None = Field(default=None, description="Development-only output directory. Production rejects raw paths and registers tenant dataset ids.")
     use_finbert: bool = Field(default=False, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
     local_finbert_only: bool = Field(default=True, description="Do not download FinBERT during UI runs.")
 
@@ -141,8 +144,6 @@ class AuthenticatedUser(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
     user: AuthenticatedUser
     organizations: list[dict[str, Any]]
     active_organization_id: str | None = None
@@ -158,11 +159,15 @@ class ApiKeyCreateRequest(BaseModel):
     provider: str = Field(min_length=2, max_length=80)
     secret: str | None = Field(default=None, description="Accepted for masking only in the local prototype; production should use a vault.")
     secret_ref: str | None = Field(default=None, description="Environment/vault reference, for example NEWSAPI_API_KEY.")
+    scopes: list[str] = Field(
+        default_factory=lambda: ["read"],
+        description="Machine API-key scopes, for example read, backtests:run, sentiment:run, paper:run.",
+    )
 
 
 class BillingCheckoutRequest(BaseModel):
     plan: str = Field(default="pro", description="Requested plan id, such as pro or team.")
-    price_id: str | None = Field(default=None, description="Optional Stripe Price id. Defaults to STRIPE_PRO_PRICE_ID.")
+    price_id: str | None = Field(default=None, description="Deprecated development-only override. Production maps plan ids to server-owned Stripe Price ids.")
 
 
 class BillingPortalRequest(BaseModel):

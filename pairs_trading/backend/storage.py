@@ -27,6 +27,9 @@ class ArtifactStorage(Protocol):
     def publish_file(self, source_path: str | Path, *, organization_id: str, artifact_type: str, artifact_id: str) -> ArtifactReference:
         ...
 
+    def materialize_directory(self, reference: ArtifactReference, destination: str | Path) -> Path:
+        ...
+
 
 @dataclass(frozen=True)
 class LocalArtifactStorage:
@@ -55,6 +58,19 @@ class LocalArtifactStorage:
             shutil.copy2(source, destination)
         byte_count = destination.stat().st_size if destination.exists() else (source.stat().st_size if source.exists() else 0)
         return ArtifactReference(provider="local", key=key, uri=str(destination), file_count=1 if byte_count else 0, byte_count=byte_count)
+
+    def materialize_directory(self, reference: ArtifactReference, destination: str | Path) -> Path:
+        source = Path(reference.key or reference.uri)
+        if not source.exists():
+            return source
+        target = Path(destination)
+        if source.resolve() == target.resolve():
+            return target
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        return target
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,25 @@ class S3ArtifactStorage:
         if source.exists():
             self._ready_client().upload_file(str(source), self.bucket, key)
         return ArtifactReference(provider="s3", key=key, uri=f"s3://{self.bucket}/{key}", file_count=1 if byte_count else 0, byte_count=byte_count)
+
+    def materialize_directory(self, reference: ArtifactReference, destination: str | Path) -> Path:
+        target = Path(destination)
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+        prefix = reference.key.rstrip("/") + "/"
+        client = self._ready_client()
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = item.get("Key")
+                if not key or key.endswith("/"):
+                    continue
+                relative = key[len(prefix):]
+                output_path = target / relative
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                client.download_file(self.bucket, key, str(output_path))
+        return target
 
 
 def _directory_stats(path: Path) -> tuple[int, int]:

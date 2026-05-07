@@ -24,6 +24,7 @@ def build_system_router(settings: BackendSettings) -> APIRouter:
                 "jobs": counts.jobs,
                 "deployment_configs": counts.deployment_configs,
                 "experiment_runs": counts.experiment_runs,
+                "artifacts": counts.artifacts,
                 "users": counts.users,
                 "organizations": counts.organizations,
                 "projects": counts.projects,

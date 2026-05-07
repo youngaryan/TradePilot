@@ -116,7 +116,12 @@ export function SaaSWorkspace({
   const [activeExperiment, setActiveExperiment] = useState<ExperimentRecord | null>(workspace?.experiments[0] ?? null);
   const [activeAgent, setActiveAgent] = useState<PaperAgentRecord | null>(workspace?.paper_agents[0] ?? null);
   const [projectName, setProjectName] = useState("ETF validation lab");
-  const [apiKeyForm, setApiKeyForm] = useState<ApiKeyCreateRequest>({ name: "NewsAPI research key", provider: "newsapi", secret_ref: "NEWSAPI_API_KEY" });
+  const [apiKeyForm, setApiKeyForm] = useState<ApiKeyCreateRequest>({
+    name: "Worker machine key",
+    provider: "machine",
+    secret_ref: null,
+    scopes: ["read", "backtests:run", "sentiment:run", "paper:run"]
+  });
   const [isBusy, setIsBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -175,8 +180,12 @@ export function SaaSWorkspace({
     setError(null);
     setNotice(null);
     try {
-      await createApiKeyMetadata(apiKeyForm);
-      setNotice("API key metadata saved. For production, secrets should move to a real vault such as AWS Secrets Manager or Stripe-managed keys.");
+      const created = await createApiKeyMetadata(apiKeyForm);
+      setNotice(
+        created.token
+          ? `Machine API key created. Store it now: ${created.token}`
+          : "API key metadata saved. Production accepts secret references and scoped machine keys, not raw browser-visible tokens."
+      );
       await refreshWorkspace();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save API key metadata.");
@@ -482,7 +491,7 @@ export function SaaSWorkspace({
               rows={workspace.datasets}
             />
           </Panel>
-          <Panel title="API key metadata" subtitle="Secrets should live in a vault; this prototype stores masked metadata and references.">
+          <Panel title="Scoped API keys" subtitle="Users stay on HttpOnly cookies. Machines use separately scoped API keys. Leave secret fields blank to generate one.">
             <div className="form-grid">
               <label>
                 Name
@@ -500,10 +509,14 @@ export function SaaSWorkspace({
                 Secret value for masking only
                 <input value={apiKeyForm.secret ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret: event.target.value, secret_ref: null })} />
               </label>
+              <label>
+                Machine scopes
+                <input value={(apiKeyForm.scopes ?? []).join(" ")} onChange={(event) => setApiKeyForm({ ...apiKeyForm, scopes: event.target.value.split(/\s+/).filter(Boolean) })} />
+              </label>
             </div>
             <button type="button" className="primary-button" onClick={() => void handleCreateApiKey()} disabled={isBusy}>
               <KeyRound size={16} />
-              Save API key metadata
+              Save or generate API key
             </button>
             <DataTable
               empty="No API key metadata has been saved yet."
@@ -511,6 +524,7 @@ export function SaaSWorkspace({
               columns={[
                 { key: "name", header: "Name", render: (key) => key.name },
                 { key: "provider", header: "Provider", render: (key) => key.provider },
+                { key: "scopes", header: "Scopes", render: (key) => (key.scopes ?? []).join(", ") || "metadata only" },
                 { key: "masked", header: "Masked", render: (key) => key.masked_value },
                 { key: "status", header: "Status", render: (key) => <Badge label={key.status} tone="good" /> }
               ]}
@@ -621,7 +635,7 @@ export function SaaSWorkspace({
               <CreditCard size={24} />
               <div>
                 <strong>{subscription?.plan ?? "free"} / {subscription?.status ?? "not configured"}</strong>
-                <span>Set STRIPE_SECRET_KEY and STRIPE_PRO_PRICE_ID to create real Checkout sessions.</span>
+                  <span>Set STRIPE_SECRET_KEY and STRIPE_PRICE_PRO_MONTHLY to create real Checkout sessions.</span>
               </div>
             </div>
             <div className="button-cluster">

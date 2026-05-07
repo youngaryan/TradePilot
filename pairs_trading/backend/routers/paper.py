@@ -20,38 +20,43 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
     runner = PaperRunJobRunner(settings)
     quotas = QuotaService(settings)
     auth_context = require_auth_context(settings)
-    paid_context = require_paid_context(settings, feature="Paper trading agents")
+    paid_context = require_paid_context(settings, feature="Paper trading agents", machine_scope="paper:run")
     csrf_guard = require_csrf(settings)
 
     @router.get("/summary")
     def get_summary(
-        batch_summary_path: str | None = Query(default=None, description="Optional explicit paper_batch_summary.json path."),
+        paper_agent_id: str | None = Query(default=None, description="Optional tenant-owned paper agent id."),
         ctx: RequestContext = Depends(auth_context),
     ) -> dict[str, Any]:
-        payload = service.build_dashboard_payload(organization_id=ctx.organization_id, batch_summary_path=batch_summary_path)
+        payload = service.build_dashboard_payload(organization_id=ctx.organization_id, paper_agent_id=paper_agent_id)
         return redact_paths(payload) if settings.is_production else payload
 
     @router.get("/strategies")
     def list_strategies(
-        batch_summary_path: str | None = Query(default=None, description="Optional explicit paper_batch_summary.json path."),
+        paper_agent_id: str | None = Query(default=None, description="Optional tenant-owned paper agent id."),
         ctx: RequestContext = Depends(auth_context),
     ) -> list[dict[str, Any]]:
-        strategies = service.list_strategies(organization_id=ctx.organization_id, batch_summary_path=batch_summary_path)
+        strategies = service.list_strategies(organization_id=ctx.organization_id, paper_agent_id=paper_agent_id)
         return redact_paths(strategies) if settings.is_production else strategies
 
     @router.get("/strategies/{strategy_name}")
     def get_strategy(
         strategy_name: str,
-        batch_summary_path: str | None = Query(default=None, description="Optional explicit paper_batch_summary.json path."),
+        paper_agent_id: str | None = Query(default=None, description="Optional tenant-owned paper agent id."),
         ctx: RequestContext = Depends(auth_context),
     ) -> dict[str, Any]:
-        strategy = service.get_strategy(organization_id=ctx.organization_id, strategy_name=strategy_name, batch_summary_path=batch_summary_path)
+        strategy = service.get_strategy(organization_id=ctx.organization_id, strategy_name=strategy_name, paper_agent_id=paper_agent_id)
         if strategy is None:
             raise HTTPException(status_code=404, detail=f"Strategy not found: {strategy_name}")
         return redact_paths(strategy) if settings.is_production else strategy
 
     @router.post("/run")
     def run_batch(request: PaperRunRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
+        if settings.is_production:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "queued_execution_required", "message": "Production paper execution must use /api/paper/run-job."},
+            )
         try:
             quotas.check_and_record(
                 organization_id=ctx.organization_id,
@@ -79,6 +84,11 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
 
     @router.post("/run-job", status_code=202)
     def run_batch_job(request: PaperRunRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
+        if settings.is_production and request.deployment_config_path is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "raw_path_rejected", "message": "Production paper jobs require inline deployment_config or tenant-owned config records, not raw filesystem paths."},
+            )
         try:
             quotas.check_and_record(
                 organization_id=ctx.organization_id,

@@ -22,6 +22,7 @@ from .email import EmailService
 from .quotas import DEFAULT_QUOTAS
 from .redaction import redact_paths
 from .schemas import ApiKeyCreateRequest, BillingCheckoutRequest, SignupRequest
+from .storage import ArtifactReference, build_artifact_storage
 
 
 DEMO_EMAIL = "demo@quantops.local"
@@ -137,8 +138,7 @@ class AuthService:
         self.store.create_auth_session(user_id=str(user["id"]), token=token, expires_at_utc=expires_at)
         organizations = self.store.list_organizations_for_user(user_id=str(user["id"]))
         return {
-            "access_token": token,
-            "token_type": "bearer",
+            "session_token": token,
             "csrf_token": self.csrf_token_for_session(token),
             "expires_at_utc": expires_at,
             "user": self.public_user(user),
@@ -172,6 +172,8 @@ class AuthService:
         return self.login(email=email, password=request.password)
 
     def authenticate(self, *, token: str, organization_id: str | None = None) -> RequestContext:
+        if token.startswith("qops_"):
+            return self.authenticate_machine_key(token=token, organization_id=organization_id)
         session = self.store.get_auth_session(token=token)
         if session is None:
             raise ValueError("Authentication required.")
@@ -184,6 +186,26 @@ class AuthService:
         if active_org is None or not self.store.user_has_organization_access(user_id=str(user["id"]), organization_id=active_org):
             raise PermissionError("You do not have access to this workspace.")
         return RequestContext(user=self.public_user(user), organization_id=active_org)
+
+    def authenticate_machine_key(self, *, token: str, organization_id: str | None = None) -> RequestContext:
+        api_key = self.store.get_api_key_by_token_hash(token_hash=self.store.hash_token(token))
+        if api_key is None:
+            raise ValueError("Authentication required.")
+        key_org = str(api_key.get("organization_id") or "")
+        if not key_org:
+            raise PermissionError("API key is not scoped to a workspace.")
+        if organization_id and organization_id != key_org:
+            raise PermissionError("API key cannot access the requested workspace.")
+        machine_user = {
+            "id": f"api_key:{api_key.get('id')}",
+            "email": f"{api_key.get('provider', 'machine')}@machine.quantops.local",
+            "display_name": str(api_key.get("name") or "Machine API key"),
+            "role": "user",
+            "status": "active",
+            "machine": True,
+            "scopes": api_key.get("scopes", []),
+        }
+        return RequestContext(user=machine_user, organization_id=key_org)
 
     def me(self, *, token: str, organization_id: str | None = None) -> dict[str, Any]:
         context = self.authenticate(token=token, organization_id=organization_id)
@@ -321,6 +343,7 @@ class SaaSService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
         self.store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
 
     def workspace_payload(self, *, organization_id: str) -> dict[str, Any]:
         self.sync_default_datasets(organization_id=organization_id)
@@ -361,21 +384,64 @@ class SaaSService:
         return self.store.create_project(organization_id=organization_id, name=name, description=description)
 
     def create_api_key_metadata(self, *, organization_id: str, request: ApiKeyCreateRequest) -> dict[str, Any]:
+        if request.secret and self.settings.is_production:
+            raise ValueError("Production rejects raw API secrets. Use a secret_ref or generate a scoped machine API key.")
+        scopes = sorted({str(scope).strip().lower() for scope in request.scopes if str(scope).strip()}) or ["read"]
+        generated_token: str | None = None
+        token_hash: str | None = None
+        secret_for_masking = request.secret
         if not request.secret and not request.secret_ref:
-            raise ValueError("Provide either a secret value to mask or a secret_ref such as NEWSAPI_API_KEY.")
-        return self.store.create_api_key_metadata(
+            generated_token = f"qops_{secrets.token_urlsafe(32)}"
+            token_hash = self.store.hash_token(generated_token)
+            secret_for_masking = generated_token
+        record = self.store.create_api_key_metadata(
             organization_id=organization_id,
             name=request.name,
             provider=request.provider,
-            secret=request.secret,
+            secret=secret_for_masking,
             secret_ref=request.secret_ref,
+            token_hash=token_hash,
+            scopes=scopes,
         )
+        if generated_token:
+            record["token"] = generated_token
+            record["message"] = "Store this machine API key now. It will not be shown again."
+        return record
+
+    def export_account(self, *, context: RequestContext) -> dict[str, Any]:
+        organizations = self.store.list_organizations_for_user(user_id=str(context.user["id"]))
+        return {
+            "exported_at_utc": utc_now_iso(),
+            "user": context.user,
+            "organizations": organizations,
+            "active_organization_id": context.organization_id,
+            "workspace": self.workspace_payload(organization_id=context.organization_id),
+            "audit_note": "Export includes metadata visible to this workspace. Heavy artifacts remain available through tenant artifact IDs.",
+        }
+
+    def delete_account(self, *, context: RequestContext) -> dict[str, Any]:
+        user_id = str(context.user["id"])
+        if str(context.user.get("role") or "user") == "admin" and self.store.count_active_admins() <= 1:
+            raise PermissionError("At least one active admin must remain before this account can be deleted.")
+        updated = self.store.update_user_status(user_id=user_id, status="inactive")
+        self.store.record_audit_log(
+            action="account.deleted",
+            organization_id=context.organization_id,
+            actor_user_id=user_id,
+            target_type="user",
+            target_id=user_id,
+            metadata={"method": "self_service_soft_delete"},
+        )
+        return {"status": "deactivated", "user": AuthService.public_user(updated or context.user)}
 
     def sync_default_datasets(self, *, organization_id: str) -> None:
+        if self.settings.is_production:
+            # Production datasets are registered by the worker after publishing
+            # tenant-scoped artifacts. Request-time filesystem scans would break
+            # isolation and fail when API/worker containers do not share disks.
+            return
         sentiment_path = (
-            self.settings.sentiment_cache_dir / "organizations" / organization_id / "shadow" / "daily_sentiment.parquet"
-            if self.settings.is_production
-            else self.settings.sentiment_cache_dir / "shadow" / "daily_sentiment.parquet"
+            self.settings.sentiment_cache_dir / "shadow" / "daily_sentiment.parquet"
         )
         if sentiment_path.exists():
             try:
@@ -427,24 +493,23 @@ class SaaSService:
         return dataset
 
     def get_artifact(self, *, organization_id: str, artifact_id: str) -> dict[str, Any] | None:
-        # Secure v1 exposes artifact lookup by tenant-owned IDs only. The local
-        # artifact object store migration can hydrate this record later without
-        # reintroducing raw path query parameters.
-        for dataset in self.store.list_datasets(organization_id=organization_id):
-            if dataset.get("id") == artifact_id:
-                return self.get_dataset(organization_id=organization_id, dataset_id=artifact_id)
-        return None
+        artifact = self.store.get_artifact(organization_id=organization_id, artifact_id=artifact_id)
+        if artifact is not None and self.settings.is_production:
+            artifact = {**artifact, "uri": None, "storage_key": None, "key": None}
+        return artifact
 
     def get_experiment(self, *, organization_id: str, experiment_id: str) -> dict[str, Any] | None:
         self.sync_experiment_runs(organization_id=organization_id)
         experiment = self.store.get_experiment(organization_id=organization_id, experiment_id=experiment_id)
         if experiment is not None:
-            detail = self.enrich_experiment_detail(experiment)
+            detail = self.enrich_experiment_detail(experiment, organization_id=organization_id)
             return redact_paths(detail) if self.settings.is_production else detail
         return None
 
     def sync_experiment_runs(self, *, organization_id: str) -> None:
-        for run in self.store.list_experiment_runs(kind="backtest"):
+        if self.settings.is_production:
+            return
+        for run in self.store.list_experiment_runs(kind="backtest", organization_id=organization_id):
             artifact_dir = Path(str(run.get("artifact_dir") or ""))
             summary = dict(run.get("summary") or {})
             validation = _json_file(artifact_dir / "validation.json") if artifact_dir.exists() else {}
@@ -479,11 +544,35 @@ class SaaSService:
                 },
             )
 
-    def enrich_experiment_detail(self, experiment: dict[str, Any]) -> dict[str, Any]:
-        artifact_dir = Path(str(experiment.get("artifact_dir") or ""))
+    def _materialize_experiment_artifact(self, *, organization_id: str, experiment: dict[str, Any]) -> Path | None:
+        summary = experiment.get("summary") if isinstance(experiment.get("summary"), dict) else {}
+        artifact_id = str(summary.get("artifact_id") or "")
+        if not artifact_id:
+            return None
+        artifact = self.store.get_artifact(organization_id=organization_id, artifact_id=artifact_id)
+        if not artifact:
+            return None
+        reference = ArtifactReference(
+            provider=str(artifact.get("provider") or "local"),
+            key=str(artifact.get("storage_key") or artifact.get("key") or ""),
+            uri=str(artifact.get("uri") or ""),
+            file_count=int(artifact.get("file_count", 0) or 0),
+            byte_count=int(artifact.get("byte_count", 0) or 0),
+        )
+        target = self.settings.backtest_artifact_root / "materialized" / organization_id / str(experiment.get("id") or artifact_id)
+        return self.artifact_storage.materialize_directory(reference, target)
+
+    def enrich_experiment_detail(self, experiment: dict[str, Any], *, organization_id: str) -> dict[str, Any]:
+        if self.settings.is_production:
+            materialized = self._materialize_experiment_artifact(organization_id=organization_id, experiment=experiment)
+            artifact_dir = materialized if materialized is not None else Path("")
+        else:
+            artifact_dir = Path(str(experiment.get("artifact_dir") or ""))
         if artifact_dir.exists():
+            files = sorted(path for path in artifact_dir.rglob("*") if path.is_file() and path.name != ".DS_Store")
             experiment["artifact_files"] = sorted(
-                str(path) for path in artifact_dir.rglob("*") if path.is_file() and path.name != ".DS_Store"
+                str(path.relative_to(artifact_dir)) if self.settings.is_production else str(path)
+                for path in files
             )
             equity_path = artifact_dir / "equity_curve.parquet"
             if equity_path.exists():
@@ -539,6 +628,7 @@ class BillingService:
 
     def pricing(self, *, organization_id: str | None = None) -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id) if organization_id else None
+        configured_prices = self.settings.stripe_plan_price_ids
         plans = [
             {
                 "id": "free",
@@ -568,6 +658,7 @@ class BillingService:
                 ],
                 "premium": True,
                 "recommended": True,
+                "stripe_configured": bool(configured_prices.get("pro")),
                 "cta": "Upgrade to Pro",
             },
             {
@@ -583,6 +674,7 @@ class BillingService:
                     "Priority path for future broker/data integrations",
                 ],
                 "premium": True,
+                "stripe_configured": bool(configured_prices.get("team")),
                 "cta": "Contact sales workflow",
             },
         ]
@@ -601,19 +693,22 @@ class BillingService:
     def checkout(self, *, organization_id: str, request: BillingCheckoutRequest) -> dict[str, Any]:
         if request.price_id and self.settings.is_production:
             raise ValueError("Client-supplied Stripe price IDs are not accepted in production.")
-        price_id = self.settings.effective_stripe_pro_price_id
+        plan = str(request.plan or "pro").lower()
+        price_id = self.settings.stripe_plan_price_ids.get(plan)
+        if plan not in {"pro", "team"}:
+            raise ValueError("Checkout supports only server-owned paid plan ids: pro or team.")
         if not self.settings.stripe_secret_key or not price_id:
             if self.settings.is_production:
-                raise RuntimeError("Stripe checkout is not configured for production.")
+                raise RuntimeError(f"Stripe checkout is not configured for production plan '{plan}'.")
             subscription = self.store.get_subscription(organization_id=organization_id) or {}
             self.store.upsert_subscription(
                 organization_id=organization_id,
-                payload={**subscription, "plan": request.plan, "status": "trialing"},
+                payload={**subscription, "plan": plan, "status": "trialing"},
             )
             return {
                 "mode": "demo",
                 "checkout_url": f"{self.settings.app_base_url}?billing=demo-checkout",
-                "message": "Stripe is not configured. Set STRIPE_SECRET_KEY and STRIPE_PRO_PRICE_ID to create real Checkout sessions.",
+                "message": "Stripe is not configured. Set STRIPE_SECRET_KEY and plan-specific Stripe Price IDs to create real Checkout sessions.",
             }
         subscription = self.store.get_subscription(organization_id=organization_id) or {}
         success_url = self.settings.stripe_success_url or f"{self.settings.app_base_url}?billing=success"
@@ -625,6 +720,7 @@ class BillingService:
             "line_items[0][price]": price_id,
             "line_items[0][quantity]": "1",
             "metadata[organization_id]": organization_id,
+            "metadata[plan]": plan,
         }
         response = self._stripe_post("https://api.stripe.com/v1/checkout/sessions", data)
         return {"mode": "stripe", "checkout_url": response.get("url"), "stripe_session": response}
@@ -633,6 +729,8 @@ class BillingService:
         subscription = self.store.get_subscription(organization_id=organization_id) or {}
         customer_id = subscription.get("stripe_customer_id")
         if not self.settings.stripe_secret_key or not customer_id:
+            if self.settings.is_production:
+                raise RuntimeError("Stripe Customer Portal is not available until the workspace has a synced Stripe customer.")
             return {
                 "mode": "demo",
                 "portal_url": f"{self.settings.app_base_url}?billing=demo-portal",
@@ -641,6 +739,20 @@ class BillingService:
         data = {"customer": customer_id, "return_url": return_url or self.settings.app_base_url}
         response = self._stripe_post("https://api.stripe.com/v1/billing_portal/sessions", data)
         return {"mode": "stripe", "portal_url": response.get("url"), "stripe_session": response}
+
+    def sync_subscription(self, *, organization_id: str) -> dict[str, Any]:
+        subscription = self.store.get_subscription(organization_id=organization_id) or {}
+        stripe_subscription_id = str(subscription.get("stripe_subscription_id") or "")
+        if not self.settings.stripe_secret_key or not stripe_subscription_id:
+            if self.settings.is_production:
+                raise RuntimeError("Stripe subscription sync requires STRIPE_SECRET_KEY and a synced subscription id.")
+            return {"status": "skipped", "reason": "stripe_not_configured"}
+        remote = self._stripe_get(f"https://api.stripe.com/v1/subscriptions/{stripe_subscription_id}")
+        return self._upsert_subscription_from_stripe_object(
+            organization_id=organization_id,
+            data=remote,
+            source="stripe_subscription_sync",
+        )
 
     def webhook(self, *, payload: bytes, signature_header: str | None) -> dict[str, Any]:
         if not self.settings.stripe_webhook_secret:
@@ -661,10 +773,11 @@ class BillingService:
             else None
         )
         if event_type == "checkout.session.completed" and organization_id:
+            plan = str((data.get("metadata") or {}).get("plan") or "pro")
             self.store.upsert_subscription(
                 organization_id=str(organization_id),
                 payload={
-                    "plan": "pro",
+                    "plan": plan,
                     "status": "active",
                     "stripe_customer_id": data.get("customer"),
                     "stripe_subscription_id": data.get("subscription"),
@@ -674,20 +787,14 @@ class BillingService:
             return {"received": True, "updated": True, "event_type": event_type}
         if event_type.startswith("customer.subscription."):
             subscription_id = data.get("id")
-            status = data.get("status") or ("canceled" if event_type.endswith(".deleted") else "active")
-            current_period_end = data.get("current_period_end")
             organization_id = organization_id or self._organization_id_for_stripe_subscription(str(subscription_id or ""))
             if organization_id:
-                self.store.upsert_subscription(
+                if event_type == "customer.subscription.deleted":
+                    data = {**data, "status": "canceled"}
+                self._upsert_subscription_from_stripe_object(
                     organization_id=str(organization_id),
-                    payload={
-                        "plan": "pro",
-                        "status": str(status),
-                        "stripe_customer_id": data.get("customer"),
-                        "stripe_subscription_id": subscription_id,
-                        "current_period_end_utc": current_period_end,
-                        "usage": {"source": "stripe_subscription_webhook"},
-                    },
+                    data=data,
+                    source="stripe_subscription_webhook",
                 )
                 return {"received": True, "updated": True, "event_type": event_type}
         if event_type in {"invoice.payment_failed", "charge.refunded", "payment_intent.payment_failed"}:
@@ -721,6 +828,44 @@ class BillingService:
                 )
                 return {"received": True, "updated": True, "event_type": event_type}
         return {"received": True, "updated": False, "event_type": event_type}
+
+    def _plan_from_subscription_object(self, data: dict[str, Any]) -> str:
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        plan = str(metadata.get("plan") or "").lower()
+        if plan in {"pro", "team", "enterprise"}:
+            return plan
+        price_id = None
+        items = data.get("items") if isinstance(data.get("items"), dict) else {}
+        rows = items.get("data") if isinstance(items.get("data"), list) else []
+        if rows:
+            price = rows[0].get("price") if isinstance(rows[0], dict) else {}
+            price_id = price.get("id") if isinstance(price, dict) else None
+        for configured_plan, configured_price in self.settings.stripe_plan_price_ids.items():
+            if configured_price and configured_price == price_id:
+                return configured_plan
+        return "pro"
+
+    def _upsert_subscription_from_stripe_object(self, *, organization_id: str, data: dict[str, Any], source: str) -> dict[str, Any]:
+        period_end = data.get("current_period_end")
+        current_period_end_utc = None
+        if isinstance(period_end, (int, float)):
+            current_period_end_utc = datetime.fromtimestamp(float(period_end), tz=UTC).isoformat().replace("+00:00", "Z")
+        elif period_end:
+            current_period_end_utc = str(period_end)
+        status = str(data.get("status") or "active")
+        if status in {"canceled", "unpaid", "incomplete_expired"}:
+            status = "canceled"
+        return self.store.upsert_subscription(
+            organization_id=organization_id,
+            payload={
+                "plan": self._plan_from_subscription_object(data),
+                "status": status,
+                "stripe_customer_id": data.get("customer"),
+                "stripe_subscription_id": data.get("id"),
+                "current_period_end_utc": current_period_end_utc,
+                "usage": {"source": source},
+            },
+        )
 
     def _organization_id_for_stripe_subscription(self, subscription_id: str) -> str | None:
         if not subscription_id:
@@ -769,6 +914,14 @@ class BillingService:
                 "Authorization": f"Bearer {self.settings.stripe_secret_key}",
                 "Content-Type": "application/x-www-form-urlencoded",
             },
+        )
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _stripe_get(self, url: str) -> dict[str, Any]:
+        request = Request(
+            url,
+            headers={"Authorization": f"Bearer {self.settings.stripe_secret_key}"},
         )
         with urlopen(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))

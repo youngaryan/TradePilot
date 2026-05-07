@@ -157,6 +157,7 @@ export interface SystemMetadata {
     jobs: number;
     deployment_configs: number;
     experiment_runs: number;
+    artifacts?: number;
     users?: number;
     organizations?: number;
     projects?: number;
@@ -194,9 +195,6 @@ export interface Organization {
 }
 
 export interface AuthResponse {
-  access_token?: string;
-  token_type?: string;
-  csrf_token?: string;
   expires_at_utc?: string;
   user: AuthUser;
   organizations: Organization[];
@@ -259,6 +257,9 @@ export interface ApiKeyRecord {
   provider: string;
   masked_value: string;
   secret_ref?: string | null;
+  scopes?: string[];
+  token?: string;
+  message?: string;
   status: string;
   created_at_utc: string;
   updated_at_utc: string;
@@ -269,6 +270,7 @@ export interface ApiKeyCreateRequest {
   provider: string;
   secret?: string | null;
   secret_ref?: string | null;
+  scopes?: string[];
 }
 
 export interface ReadinessCheck {
@@ -398,7 +400,6 @@ export interface RefreshStatusPayload {
 
 export interface BillingCheckoutRequest {
   plan: string;
-  price_id?: string | null;
 }
 
 export interface BillingResponse {
@@ -604,7 +605,6 @@ export interface SentimentAccumulationRequest {
   newsapi_api_key?: string | null;
   alphavantage_api_key?: string | null;
   benzinga_api_key?: string | null;
-  output_dir?: string | null;
   use_finbert: boolean;
   local_finbert_only: boolean;
 }
@@ -667,11 +667,12 @@ export interface SentimentHeadline {
 }
 
 export interface SentimentDatasetPayload {
-  output_dir: string;
-  raw_headlines_path: string;
-  scored_headlines_path: string;
-  daily_sentiment_path: string;
-  metadata_path: string;
+  dataset_id?: string;
+  output_dir: string | null;
+  raw_headlines_path: string | null;
+  scored_headlines_path: string | null;
+  daily_sentiment_path: string | null;
+  metadata_path: string | null;
   metadata: Record<string, unknown>;
   warnings: string[];
   summary: {

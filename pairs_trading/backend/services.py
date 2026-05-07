@@ -33,7 +33,7 @@ from .config import BackendSettings
 from .job_queue import enqueue_quant_job
 from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
-from .storage import build_artifact_storage
+from .storage import ArtifactReference, build_artifact_storage
 from .validators import validate_relative_path, validate_url
 
 
@@ -91,7 +91,7 @@ class PaperRunJobRunner:
         self.settings = settings
         self.max_history = max_history
         self.mark_interrupted_on_load = mark_interrupted_on_load
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="paper-live")
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="paper-live") if settings.enable_in_process_jobs else None
         self.lock = Lock()
         self.jobs: dict[str, PaperRunJob] = {}
         self.jobs_dir = settings.paper_job_state_dir
@@ -134,7 +134,7 @@ class PaperRunJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        if self.settings.enable_in_process_jobs:
+        if self.settings.enable_in_process_jobs and self.executor is not None:
             future = self.executor.submit(self._run_job, job.id, command, organization_id)
             future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         else:
@@ -167,7 +167,7 @@ class PaperRunJobRunner:
                 setattr(job, key, value)
             self._save_locked(job)
 
-    def _deployment_config_path(self, job_id: str, command: PaperRunCommand) -> Path:
+    def _deployment_config_path(self, job_id: str, command: PaperRunCommand, *, organization_id: str) -> Path:
         if command.deployment_config is None:
             return command.deployment_config_path or self.settings.default_paper_config
         path = self.jobs_dir / f"{job_id}_deployment.json"
@@ -177,6 +177,7 @@ class PaperRunJobRunner:
             config_id=job_id,
             source="paper_inline",
             config=config,
+            organization_id=organization_id,
             path=path,
         )
         return path
@@ -200,7 +201,7 @@ class PaperRunJobRunner:
             message="Loading deployment config and execution settings.",
         )
         try:
-            config_path = self._deployment_config_path(job_id, command)
+            config_path = self._deployment_config_path(job_id, command, organization_id=organization_id)
             asof_dates = self._asof_dates(command)
             self._set_status(
                 job_id,
@@ -449,6 +450,24 @@ def _publish_directory_reference(storage, *, source_dir: str | Path | None, orga
     }
 
 
+def _record_artifact(metadata_store, *, organization_id: str, artifact_type: str, source_id: str, reference: dict[str, Any] | None, metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    if not reference:
+        return None
+    return metadata_store.upsert_artifact(
+        organization_id=organization_id,
+        payload={
+            "artifact_type": artifact_type,
+            "source_id": source_id,
+            "provider": reference.get("provider"),
+            "key": reference.get("key"),
+            "uri": reference.get("uri"),
+            "file_count": reference.get("file_count", 0),
+            "byte_count": reference.get("byte_count", 0),
+            "metadata": metadata or {},
+        },
+    )
+
+
 @dataclass
 class BacktestJob:
     id: str
@@ -492,7 +511,7 @@ class BacktestJobRunner:
         self.settings = settings
         self.max_history = max_history
         self.mark_interrupted_on_load = mark_interrupted_on_load
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="backtest-agent")
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="backtest-agent") if settings.enable_in_process_jobs else None
         self.lock = Lock()
         self.jobs: dict[str, BacktestJob] = {}
         self.jobs_dir = settings.backtest_job_state_dir
@@ -521,7 +540,7 @@ class BacktestJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        if self.settings.enable_in_process_jobs:
+        if self.settings.enable_in_process_jobs and self.executor is not None:
             future = self.executor.submit(self._run_job, job.id, request, organization_id)
             future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         else:
@@ -573,7 +592,7 @@ class BacktestJobRunner:
             progress=0.08,
         )
         try:
-            result = BacktestService(self.settings).run_backtest(request, progress=progress)
+            result = BacktestService(self.settings).run_backtest(request, organization_id=organization_id, progress=progress)
             summary = result.get("summary", {})
             validation = result.get("validation", {})
             experiment_id = str(summary.get("experiment_id") or job_id)
@@ -586,12 +605,24 @@ class BacktestJobRunner:
             )
             if artifact_reference:
                 result["artifact"] = artifact_reference
+                artifact_record = _record_artifact(
+                    self.metadata_store,
+                    organization_id=organization_id,
+                    artifact_type="backtests",
+                    source_id=experiment_id,
+                    reference=artifact_reference,
+                    metadata={"job_id": job_id, "pipeline": request.pipeline},
+                )
+                if artifact_record:
+                    result["artifact_id"] = artifact_record["id"]
+                    summary = {**summary, "artifact_id": artifact_record["id"]}
                 summary = {**summary, "artifact": artifact_reference}
                 result["summary"] = summary
             self.metadata_store.save_experiment_run(
                 experiment_id=experiment_id,
                 kind="backtest",
                 summary=json_ready(summary),
+                organization_id=organization_id,
                 artifact_dir=result.get("artifact_dir"),
             )
             self.metadata_store.upsert_experiment(
@@ -602,7 +633,7 @@ class BacktestJobRunner:
                     "name": str(summary.get("strategy") or request.experiment_name or experiment_id),
                     "pipeline": request.pipeline,
                     "status": "completed",
-                    "artifact_dir": result.get("artifact_dir"),
+                    "artifact_dir": artifact_reference.get("uri") if artifact_reference else result.get("artifact_dir"),
                     "summary": json_ready(summary),
                     "validation": json_ready(validation),
                     "lineage": build_lineage(
@@ -710,17 +741,49 @@ class BacktestJobRunner:
 class BacktestService:
     def __init__(self, settings: BackendSettings) -> None:
         self.settings = settings
+        self.metadata_store = build_metadata_store(settings)
+        self.artifact_storage = build_artifact_storage(settings)
+
+    def _materialize_dataset_file(self, *, organization_id: str | None, dataset_id: str | None, suffixes: tuple[str, ...]) -> Path | None:
+        if not organization_id or not dataset_id:
+            return None
+        dataset = self.metadata_store.get_dataset(organization_id=organization_id, dataset_id=dataset_id)
+        if dataset is None:
+            raise ValueError(f"Dataset not found: {dataset_id}")
+        provider = dataset.get("provider") if isinstance(dataset.get("provider"), dict) else {}
+        artifact_id = provider.get("artifact_id")
+        artifact = self.metadata_store.get_artifact(organization_id=organization_id, artifact_id=str(artifact_id)) if artifact_id else None
+        reference_payload = artifact or provider.get("artifact")
+        if isinstance(reference_payload, dict):
+            reference = ArtifactReference(
+                provider=str(reference_payload.get("provider") or "local"),
+                key=str(reference_payload.get("storage_key") or reference_payload.get("key") or ""),
+                uri=str(reference_payload.get("uri") or ""),
+            )
+            root = self.settings.backtest_artifact_root / "materialized" / organization_id / dataset_id
+            materialized = self.artifact_storage.materialize_directory(reference, root)
+            files = [path for path in materialized.rglob("*") if path.is_file() and path.suffix.lower() in suffixes]
+            if files:
+                return sorted(files)[0]
+        if not self.settings.is_production and dataset.get("path"):
+            path = Path(str(dataset["path"]))
+            if path.is_file():
+                return path
+            return next((item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in suffixes), None)
+        raise ValueError(f"Dataset {dataset_id} does not expose a usable artifact file.")
 
     def validate_request(self, request: BacktestRunRequest) -> None:
         if not request.pipeline:
             raise ValueError("Choose a pipeline before launching a backtest.")
         if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
-        if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.use_sec_companyfacts and not request.include_sec_filings:
+        if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.event_dataset_id and not request.use_sec_companyfacts and not request.include_sec_filings:
             raise ValueError("Event backtests require an event file, SEC company facts, or official SEC filings.")
-        if request.pipeline in {"stat_arb", "graph_stat_arb"} and request.symbols and request.sector_map_path is None:
+        if request.pipeline in {"stat_arb", "graph_stat_arb"} and request.symbols and request.sector_map_path is None and request.sector_dataset_id is None:
             # The stat-arb runner can use its default sector map, but user-supplied symbols would be ignored.
             raise ValueError("Stat-arb symbol lists require a sector map path so sectors are explicit.")
+        if self.settings.is_production and any([request.artifact_root, request.sector_map_path, request.event_file]):
+            raise ValueError("Production backtests use tenant-owned artifact_id, sector_dataset_id, or event_dataset_id instead of raw filesystem paths.")
         validate_relative_path(request.artifact_root, settings=self.settings, field_name="artifact_root")
         validate_relative_path(request.sector_map_path, settings=self.settings, field_name="sector_map_path")
         validate_relative_path(request.event_file, settings=self.settings, field_name="event_file")
@@ -730,6 +793,8 @@ class BacktestService:
     def run_backtest(
         self,
         request: BacktestRunRequest,
+        *,
+        organization_id: str | None = None,
         progress: Callable[[str, str, float], None] | None = None,
     ) -> dict[str, Any]:
         def report(stage: str, message: str, value: float) -> None:
@@ -737,6 +802,13 @@ class BacktestService:
                 progress(stage, message, value)
 
         self.validate_request(request)
+        sector_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.sector_dataset_id, suffixes=(".json", ".csv", ".parquet"))
+        event_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.event_dataset_id, suffixes=(".csv", ".json", ".parquet"))
+        if sector_file or event_file:
+            request = request.model_copy(update={
+                "sector_map_path": sector_file or request.sector_map_path,
+                "event_file": event_file or request.event_file,
+            })
         pipeline = request.pipeline
         params = _clean_parameters(request.parameters)
         artifact_root = str(request.artifact_root or self.settings.backtest_artifact_root)
@@ -1068,9 +1140,14 @@ class PaperService:
             return None
         return max(candidates, key=lambda path: path.stat().st_mtime)
 
-    def build_dashboard_payload(self, *, organization_id: str, batch_summary_path: str | Path | None = None) -> dict[str, Any]:
-        validate_relative_path(batch_summary_path, settings=self.settings, field_name="batch_summary_path")
-        summary_path = Path(batch_summary_path) if batch_summary_path else self.latest_batch_summary_path()
+    def build_dashboard_payload(self, *, organization_id: str, paper_agent_id: str | None = None) -> dict[str, Any]:
+        if paper_agent_id:
+            agent = self.metadata_store.get_paper_agent(organization_id=organization_id, agent_id=paper_agent_id)
+            return dict((agent or {}).get("latest_payload") or {})
+        if self.settings.is_production:
+            agents = self.metadata_store.list_paper_agents(organization_id=organization_id)
+            return dict((agents[0] if agents else {}).get("latest_payload") or {})
+        summary_path = self.latest_batch_summary_path()
         payload = build_paper_dashboard_payload(
             state_dir=self.settings.paper_state_dir,
             batch_summary_path=summary_path,
@@ -1081,12 +1158,12 @@ class PaperService:
         )
         return payload
 
-    def list_strategies(self, *, organization_id: str, batch_summary_path: str | Path | None = None) -> list[dict[str, Any]]:
-        return list(self.build_dashboard_payload(organization_id=organization_id, batch_summary_path=batch_summary_path).get("strategies", []))
+    def list_strategies(self, *, organization_id: str, paper_agent_id: str | None = None) -> list[dict[str, Any]]:
+        return list(self.build_dashboard_payload(organization_id=organization_id, paper_agent_id=paper_agent_id).get("strategies", []))
 
-    def get_strategy(self, *, organization_id: str, strategy_name: str, batch_summary_path: str | Path | None = None) -> dict[str, Any] | None:
+    def get_strategy(self, *, organization_id: str, strategy_name: str, paper_agent_id: str | None = None) -> dict[str, Any] | None:
         normalized = strategy_name.casefold()
-        for strategy in self.list_strategies(organization_id=organization_id, batch_summary_path=batch_summary_path):
+        for strategy in self.list_strategies(organization_id=organization_id, paper_agent_id=paper_agent_id):
             if str(strategy.get("name", "")).casefold() == normalized:
                 return strategy
         return None
@@ -1126,15 +1203,25 @@ class PaperService:
             )
             if artifact_reference:
                 summary = {**summary, "artifact": artifact_reference}
+                artifact_record = _record_artifact(
+                    self.metadata_store,
+                    organization_id=organization_id,
+                    artifact_type="paper",
+                    source_id=paper_run_id,
+                    reference=artifact_reference,
+                    metadata={"asof_date": asof_date},
+                )
+                if artifact_record:
+                    summary = {**summary, "artifact_id": artifact_record["id"]}
             self.metadata_store.save_experiment_run(
                 experiment_id=paper_run_id,
                 kind="paper",
                 summary=json_ready(summary),
+                organization_id=organization_id,
                 artifact_dir=summary.get("artifact_dir"),
             )
             latest_payload = self.build_dashboard_payload(
                 organization_id=organization_id,
-                batch_summary_path=summary.get("artifact_dir") and Path(summary["artifact_dir"]) / "paper_batch_summary.json",
             )
             completed_dates.append(asof_date)
         latest_payload = latest_payload or self.build_dashboard_payload(organization_id=organization_id)
@@ -1218,6 +1305,10 @@ class SentimentService:
         if not request.providers:
             raise ValueError("Select at least one sentiment source.")
         selected = {str(provider).lower() for provider in request.providers}
+        if self.settings.is_production and request.output_dir is not None:
+            raise ValueError("Production sentiment runs use tenant-owned dataset ids; raw output_dir paths are not accepted.")
+        if self.settings.is_production and request.news_files:
+            raise ValueError("Production sentiment runs cannot read raw local news file paths. Register a dataset and refer to it by dataset_id.")
         if "local" in selected and not request.news_files:
             raise ValueError("Local sentiment accumulation requires at least one news file.")
         validate_relative_path(request.output_dir, settings=self.settings, field_name="output_dir")
@@ -1400,6 +1491,14 @@ class SentimentService:
             artifact_type="sentiment",
             artifact_id=dataset_id,
         )
+        artifact_record = _record_artifact(
+            self.metadata_store,
+            organization_id=organization_id,
+            artifact_type="sentiment",
+            source_id=dataset_id,
+            reference=artifact_reference,
+            metadata={"symbols": list(request.symbols), "providers": list(request.providers)},
+        )
         self.metadata_store.upsert_dataset(
             organization_id=organization_id,
             payload={
@@ -1419,17 +1518,53 @@ class SentimentService:
                     "local_web_max_pages_per_source": request.local_web_max_pages_per_source,
                     "web_research_model": "lightweight_extractive_v1" if {"web", "local_web"} & {provider.lower() for provider in request.providers} else None,
                     "artifact": artifact_reference,
+                    "artifact_id": artifact_record["id"] if artifact_record else None,
                 },
                 "schema": {"columns": list(self._read_frame(daily_path).columns) if daily_path.exists() else []},
                 "row_count": int(result.daily_rows),
             },
         )
         report("loading_results", "Loading the latest sentiment tables and charts for the UI.", 0.95)
-        return self.dataset(output_dir=result.output_dir, organization_id=organization_id)
+        return self.dataset(output_dir=None if self.settings.is_production else result.output_dir, organization_id=organization_id, dataset_id=dataset_id)
 
-    def dataset(self, output_dir: str | Path | None = None, *, organization_id: str | None = None) -> dict[str, Any]:
+    def _dataset_output_path(self, *, dataset_id: str | None, output_dir: str | Path | None, organization_id: str | None) -> Path:
+        if dataset_id and organization_id:
+            dataset = self.metadata_store.get_dataset(organization_id=organization_id, dataset_id=dataset_id)
+            if dataset is None:
+                raise ValueError(f"Sentiment dataset not found: {dataset_id}")
+            provider = dataset.get("provider") if isinstance(dataset.get("provider"), dict) else {}
+            artifact_id = provider.get("artifact_id")
+            artifact = self.metadata_store.get_artifact(organization_id=organization_id, artifact_id=str(artifact_id)) if artifact_id else None
+            reference_payload = artifact or provider.get("artifact")
+            if isinstance(reference_payload, dict):
+                reference = ArtifactReference(
+                    provider=str(reference_payload.get("provider") or "local"),
+                    key=str(reference_payload.get("storage_key") or reference_payload.get("key") or ""),
+                    uri=str(reference_payload.get("uri") or ""),
+                    file_count=int(reference_payload.get("file_count", 0) or 0),
+                    byte_count=int(reference_payload.get("byte_count", 0) or 0),
+                )
+                materialized = self.settings.sentiment_cache_dir / "materialized" / organization_id / dataset_id
+                return self.artifact_storage.materialize_directory(reference, materialized)
+            if not self.settings.is_production and dataset.get("path"):
+                path = Path(str(dataset["path"]))
+                return path.parent if path.suffix else path
+            raise ValueError(f"Sentiment dataset has no readable artifact: {dataset_id}")
+        if self.settings.is_production and organization_id:
+            datasets = [
+                dataset
+                for dataset in self.metadata_store.list_datasets(organization_id=organization_id)
+                if str(dataset.get("kind")) == "sentiment_daily"
+            ]
+            if datasets:
+                return self._dataset_output_path(dataset_id=str(datasets[0]["id"]), output_dir=None, organization_id=organization_id)
         validate_relative_path(output_dir, settings=self.settings, field_name="output_dir")
-        output_path = self._output_dir(output_dir, organization_id=organization_id)
+        return self._output_dir(output_dir, organization_id=organization_id)
+
+    def dataset(self, output_dir: str | Path | None = None, *, organization_id: str | None = None, dataset_id: str | None = None) -> dict[str, Any]:
+        if self.settings.is_production and output_dir is not None:
+            raise ValueError("Production sentiment reads use dataset_id, not raw output_dir paths.")
+        output_path = self._dataset_output_path(dataset_id=dataset_id, output_dir=output_dir, organization_id=organization_id)
         raw_path = output_path / "raw_headlines.parquet"
         scored_path = output_path / "scored_headlines.parquet"
         daily_path = output_path / "daily_sentiment.parquet"
@@ -1506,7 +1641,7 @@ class SentimentService:
             }
 
         return {
-            "dataset_id": self.metadata_store.stable_id("dst", f"{organization_id or 'local'}:{daily_path}:sentiment_daily"),
+            "dataset_id": dataset_id or self.metadata_store.stable_id("dst", f"{organization_id or 'local'}:{daily_path}:sentiment_daily"),
             **paths_payload,
             "metadata": json_ready(metadata),
             "warnings": json_ready(warnings),
@@ -1574,7 +1709,7 @@ class SentimentJobRunner:
         self.settings = settings
         self.max_history = max_history
         self.mark_interrupted_on_load = mark_interrupted_on_load
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sentiment-agent")
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sentiment-agent") if settings.enable_in_process_jobs else None
         self.lock = Lock()
         self.jobs: dict[str, SentimentAccumulationJob] = {}
         self.jobs_dir = settings.sentiment_job_state_dir
@@ -1603,7 +1738,7 @@ class SentimentJobRunner:
             self._save_locked(job)
             self._trim_locked()
 
-        if self.settings.enable_in_process_jobs:
+        if self.settings.enable_in_process_jobs and self.executor is not None:
             future = self.executor.submit(self._run_job, job.id, request, organization_id)
             future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         else:

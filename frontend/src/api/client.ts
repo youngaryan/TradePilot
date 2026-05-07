@@ -127,11 +127,64 @@ export function signup(request: SignupRequest) {
 }
 
 export function getCurrentUser() {
-  return requestJson<Omit<AuthResponse, "access_token" | "token_type">>("/api/auth/me");
+  return requestJson<AuthResponse>("/api/auth/me");
 }
 
 export function logout() {
   return requestJson<{ status: string }>("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+}
+
+export function requestEmailVerification(email: string) {
+  return requestJson<{ status: string; delivery?: Record<string, unknown> }>("/api/auth/verify-email/request", {
+    method: "POST",
+    body: JSON.stringify({ email })
+  });
+}
+
+export function verifyEmail(token: string) {
+  return requestJson<{ status: string; user?: AuthResponse["user"] }>("/api/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ token })
+  });
+}
+
+export function requestPasswordReset(email: string) {
+  return requestJson<{ status: string; message: string }>("/api/auth/password-reset/request", {
+    method: "POST",
+    body: JSON.stringify({ email })
+  });
+}
+
+export function confirmPasswordReset(token: string, newPassword: string) {
+  return requestJson<{ status: string; message: string }>("/api/auth/password-reset/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token, new_password: newPassword })
+  });
+}
+
+export function setupMfa() {
+  return requestJson<{ status: string; method: string; secret: string; otpauth_url: string; enabled: boolean }>("/api/auth/mfa/setup", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function verifyMfa(code: string) {
+  return requestJson<{ status: string; method: string }>("/api/auth/mfa/verify", {
+    method: "POST",
+    body: JSON.stringify({ code })
+  });
+}
+
+export function exportAccount() {
+  return requestJson<Record<string, unknown>>("/api/account/export");
+}
+
+export function deleteAccount() {
+  return requestJson<{ status: string; user?: AuthResponse["user"] }>("/api/account", {
+    method: "DELETE",
+    body: JSON.stringify({})
+  });
 }
 
 export function getWorkspace() {
@@ -187,6 +240,13 @@ export function openBillingPortal(returnUrl?: string) {
   return requestJson<BillingResponse>("/api/billing/portal", {
     method: "POST",
     body: JSON.stringify({ return_url: returnUrl ?? null })
+  });
+}
+
+export function syncBillingSubscription() {
+  return requestJson<Record<string, unknown>>("/api/billing/sync", {
+    method: "POST",
+    body: JSON.stringify({})
   });
 }
 
@@ -296,8 +356,9 @@ export function getBacktestJob(jobId: string) {
   return requestJson<BacktestJob>(`/api/backtests/jobs/${encodeURIComponent(jobId)}`);
 }
 
-export function getSentimentDataset(_outputDir?: string | null) {
-  return requestJson<SentimentDatasetPayload>("/api/sentiment/dataset");
+export function getSentimentDataset(datasetId?: string | null) {
+  const suffix = datasetId ? `?dataset_id=${encodeURIComponent(datasetId)}` : "";
+  return requestJson<SentimentDatasetPayload>(`/api/sentiment/dataset${suffix}`);
 }
 
 export function accumulateSentiment(request: SentimentAccumulationRequest) {

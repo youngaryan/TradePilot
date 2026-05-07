@@ -19,7 +19,7 @@ def build_backtest_router(settings: BackendSettings) -> APIRouter:
     service = BacktestService(settings)
     quotas = QuotaService(settings)
     auth_context = require_auth_context(settings)
-    paid_context = require_paid_context(settings, feature="Backtest jobs")
+    paid_context = require_paid_context(settings, feature="Backtest jobs", machine_scope="backtests:run")
     csrf_guard = require_csrf(settings)
 
     @router.get("/templates")

@@ -35,6 +35,11 @@ def require_auth_context(settings: BackendSettings) -> Callable[..., RequestCont
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
         active_organization_id: str | None = Header(default=None, alias="X-Organization-Id"),
     ) -> RequestContext:
+        if credentials is not None and not credentials.credentials.startswith("qops_"):
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "machine_api_key_required", "message": "Bearer auth is reserved for scoped machine API keys; browser sessions use HttpOnly cookies."},
+            )
         token = credentials.credentials if credentials is not None else request.cookies.get(SESSION_COOKIE_NAME)
         if not token:
             raise HTTPException(status_code=401, detail="Login required.")
@@ -92,11 +97,22 @@ def require_admin_context(settings: BackendSettings) -> Callable[..., RequestCon
     return dependency
 
 
-def require_paid_context(settings: BackendSettings, *, feature: str = "premium feature") -> Callable[..., RequestContext]:
+def require_paid_context(settings: BackendSettings, *, feature: str = "premium feature", machine_scope: str | None = None) -> Callable[..., RequestContext]:
     auth_dependency = require_auth_context(settings)
     store = build_metadata_store(settings)
 
     def dependency(ctx: RequestContext = Depends(auth_dependency)) -> RequestContext:
+        if ctx.user.get("machine") and machine_scope:
+            scopes = {str(scope).lower() for scope in ctx.user.get("scopes", [])}
+            if "*" not in scopes and machine_scope.lower() not in scopes:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "api_key_scope_required",
+                        "scope": machine_scope,
+                        "message": f"This machine API key is missing the required scope: {machine_scope}.",
+                    },
+                )
         subscription = store.get_subscription(organization_id=ctx.organization_id)
         if not is_paid_subscription(subscription, allow_trial_entitlements=settings.allow_trial_entitlements):
             raise HTTPException(

@@ -19,7 +19,7 @@ def build_refresh_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/refresh", tags=["refresh"])
     auth_service = AuthService(settings)
     refresh_service = DailyRefreshService(settings)
-    paid_context = require_paid_context(settings, feature="Data refresh")
+    paid_context = require_paid_context(settings, feature="Data refresh", machine_scope="refresh:run")
     admin_context = require_admin_context(settings)
     csrf_guard = require_csrf(settings)
 

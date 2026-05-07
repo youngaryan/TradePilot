@@ -9,7 +9,6 @@ import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
 import { formatDateTime, formatNumber, splitList, splitSymbols, statusTone } from "../utils/format";
 
-const DEFAULT_OUTPUT_DIR = "data/sentiment_cache/shadow";
 const DEFAULT_NEWS_FILE = "examples/news_headlines.sample.csv";
 const TABLE_PAGE_SIZE = 12;
 const SOURCE_OPTIONS = [
@@ -52,7 +51,6 @@ function defaultRequest(): SentimentAccumulationRequest {
     newsapi_api_key: null,
     alphavantage_api_key: null,
     benzinga_api_key: null,
-    output_dir: DEFAULT_OUTPUT_DIR,
     use_finbert: false,
     local_finbert_only: true
   };
@@ -150,10 +148,10 @@ export function SentimentLab() {
   const [headlinePage, setHeadlinePage] = useState(1);
   const [scoredPage, setScoredPage] = useState(1);
 
-  async function refreshDataset(outputDir = request.output_dir) {
+  async function refreshDataset(datasetId?: string | null) {
     setError(null);
     try {
-      setDataset(await getSentimentDataset(outputDir));
+      setDataset(await getSentimentDataset(datasetId));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to load sentiment dataset.");
     }
@@ -211,7 +209,7 @@ export function SentimentLab() {
             if (job.result) {
               setDataset(job.result);
             } else {
-              void refreshDataset(request.output_dir);
+              void refreshDataset();
             }
           }
           if (job.status === "failed" || job.status === "interrupted") {
@@ -225,7 +223,7 @@ export function SentimentLab() {
         });
     }, 1200);
     return () => window.clearInterval(timer);
-  }, [activeJob, request.output_dir]);
+  }, [activeJob]);
 
   useEffect(() => {
     if (activeJob?.status === "completed" || activeJob?.status === "failed" || activeJob?.status === "interrupted") {
@@ -237,10 +235,10 @@ export function SentimentLab() {
   const jobProgress = Math.round((activeJob?.progress ?? (isRunning ? 0.04 : 0)) * 100);
   const jobStage = activeJob?.stage?.replaceAll("_", " ") ?? "queued";
   const jobWarnings = Array.isArray(activeJob?.warnings) ? activeJob.warnings.filter(Boolean) : [];
-  const jobRequest = activeJob?.request as { symbols?: unknown; providers?: unknown; output_dir?: unknown } | undefined;
+  const jobRequest = activeJob?.request as { symbols?: unknown; providers?: unknown } | undefined;
   const jobSymbols = Array.isArray(jobRequest?.symbols) ? jobRequest.symbols.map(String).join(" ") : request.symbols.join(" ");
   const jobProviders = Array.isArray(jobRequest?.providers) ? jobRequest.providers.map(String).join(" + ") : request.providers.join(" + ");
-  const jobOutputDir = typeof jobRequest?.output_dir === "string" && jobRequest.output_dir ? jobRequest.output_dir : request.output_dir ?? DEFAULT_OUTPUT_DIR;
+  const jobDatasetId = activeJob?.result?.dataset_id ?? dataset?.dataset_id ?? "latest tenant sentiment dataset";
   const jobStarted = activeJob?.started_at_utc ?? activeJob?.created_at_utc;
   const jobFinished = activeJob?.finished_at_utc;
   const jobRuntime = jobStarted ? (jobFinished ? `${formatDateTime(jobStarted)} to ${formatDateTime(jobFinished)}` : `Started ${formatDateTime(jobStarted)}`) : "Not started yet";
@@ -252,7 +250,7 @@ export function SentimentLab() {
     : activeJob?.status === "failed" || activeJob?.status === "interrupted"
       ? "Sentiment run needs attention"
       : "Sentiment run in progress";
-  const jobResultPath = activeJob?.result?.daily_sentiment_path ?? `${jobOutputDir}/daily_sentiment.parquet`;
+  const jobResultPath = activeJob?.result?.daily_sentiment_path ?? jobDatasetId;
   const jobSummary = activeJob?.result?.summary
     ? `${formatNumber(activeJob.result.summary.headline_count ?? 0, 0)} headlines, ${formatNumber(activeJob.result.summary.scored_headline_count ?? 0, 0)} scored rows, ${formatNumber(activeJob.result.summary.daily_rows ?? 0, 0)} daily rows.`
     : `Writing to ${jobResultPath}`;
@@ -290,7 +288,7 @@ export function SentimentLab() {
           <i style={{ width: `${jobProgress}%` }} />
         </div>
         <p>{activeJob?.message ?? "Starting sentiment accumulation."}</p>
-        <small>{jobProviders} | {jobSymbols} | {jobOutputDir}</small>
+        <small>{jobProviders} | {jobSymbols} | {jobDatasetId}</small>
         <div className="job-step-row">
           {jobSteps.map((step) => (
             <span key={step} className={`job-step job-step--${jobStepState(step)}`}>
@@ -331,7 +329,7 @@ export function SentimentLab() {
   }
 
   useEffect(() => {
-    void refreshDataset(DEFAULT_OUTPUT_DIR);
+    void refreshDataset();
   }, []);
 
   const latestMetadata = useMemo(() => dataset?.metadata ?? {}, [dataset]);
@@ -505,10 +503,6 @@ export function SentimentLab() {
               <input value={request.end} onChange={(event) => setRequest({ ...request, end: event.target.value })} />
             </label>
             <label>
-              Output directory
-              <input value={request.output_dir ?? ""} onChange={(event) => setRequest({ ...request, output_dir: event.target.value || null })} />
-            </label>
-            <label>
               News files
               <input value={request.news_files.join(" ")} onChange={(event) => setRequest({ ...request, news_files: splitList(event.target.value) })} placeholder={DEFAULT_NEWS_FILE} />
             </label>
@@ -617,7 +611,7 @@ export function SentimentLab() {
         <Panel title="2. How Agents Use This" subtitle="Overlay file path and interpretation">
           <div className="artifact-note">
             <strong>Daily sentiment file:</strong>
-            <span>{dataset?.daily_sentiment_path ?? `${DEFAULT_OUTPUT_DIR}/daily_sentiment.parquet`}</span>
+            <span>{dataset?.daily_sentiment_path ?? dataset?.dataset_id ?? "Latest tenant sentiment dataset"}</span>
           </div>
           <div className="artifact-note">
             <strong>Last accumulator run:</strong>
