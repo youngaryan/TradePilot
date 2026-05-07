@@ -588,7 +588,7 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
             </div>
           </div>
 
-          <section className="signin-card" id="login">
+          <section className="signin-card" id="login" aria-labelledby="login-heading">
             <div className="signin-card__header">
               <Badge label={mode === "signup" ? "free signup" : "secure login"} tone="good" />
               <span>No broker connection. Fake-money only.</span>
