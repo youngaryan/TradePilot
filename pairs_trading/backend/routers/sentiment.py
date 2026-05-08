@@ -11,7 +11,7 @@ from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
 from ..schemas import SentimentAccumulationRequest
-from ..services import SentimentJobRunner, SentimentService
+from ..sentiment_services import SentimentJobRunner, SentimentService
 
 
 def build_sentiment_router(settings: BackendSettings) -> APIRouter:

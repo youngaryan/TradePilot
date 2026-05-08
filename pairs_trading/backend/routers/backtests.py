@@ -10,7 +10,7 @@ from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
 from ..schemas import BacktestRunRequest
-from ..services import BacktestJobRunner, BacktestService
+from ..backtest_services import BacktestJobRunner, BacktestService
 
 
 def build_backtest_router(settings: BackendSettings) -> APIRouter:

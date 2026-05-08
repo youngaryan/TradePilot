@@ -6,6 +6,9 @@ import unittest
 
 from pairs_trading.api import build_paper_dashboard_payload
 from pairs_trading.apps.cli import main
+from pairs_trading.backend.backtest_services import BacktestService
+from pairs_trading.backend.paper_services import PaperService
+from pairs_trading.backend.sentiment_services import SentimentService
 from pairs_trading.core import PortfolioManager, StrategyOutput
 from pairs_trading.data import CachedParquetProvider, LocalNewsFileProvider
 from pairs_trading.engines import CostModel, WalkForwardBacktester
@@ -26,6 +29,9 @@ class ArchitectureLayoutTests(unittest.TestCase):
         self.assertIsNotNone(PortfolioManager)
         self.assertIsNotNone(LocalNewsFileProvider)
         self.assertIsNotNone(PaperDashboardVisualizer)
+        self.assertIsNotNone(BacktestService)
+        self.assertIsNotNone(PaperService)
+        self.assertIsNotNone(SentimentService)
 
     def test_frontend_paper_payload_uses_stable_shape(self) -> None:
         workspace = fresh_test_dir("artifacts/test_architecture_payload")

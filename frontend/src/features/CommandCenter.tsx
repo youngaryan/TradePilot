@@ -37,7 +37,7 @@ export function CommandCenter({
         </div>
         <div className="hero-status-grid">
           <Badge label={health?.status === "ok" ? "API online" : "API unknown"} tone={health?.status === "ok" ? "good" : "warn"} />
-          <Badge label={`${metadata?.counts.experiment_runs ?? 0} experiments`} tone="info" />
+          <Badge label={`${metadata?.counts?.experiment_runs ?? 0} experiments`} tone="info" />
           <Badge label={`${payload.strategies.length} sleeves`} tone="neutral" />
         </div>
       </section>

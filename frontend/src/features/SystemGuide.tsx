@@ -60,9 +60,9 @@ export function SystemGuide({
       </section>
 
       <section className="metric-grid">
-        <MetricCard label="Jobs" value={formatNumber(metadata?.counts.jobs ?? 0, 0)} detail="Backtest + paper job metadata" />
-        <MetricCard label="Deployments" value={formatNumber(metadata?.counts.deployment_configs ?? 0, 0)} detail="Inline paper configs" />
-        <MetricCard label="Experiments" value={formatNumber(metadata?.counts.experiment_runs ?? 0, 0)} detail="Backtest and paper runs" />
+        <MetricCard label="Jobs" value={formatNumber(metadata?.counts?.jobs ?? 0, 0)} detail="Backtest + paper job metadata" />
+        <MetricCard label="Deployments" value={formatNumber(metadata?.counts?.deployment_configs ?? 0, 0)} detail="Inline paper configs" />
+        <MetricCard label="Experiments" value={formatNumber(metadata?.counts?.experiment_runs ?? 0, 0)} detail="Backtest and paper runs" />
         <MetricCard label="Paper Jobs" value={formatNumber(paperJobs.length, 0)} detail="Loaded in API runner" />
       </section>
 
@@ -89,7 +89,8 @@ export function SystemGuide({
             <div><code>POST /api/backtests/run</code><span>Launch a walk-forward research experiment.</span></div>
             <div><code>GET /api/backtests/jobs</code><span>Research job history, progress, and results.</span></div>
             <div><code>GET /api/strategies/catalog</code><span>Strategy explanations and examples.</span></div>
-            <div><code>GET /api/system/metadata</code><span>SQLite metadata counts and path.</span></div>
+            <div><code>GET /api/system/metadata</code><span>Public runtime metadata.</span></div>
+            <div><code>GET /api/system/admin-counts</code><span>Admin-only operational counts.</span></div>
           </div>
         </Panel>
 

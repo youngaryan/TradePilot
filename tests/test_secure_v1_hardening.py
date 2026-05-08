@@ -33,7 +33,7 @@ def secure_test_settings(workspace: Path, **overrides):
 
 @unittest.skipIf(TestClient is None, "FastAPI backend dependencies are not installed.")
 class SecureV1HardeningTests(unittest.TestCase):
-    def test_artifact_and_system_routes_require_auth(self) -> None:
+    def test_artifact_routes_require_auth_and_system_counts_require_admin(self) -> None:
         from pairs_trading.backend.app import create_app
 
         workspace = fresh_test_dir("artifacts/test_secure_v1_public_routes")
@@ -42,7 +42,16 @@ class SecureV1HardeningTests(unittest.TestCase):
         self.assertEqual(client.get("/api/paper/summary").status_code, 401)
         self.assertEqual(client.get("/api/sentiment/dataset").status_code, 401)
         self.assertEqual(client.get("/api/sentiment/financial-events?symbols=AAPL&start=2024-01-01&end=2024-01-31").status_code, 401)
-        self.assertEqual(client.get("/api/system/metadata").status_code, 401)
+        public_metadata = client.get("/api/system/metadata")
+        self.assertEqual(public_metadata.status_code, 200)
+        self.assertNotIn("counts", public_metadata.json())
+        self.assertEqual(client.get("/api/system/admin-counts").status_code, 401)
+
+        login = client.post("/api/auth/login", json={"email": "user@quantops.local", "password": "quantops-user"})
+        self.assertEqual(login.status_code, 200)
+        org_id = login.json()["active_organization_id"]
+        user_headers = {"X-Organization-Id": org_id}
+        self.assertEqual(client.get("/api/system/admin-counts", headers=user_headers).status_code, 403)
 
     def test_cookie_session_and_csrf_guard_mutating_routes(self) -> None:
         from pairs_trading.backend.app import create_app
@@ -149,6 +158,35 @@ class SecureV1HardeningTests(unittest.TestCase):
                 )
             )
 
+    def test_schema_validators_reject_bad_market_and_sentiment_inputs(self) -> None:
+        from pydantic import ValidationError
+
+        from pairs_trading.backend.schemas import BacktestRunRequest, SentimentAccumulationRequest
+
+        with self.assertRaises(ValidationError):
+            BacktestRunRequest(symbols=["SPY/../QQQ"])
+        with self.assertRaises(ValidationError):
+            BacktestRunRequest(start="2024-02-01", end="2024-01-01")
+        with self.assertRaises(ValidationError):
+            BacktestRunRequest(interval="5m")
+        with self.assertRaises(ValidationError):
+            SentimentAccumulationRequest(providers=["unknown"])
+        with self.assertRaises(ValidationError):
+            SentimentAccumulationRequest(start="2024-02-01", end="2024-01-01")
+
+    def test_local_artifact_storage_rejects_tenant_path_traversal(self) -> None:
+        from pairs_trading.backend.storage import LocalArtifactStorage, safe_join_tenant_path
+
+        workspace = fresh_test_dir("artifacts/test_secure_v1_tenant_paths")
+        root = workspace / "artifacts"
+        storage = LocalArtifactStorage(root=root)
+
+        good_path = safe_join_tenant_path(root, "org_123", "backtests", "run_1")
+        self.assertTrue(good_path.is_relative_to((root / "organizations" / "org_123").resolve()))
+        with self.assertRaises(ValueError):
+            safe_join_tenant_path(root, "org_123", "..", "escape")
+        with self.assertRaises(ValueError):
+            storage.tenant_key("org_123", "backtests", "../escape")
 
     def test_email_password_reset_and_totp_mfa_flows_are_real(self) -> None:
         from pairs_trading.backend.saas import AuthService, totp_code

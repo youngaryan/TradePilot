@@ -1,9 +1,55 @@
 from __future__ import annotations
 
+from datetime import date
+from enum import StrEnum
 from pathlib import Path
+import re
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9^][A-Z0-9.^=_-]{0,31}$")
+
+
+class MarketDataInterval(StrEnum):
+    ONE_DAY = "1d"
+    ONE_WEEK = "1wk"
+    ONE_MONTH = "1mo"
+    ONE_HOUR = "1h"
+
+
+class SentimentProvider(StrEnum):
+    RSS = "rss"
+    LOCAL_WEB = "local_web"
+    WEB = "web"
+    LOCAL = "local"
+    NEWSAPI = "newsapi"
+    ALPHAVANTAGE = "alphavantage"
+    BENZINGA = "benzinga"
+
+
+def _normalized_date(value: str, *, field_name: str) -> str:
+    raw = str(value).strip()
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be formatted as YYYY-MM-DD.") from exc
+
+
+def _normalized_symbols(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        symbol = str(value).strip().upper()
+        if not symbol:
+            continue
+        if not SYMBOL_PATTERN.fullmatch(symbol):
+            raise ValueError(f"Invalid symbol: {value!r}.")
+        if symbol not in normalized:
+            normalized.append(symbol)
+    if len(normalized) > 100:
+        raise ValueError("At most 100 symbols can be submitted at once.")
+    return normalized
 
 
 class HealthResponse(BaseModel):
@@ -35,6 +81,8 @@ class PaperRunRequest(BaseModel):
 
 
 class BacktestRunRequest(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
     pipeline: str = Field(
         default="time_series_momentum",
         description="Pipeline or directional strategy id to backtest.",
@@ -45,7 +93,7 @@ class BacktestRunRequest(BaseModel):
     )
     start: str = Field(default="2018-01-01", description="Backtest start date, formatted as YYYY-MM-DD.")
     end: str = Field(default="2026-04-15", description="Backtest end date, formatted as YYYY-MM-DD.")
-    interval: str = Field(default="1d", description="Market data interval.")
+    interval: MarketDataInterval = Field(default=MarketDataInterval.ONE_DAY, description="Market data interval.")
     experiment_name: str | None = Field(default=None, description="Optional experiment name.")
     artifact_root: Path | None = Field(default=None, description="Optional artifact root. Defaults to backend settings.")
     artifact_id: str | None = Field(default=None, description="Tenant-owned artifact id for production reads.")
@@ -72,6 +120,27 @@ class BacktestRunRequest(BaseModel):
         description="Strategy-specific parameters. Unknown keys are ignored by unsupported pipelines.",
     )
 
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, values: list[str]) -> list[str]:
+        return _normalized_symbols(values)
+
+    @field_validator("start")
+    @classmethod
+    def normalize_start(cls, value: str) -> str:
+        return _normalized_date(value, field_name="start")
+
+    @field_validator("end")
+    @classmethod
+    def normalize_end(cls, value: str) -> str:
+        return _normalized_date(value, field_name="end")
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> "BacktestRunRequest":
+        if date.fromisoformat(self.end) <= date.fromisoformat(self.start):
+            raise ValueError("end must be after start.")
+        return self
+
 
 class StrategyBuilderMessage(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
@@ -94,14 +163,16 @@ class AdminStrategyStatusUpdateRequest(BaseModel):
 
 
 class SentimentAccumulationRequest(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
     symbols: list[str] = Field(
         default_factory=lambda: ["AAPL", "MSFT", "NVDA"],
         description="Tickers to fetch and score headlines for.",
     )
     start: str = Field(default="2024-01-01", description="Start date, formatted as YYYY-MM-DD.")
     end: str = Field(default="2024-02-10", description="End date, formatted as YYYY-MM-DD.")
-    providers: list[str] = Field(
-        default_factory=lambda: ["rss", "local_web"],
+    providers: list[SentimentProvider] = Field(
+        default_factory=lambda: [SentimentProvider.RSS, SentimentProvider.LOCAL_WEB],
         description="Headline sources: rss, local_web, web, local, newsapi, alphavantage, benzinga. API-key providers need request credentials or backend environment variables.",
     )
     rss_feed_urls: list[str] = Field(default_factory=list, description="Optional RSS URLs. Use {ticker} for per-symbol feeds.")
@@ -120,6 +191,36 @@ class SentimentAccumulationRequest(BaseModel):
     output_dir: Path | None = Field(default=None, description="Development-only output directory. Production rejects raw paths and registers tenant dataset ids.")
     use_finbert: bool = Field(default=False, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
     local_finbert_only: bool = Field(default=True, description="Do not download FinBERT during UI runs.")
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, values: list[str]) -> list[str]:
+        return _normalized_symbols(values)
+
+    @field_validator("start")
+    @classmethod
+    def normalize_start(cls, value: str) -> str:
+        return _normalized_date(value, field_name="start")
+
+    @field_validator("end")
+    @classmethod
+    def normalize_end(cls, value: str) -> str:
+        return _normalized_date(value, field_name="end")
+
+    @field_validator("providers")
+    @classmethod
+    def dedupe_providers(cls, values: list[SentimentProvider]) -> list[SentimentProvider]:
+        deduped: list[SentimentProvider] = []
+        for provider in values:
+            if provider not in deduped:
+                deduped.append(provider)
+        return deduped
+
+    @model_validator(mode="after")
+    def validate_date_order(self) -> "SentimentAccumulationRequest":
+        if date.fromisoformat(self.end) <= date.fromisoformat(self.start):
+            raise ValueError("end must be after start.")
+        return self
 
 
 class LoginRequest(BaseModel):

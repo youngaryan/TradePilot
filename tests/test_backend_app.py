@@ -160,7 +160,9 @@ class BackendAppTests(unittest.TestCase):
         catalog_item = client.get("/api/strategies/catalog/ema_cross")
         paper_jobs = client.get("/api/paper/jobs", headers=headers)
         unauth_metadata = TestClient(app).get("/api/system/metadata")
+        unauth_counts = TestClient(app).get("/api/system/admin-counts")
         metadata = client.get("/api/system/metadata", headers=headers)
+        admin_counts = client.get("/api/system/admin-counts", headers=headers)
 
         self.assertEqual(health.status_code, 200)
         self.assertEqual(unauth_summary.status_code, 401)
@@ -174,10 +176,14 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(catalog_item.status_code, 200)
         self.assertEqual(catalog_item.json()["id"], "ema_cross")
         self.assertEqual(paper_jobs.status_code, 200)
-        self.assertEqual(unauth_metadata.status_code, 401)
+        self.assertEqual(unauth_metadata.status_code, 200)
+        self.assertNotIn("counts", unauth_metadata.json())
+        self.assertEqual(unauth_counts.status_code, 401)
         self.assertEqual(metadata.status_code, 200)
-        self.assertEqual(metadata.json()["counts"]["jobs"], 0)
-        self.assertGreaterEqual(metadata.json()["counts"]["organizations"], 1)
+        self.assertNotIn("counts", metadata.json())
+        self.assertEqual(admin_counts.status_code, 200)
+        self.assertEqual(admin_counts.json()["counts"]["jobs"], 0)
+        self.assertGreaterEqual(admin_counts.json()["counts"]["organizations"], 1)
 
     def test_saas_routes_auth_workspace_billing_and_details(self) -> None:
         from pairs_trading.backend.app import create_app
@@ -278,6 +284,31 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(agents.status_code, 200)
         self.assertEqual(agent_detail.status_code, 200)
         self.assertEqual(agent_detail.json()["latest_payload"]["equity"], 100500)
+
+    def test_free_workspace_onboarding_does_not_mark_billing_complete(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_free_onboarding")
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+            app_base_url="http://127.0.0.1:5173",
+        )
+        client = TestClient(create_app(settings))
+        login = client.post("/api/auth/login", json={"email": "user@quantops.local", "password": "quantops-user"})
+        self.assertEqual(login.status_code, 200)
+        org_id = login.json()["active_organization_id"]
+
+        workspace_response = client.get("/api/workspaces", headers={"X-Organization-Id": org_id})
+
+        self.assertEqual(workspace_response.status_code, 200)
+        billing_step = next(step for step in workspace_response.json()["onboarding"]["steps"] if step["id"] == "billing")
+        self.assertFalse(billing_step["complete"])
 
     def test_observability_routes_capture_telemetry_and_refresh_status(self) -> None:
         from pairs_trading.backend.app import create_app

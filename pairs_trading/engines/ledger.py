@@ -20,6 +20,11 @@ class LedgerConfig:
     spread_bps: float = 0.0
     slippage_bps: float = 0.0
     market_impact_bps: float = 0.0
+    borrow_bps_annual: float = 0.0
+    funding_bps_annual: float = 0.0
+    delay_bars: int = 0
+    latency_slippage_factor: float = 0.35
+    liquidity_lookback: int = 20
     risk_free_rate: float = 0.0
     allow_short: bool = True
     min_order_notional: float = 1e-8
@@ -107,6 +112,11 @@ class PortfolioSnapshot:
     realized_pnl: float
     unrealized_pnl: float
     total_fees: float
+    borrow_cost: float
+    funding_cost: float
+    latency_cost: float
+    strategy_cost: float
+    period_cost: float
     gross_exposure: float
     net_exposure: float
     turnover: float
@@ -310,6 +320,21 @@ class LedgerBacktestSimulator:
         aligned_prices = price_frame.reindex(index)
         mark_prices = aligned_prices.ffill()
         target_weights = extract_target_weights(strategy_frame.reindex(index), price_frame)
+        strategy_costs = pd.to_numeric(
+            strategy_frame.reindex(index).get("cost_estimate", pd.Series(0.0, index=index)),
+            errors="coerce",
+        ).fillna(0.0)
+        avg_abs_move_bps = (
+            aligned_prices.pct_change()
+            .abs()
+            .mean(axis=1)
+            .rolling(max(1, int(self.config.liquidity_lookback)), min_periods=1)
+            .mean()
+            .mul(10_000.0)
+            .replace([np.inf, -np.inf], np.nan)
+            .replace(0.0, np.nan)
+            .fillna(5.0)
+        )
 
         positions = {symbol: PositionState() for symbol in target_weights.columns}
         cash = float(self.config.initial_cash)
@@ -331,7 +356,7 @@ class LedgerBacktestSimulator:
             target_row: pd.Series | None = None
             if self.config.execution_mode == "close_to_close":
                 target_row = target_weights.loc[timestamp]
-            elif self.config.execution_mode in {"next_bar_close", "next_open"}:
+            elif self.config.execution_mode == "next_bar_close":
                 if bar_number > 0:
                     target_row = target_weights.iloc[bar_number - 1]
             else:
@@ -354,13 +379,26 @@ class LedgerBacktestSimulator:
                     cash_ledger=cash_ledger,
                 )
 
+            turnover_notional = sum(abs(fill.quantity * fill.raw_price) for fill in fills[fills_before:])
+            cash, total_fees, period_costs = self._apply_period_costs(
+                timestamp=timestamp,
+                positions=positions,
+                mark_prices=marks,
+                cash=cash,
+                total_fees=total_fees,
+                turnover_notional=turnover_notional,
+                strategy_cost_rate=float(strategy_costs.loc[timestamp]),
+                avg_abs_move_bps=float(avg_abs_move_bps.loc[timestamp]),
+                cash_ledger=cash_ledger,
+            )
             snapshot = self._snapshot(
                 timestamp=timestamp,
                 positions=positions,
                 mark_prices=marks,
                 cash=cash,
                 total_fees=total_fees,
-                turnover_notional=sum(abs(fill.quantity * fill.raw_price) for fill in fills[fills_before:]),
+                turnover_notional=turnover_notional,
+                period_costs=period_costs,
                 order_count=(len(orders) + len(rejected_orders)) - orders_before,
                 fill_count=len(fills) - fills_before,
             )
@@ -494,6 +532,47 @@ class LedgerBacktestSimulator:
             self._fill_id += 1
         return cash, total_fees
 
+    def _apply_period_costs(
+        self,
+        *,
+        timestamp: pd.Timestamp,
+        positions: dict[str, PositionState],
+        mark_prices: pd.Series,
+        cash: float,
+        total_fees: float,
+        turnover_notional: float,
+        strategy_cost_rate: float,
+        avg_abs_move_bps: float,
+        cash_ledger: list[CashLedgerEntry],
+    ) -> tuple[float, float, dict[str, float]]:
+        market_values = [state.market_value(_safe_price(mark_prices.get(symbol))) for symbol, state in positions.items()]
+        holdings_value = float(sum(market_values))
+        short_market_value = float(sum(value for value in market_values if value < 0))
+        gross_notional = float(sum(abs(value) for value in market_values))
+        portfolio_value = cash + holdings_value
+        borrow_cost = abs(short_market_value) * max(float(self.config.borrow_bps_annual), 0.0) / 10_000.0 / max(float(self.config.bars_per_year), 1.0)
+        funding_cost = gross_notional * max(float(self.config.funding_bps_annual), 0.0) / 10_000.0 / max(float(self.config.bars_per_year), 1.0)
+        latency_cost = (
+            max(float(turnover_notional), 0.0)
+            * max(int(self.config.delay_bars), 0)
+            * max(float(self.config.latency_slippage_factor), 0.0)
+            * max(float(avg_abs_move_bps), 0.0)
+            / 10_000.0
+        )
+        strategy_cost = abs(float(portfolio_value)) * max(float(strategy_cost_rate), 0.0)
+        period_cost = borrow_cost + funding_cost + latency_cost + strategy_cost
+        if period_cost > 0:
+            cash -= period_cost
+            total_fees += period_cost
+            cash_ledger.append(CashLedgerEntry(timestamp=timestamp, kind="period_cost", amount=-period_cost, cash_after=cash))
+        return cash, total_fees, {
+            "borrow_cost": borrow_cost,
+            "funding_cost": funding_cost,
+            "latency_cost": latency_cost,
+            "strategy_cost": strategy_cost,
+            "period_cost": period_cost,
+        }
+
     def _new_order(
         self,
         timestamp: pd.Timestamp,
@@ -526,6 +605,7 @@ class LedgerBacktestSimulator:
         cash: float,
         total_fees: float,
         turnover_notional: float,
+        period_costs: dict[str, float],
         order_count: int,
         fill_count: int,
     ) -> PortfolioSnapshot:
@@ -548,6 +628,11 @@ class LedgerBacktestSimulator:
             realized_pnl=realized,
             unrealized_pnl=unrealized,
             total_fees=total_fees,
+            borrow_cost=float(period_costs.get("borrow_cost", 0.0)),
+            funding_cost=float(period_costs.get("funding_cost", 0.0)),
+            latency_cost=float(period_costs.get("latency_cost", 0.0)),
+            strategy_cost=float(period_costs.get("strategy_cost", 0.0)),
+            period_cost=float(period_costs.get("period_cost", 0.0)),
             gross_exposure=gross_notional / denominator,
             net_exposure=holdings_value / denominator,
             turnover=turnover_notional / denominator,

@@ -366,13 +366,18 @@ class SaaSService:
         datasets = self.store.list_datasets(organization_id=organization_id)
         experiments = self.store.list_experiments(organization_id=organization_id, limit=1)
         paper_agents = self.store.list_paper_agents(organization_id=organization_id)
-        api_keys = self.store.list_api_keys(organization_id=organization_id)
+        subscription = self.store.get_subscription(organization_id=organization_id) or {}
+        paid_statuses = {"active"} | ({"trialing"} if self.settings.allow_trial_entitlements else set())
+        billing_complete = (
+            str(subscription.get("plan") or "free").lower() in {"pro", "team", "enterprise", "pro_trial"}
+            and str(subscription.get("status") or "").lower() in paid_statuses
+        )
         steps = [
             {"id": "project", "label": "Create or use a research project", "complete": bool(projects)},
             {"id": "dataset", "label": "Connect market/news data or use local cache", "complete": bool(datasets)},
             {"id": "backtest", "label": "Run a validated backtest", "complete": bool(experiments)},
             {"id": "paper", "label": "Deploy a fake-money paper agent", "complete": bool(paper_agents)},
-            {"id": "billing", "label": "Review billing and usage limits", "complete": bool(api_keys) or True},
+            {"id": "billing", "label": "Review billing and usage limits", "complete": billing_complete},
         ]
         return {
             "steps": steps,

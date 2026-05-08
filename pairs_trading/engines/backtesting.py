@@ -137,6 +137,9 @@ class WalkForwardBacktester:
             spread_bps=self.cost_model.spread_bps,
             slippage_bps=self.cost_model.slippage_bps,
             market_impact_bps=self.cost_model.market_impact_bps,
+            borrow_bps_annual=self.cost_model.borrow_bps_annual,
+            funding_bps_annual=self.cost_model.funding_bps_annual,
+            delay_bars=self.cost_model.delay_bars,
             risk_free_rate=self.cost_model.risk_free_rate,
         )
 

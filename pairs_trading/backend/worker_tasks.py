@@ -6,7 +6,9 @@ from typing import Any
 from ..platform import build_metadata_store
 from .config import BackendSettings
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
-from .services import BacktestJobRunner, PaperRunCommand, PaperRunJobRunner, SentimentJobRunner
+from .backtest_services import BacktestJobRunner
+from .paper_services import PaperRunCommand, PaperRunJobRunner
+from .sentiment_services import SentimentJobRunner
 
 
 def run_queued_job(kind: str, job_id: str) -> dict[str, Any]:

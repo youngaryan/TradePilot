@@ -16,7 +16,7 @@ Fills debit or credit cash immediately. Commission, spread, slippage, and market
 
 The default execution mode is `next_bar_close`: target weights emitted for timestamp `t` are converted to market orders at the next available bar. This prevents using the same close both to create a signal and to fill the order. `close_to_close` is available for research compatibility, but it should be treated as a less conservative mode.
 
-The current market data provider supplies adjusted close prices, not full OHLCV bars. Until open/high/low/volume data is available, `next_open` is treated as next-bar close and partial fills are disabled.
+The current market data provider supplies adjusted close prices, not full OHLCV bars. Until open/high/low/volume data is available, `next_open` is rejected instead of being silently treated as next-bar close.
 
 ## Benchmark
 

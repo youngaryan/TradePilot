@@ -114,6 +114,74 @@ class LedgerEngineTests(unittest.TestCase):
         self.assertAlmostEqual(result.trades[0].pnl, 100.0, places=6)
         self.assertAlmostEqual(float(result.snapshots["portfolio_value"].iloc[-1]), 1_100.0, places=6)
 
+    def test_ledger_rejects_next_open_until_ohlc_prices_are_supported(self) -> None:
+        index = pd.date_range("2024-01-01", periods=2, freq="D")
+        prices = pd.DataFrame({"AAA": [100.0, 101.0]}, index=index)
+        targets = pd.DataFrame({"target_weight_AAA": [1.0, 1.0]}, index=index)
+
+        with self.assertRaisesRegex(ValueError, "next_open"):
+            LedgerBacktestSimulator(LedgerConfig(initial_cash=1_000.0, execution_mode="next_open")).run(
+                strategy_frame=targets,
+                prices=prices,
+            )
+
+    def test_walk_forward_ledger_config_preserves_extended_cost_model(self) -> None:
+        index = pd.date_range("2024-01-01", periods=8, freq="D")
+        prices = pd.DataFrame({"AAA": [100.0 + value for value in range(8)]}, index=index)
+        cost_model = CostModel(
+            initial_cash=1_000.0,
+            borrow_bps_annual=2_520.0,
+            funding_bps_annual=1_260.0,
+            delay_bars=2,
+        )
+        backtester = WalkForwardBacktester(
+            strategy=BuyAndHoldStrategy("AAA"),
+            prices=prices,
+            config=WalkForwardConfig(train_bars=4, test_bars=2, step_bars=2),
+            cost_model=cost_model,
+            experiment_root="artifacts/tmp_tests",
+        )
+
+        ledger_config = backtester._ledger_config()
+
+        self.assertEqual(ledger_config.borrow_bps_annual, cost_model.borrow_bps_annual)
+        self.assertEqual(ledger_config.funding_bps_annual, cost_model.funding_bps_annual)
+        self.assertEqual(ledger_config.delay_bars, cost_model.delay_bars)
+
+    def test_ledger_applies_borrow_funding_delay_and_strategy_costs(self) -> None:
+        index = pd.date_range("2024-01-01", periods=3, freq="D")
+        prices = pd.DataFrame({"AAA": [100.0, 100.0, 100.0]}, index=index)
+        targets = pd.DataFrame(
+            {
+                "target_weight_AAA": [-0.5, -0.5, -0.5],
+                "cost_estimate": [0.002, 0.0, 0.0],
+            },
+            index=index,
+        )
+        no_extra_cost = LedgerBacktestSimulator(
+            LedgerConfig(initial_cash=1_000.0, execution_mode="close_to_close")
+        ).run(strategy_frame=targets, prices=prices)
+        with_extra_cost = LedgerBacktestSimulator(
+            LedgerConfig(
+                initial_cash=1_000.0,
+                execution_mode="close_to_close",
+                borrow_bps_annual=2_520.0,
+                funding_bps_annual=1_260.0,
+                delay_bars=1,
+            )
+        ).run(strategy_frame=targets, prices=prices)
+
+        snapshots = with_extra_cost.snapshots
+
+        self.assertLess(
+            float(snapshots["portfolio_value"].iloc[-1]),
+            float(no_extra_cost.snapshots["portfolio_value"].iloc[-1]),
+        )
+        self.assertGreater(float(snapshots["borrow_cost"].sum()), 0.0)
+        self.assertGreater(float(snapshots["funding_cost"].sum()), 0.0)
+        self.assertGreater(float(snapshots["latency_cost"].sum()), 0.0)
+        self.assertGreater(float(snapshots["strategy_cost"].sum()), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,7 @@ import type {
   StrategyBuilderMessage,
   StrategyBuilderResponse,
   StrategyCatalogItem,
+  SystemAdminCounts,
   SystemMetadata,
   TelemetryEventRecord,
   TelemetryEventRequest,
@@ -306,6 +307,10 @@ export function runDailyRefresh(force = false) {
 
 export function getSystemMetadata() {
   return requestJson<SystemMetadata>("/api/system/metadata");
+}
+
+export function getSystemAdminCounts() {
+  return requestJson<SystemAdminCounts>("/api/system/admin-counts");
 }
 
 export function getPaperSummary() {

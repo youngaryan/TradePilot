@@ -153,23 +153,32 @@ export interface HealthResponse {
 
 export interface SystemMetadata {
   app_env: string;
-  counts: {
-    jobs: number;
-    deployment_configs: number;
-    experiment_runs: number;
-    artifacts?: number;
-    users?: number;
-    organizations?: number;
-    projects?: number;
-    experiments?: number;
-    paper_agents?: number;
-    datasets?: number;
-    api_keys?: number;
-    subscriptions?: number;
-    telemetry_events?: number;
-    refresh_runs?: number;
-    refresh_statuses?: number;
-  };
+  job_backend?: string;
+  storage_provider?: string;
+  telemetry_enabled?: boolean;
+  counts?: SystemCounts;
+}
+
+export interface SystemCounts {
+  jobs: number;
+  deployment_configs: number;
+  experiment_runs: number;
+  artifacts?: number;
+  users?: number;
+  organizations?: number;
+  projects?: number;
+  experiments?: number;
+  paper_agents?: number;
+  datasets?: number;
+  api_keys?: number;
+  subscriptions?: number;
+  telemetry_events?: number;
+  refresh_runs?: number;
+  refresh_statuses?: number;
+}
+
+export interface SystemAdminCounts {
+  counts: SystemCounts;
 }
 
 export interface AuthUser {
@@ -452,7 +461,7 @@ export interface AdminUserRecord {
 }
 
 export interface AdminOverviewPayload {
-  counts: SystemMetadata["counts"];
+  counts: SystemCounts;
   metrics: {
     users_total: number;
     users_active: number;

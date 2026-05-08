@@ -11,7 +11,7 @@ from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
 from ..schemas import PaperRunRequest
-from ..services import PaperRunCommand, PaperRunJobRunner, PaperService
+from ..paper_services import PaperRunCommand, PaperRunJobRunner, PaperService
 
 
 def build_paper_router(settings: BackendSettings) -> APIRouter:

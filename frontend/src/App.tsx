@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
@@ -30,6 +30,7 @@ import {
   getHealth,
   getPaperSummary,
   getStrategyCatalog,
+  getSystemAdminCounts,
   getSystemMetadata,
   getWorkspace,
   login as loginRequest,
@@ -58,16 +59,17 @@ import type {
 } from "./api/types";
 import { Badge } from "./components/Badge";
 import { EmptyState } from "./components/Cards";
-import { AccountSecurity } from "./features/AccountSecurity";
-import { AdminDashboard } from "./features/AdminDashboard";
-import { BacktestLab } from "./features/BacktestLab";
-import { CommandCenter } from "./features/CommandCenter";
-import { LiveOps } from "./features/LiveOps";
-import { PricingPage } from "./features/PricingPage";
-import { SaaSWorkspace } from "./features/SaaSWorkspace";
-import { SentimentLab } from "./features/SentimentLab";
-import { SystemGuide } from "./features/SystemGuide";
 import { formatCurrency, formatNumber } from "./utils/format";
+
+const AccountSecurity = React.lazy(() => import("./features/AccountSecurity").then((module) => ({ default: module.AccountSecurity })));
+const AdminDashboard = React.lazy(() => import("./features/AdminDashboard").then((module) => ({ default: module.AdminDashboard })));
+const BacktestLab = React.lazy(() => import("./features/BacktestLab").then((module) => ({ default: module.BacktestLab })));
+const CommandCenter = React.lazy(() => import("./features/CommandCenter").then((module) => ({ default: module.CommandCenter })));
+const LiveOps = React.lazy(() => import("./features/LiveOps").then((module) => ({ default: module.LiveOps })));
+const PricingPage = React.lazy(() => import("./features/PricingPage").then((module) => ({ default: module.PricingPage })));
+const SaaSWorkspace = React.lazy(() => import("./features/SaaSWorkspace").then((module) => ({ default: module.SaaSWorkspace })));
+const SentimentLab = React.lazy(() => import("./features/SentimentLab").then((module) => ({ default: module.SentimentLab })));
+const SystemGuide = React.lazy(() => import("./features/SystemGuide").then((module) => ({ default: module.SystemGuide })));
 
 type ViewId = "command" | "workspace" | "account" | "pricing" | "live" | "sentiment" | "backtests" | "admin" | "system";
 type ThemeMode = "light" | "dark" | "system";
@@ -763,16 +765,18 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  async function refreshAll() {
+  async function refreshAll(authOverride: AuthResponse | null = auth) {
     setIsLoading(true);
     setError(null);
     try {
+      const shouldLoadAdminCounts = isAdminRole(authOverride?.user.role);
       const [
         nextHealth,
         nextPayload,
         nextCatalog,
         nextTemplates,
         nextMetadata,
+        nextAdminCounts,
         nextPaperJobs,
         nextBacktestJobs,
         nextWorkspace
@@ -782,15 +786,16 @@ export default function App() {
         getStrategyCatalog(),
         getBacktestTemplates(),
         getSystemMetadata(),
+        shouldLoadAdminCounts ? getSystemAdminCounts().catch(() => null) : Promise.resolve(null),
         listPaperRunJobs(),
         listBacktestJobs(),
-        auth ? getWorkspace() : Promise.resolve(null)
+        authOverride ? getWorkspace() : Promise.resolve(null)
       ]);
       setHealth(nextHealth);
       setPayload(nextPayload);
       setCatalog(nextCatalog);
       setTemplates(nextTemplates);
-      setMetadata(nextMetadata);
+      setMetadata(nextAdminCounts ? { ...nextMetadata, counts: nextAdminCounts.counts } : nextMetadata);
       setPaperJobs(nextPaperJobs);
       setBacktestJobs(nextBacktestJobs);
       setWorkspace(nextWorkspace);
@@ -946,7 +951,7 @@ export default function App() {
       properties: { organization_count: nextAuth.organizations.length },
       consent: telemetryConsent
     }).catch(() => undefined);
-    void refreshAll();
+    void refreshAll(nextAuth);
     void getWorkspace().then(setWorkspace).catch(() => setWorkspace(null));
   }
 
@@ -992,12 +997,12 @@ export default function App() {
     },
     {
       label: "Experiments",
-      value: formatNumber(metadata?.counts.experiment_runs ?? 0, 0),
+      value: formatNumber(metadata?.counts?.experiment_runs ?? 0, 0),
       detail: "Saved validation records"
     },
     {
       label: "Telemetry",
-      value: formatNumber(metadata?.counts.telemetry_events ?? 0, 0),
+      value: formatNumber(metadata?.counts?.telemetry_events ?? 0, 0),
       detail: "Consent-aware events"
     }
   ];
@@ -1163,75 +1168,85 @@ export default function App() {
           </section>
         ) : null}
 
-        {!payload && !error && activeView === "command" ? (
-          <EmptyState
-            icon={<Gauge size={34} />}
-            title={isLoading ? "Loading quant cockpit" : "No paper state found"}
-            body="The cockpit reads from the backend API. Start the backend, then run or replay a paper deployment to populate ledgers."
-          />
-        ) : null}
+        <Suspense
+          fallback={
+            <EmptyState
+              icon={<Gauge size={34} />}
+              title="Loading view"
+              body="The requested workspace module is loading."
+            />
+          }
+        >
+          {!payload && !error && activeView === "command" ? (
+            <EmptyState
+              icon={<Gauge size={34} />}
+              title={isLoading ? "Loading quant cockpit" : "No paper state found"}
+              body="The cockpit reads from the backend API. Start the backend, then run or replay a paper deployment to populate ledgers."
+            />
+          ) : null}
 
-        {payload && activeView === "command" ? (
-          <CommandCenter
-            payload={payload}
-            health={health}
-            metadata={metadata}
-            paperJobs={paperJobs}
-            backtestJobs={backtestJobs}
-          />
-        ) : null}
+          {payload && activeView === "command" ? (
+            <CommandCenter
+              payload={payload}
+              health={health}
+              metadata={metadata}
+              paperJobs={paperJobs}
+              backtestJobs={backtestJobs}
+            />
+          ) : null}
 
-        {payload && activeView === "live" ? (
-          <LiveOps
-            payload={payload}
-            catalog={catalog}
-            paperJobs={paperJobs}
-            onJobsChange={setPaperJobs}
-            onPaperPayload={setPayload}
-            onRefresh={() => void refreshAll()}
-          />
-        ) : null}
+          {payload && activeView === "live" ? (
+            <LiveOps
+              payload={payload}
+              catalog={catalog}
+              paperJobs={paperJobs}
+              onJobsChange={setPaperJobs}
+              onPaperPayload={setPayload}
+              onRefresh={() => void refreshAll()}
+            />
+          ) : null}
 
-        {activeView === "workspace" ? (
-          <SaaSWorkspace
-            auth={auth}
-            activeOrganizationId={activeOrgId}
-            workspace={workspace}
-            organizations={organizations}
-            onSwitchOrganization={switchOrganization}
-            onRefresh={refreshAll}
-            onNavigate={navigateTo}
-          />
-        ) : null}
+          {activeView === "workspace" ? (
+            <SaaSWorkspace
+              auth={auth}
+              activeOrganizationId={activeOrgId}
+              workspace={workspace}
+              organizations={organizations}
+              onSwitchOrganization={switchOrganization}
+              onRefresh={refreshAll}
+              onNavigate={navigateTo}
+            />
+          ) : null}
 
-        {activeView === "account" ? <AccountSecurity auth={auth} onDeleted={() => void handleLogout()} /> : null}
+          {activeView === "account" ? <AccountSecurity auth={auth} onDeleted={() => void handleLogout()} /> : null}
 
-        {activeView === "pricing" ? (
-          <PricingPage workspace={workspace} reason={paymentWallReason} isAdminAccess={isAdminAccess} onRefresh={refreshAll} />
-        ) : null}
+          {activeView === "pricing" ? (
+            <PricingPage workspace={workspace} reason={paymentWallReason} isAdminAccess={isAdminAccess} onRefresh={refreshAll} />
+          ) : null}
 
-        {activeView === "sentiment" ? <SentimentLab /> : null}
+          {activeView === "sentiment" ? <SentimentLab /> : null}
 
-        {activeView === "backtests" ? (
-          <BacktestLab
-            catalog={catalog}
-            templates={templates}
-            jobs={backtestJobs}
-            onJobsChange={setBacktestJobs}
-            onCatalogChange={setCatalog}
-          />
-        ) : null}
+          {activeView === "backtests" ? (
+            <BacktestLab
+              catalog={catalog}
+              templates={templates}
+              jobs={backtestJobs}
+              onJobsChange={setBacktestJobs}
+              onCatalogChange={setCatalog}
+            />
+          ) : null}
 
-        {activeView === "system" ? (
-          <SystemGuide
-            health={health}
-            metadata={metadata}
-            paperJobs={paperJobs}
-            backtestJobs={backtestJobs}
-          />
-        ) : null}
+          {activeView === "system" ? (
+            <SystemGuide
+              health={health}
+              metadata={metadata}
+              paperJobs={paperJobs}
+              backtestJobs={backtestJobs}
+            />
+          ) : null}
 
-        {activeView === "admin" && isAdminAccess ? <AdminDashboard auth={auth} /> : null}
+          {activeView === "admin" && isAdminAccess ? <AdminDashboard auth={auth} /> : null}
+        </Suspense>
 
         <section className="research-note">
           <Gauge size={16} />

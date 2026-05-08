@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 import shutil
 from typing import Protocol
 
@@ -15,6 +16,36 @@ class ArtifactReference:
     uri: str
     file_count: int = 0
     byte_count: int = 0
+
+
+def _safe_tenant_parts(organization_id: str, parts: tuple[str, ...]) -> list[str]:
+    if not str(organization_id).strip():
+        raise ValueError("Artifact organization_id is required.")
+    values = [str(organization_id).strip()]
+    values.extend(str(part).strip().replace("\\", "/") for part in parts if str(part).strip())
+    safe_parts: list[str] = []
+    for raw in values:
+        path = PurePosixPath(raw.strip("/"))
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("Artifact tenant keys must be relative paths without traversal segments.")
+        safe_parts.extend(path.parts)
+    return safe_parts
+
+
+def safe_join_tenant_path(root: str | Path, organization_id: str, *parts: str) -> Path:
+    base = (Path(root) / "organizations" / str(organization_id).strip()).resolve()
+    safe_parts = _safe_tenant_parts(organization_id, parts)[1:]
+    target = (base / Path(*safe_parts)).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError("Artifact path escapes the tenant root.")
+    return target
+
+
+def _safe_rmtree(target: Path) -> None:
+    resolved = target.resolve()
+    if resolved == Path(resolved.anchor) or len(resolved.parts) < 4 or "materialized" not in resolved.parts:
+        raise ValueError(f"Refusing to delete unsafe materialized artifact path: {target}")
+    shutil.rmtree(resolved)
 
 
 class ArtifactStorage(Protocol):
@@ -36,8 +67,7 @@ class LocalArtifactStorage:
     root: Path
 
     def tenant_key(self, organization_id: str, *parts: str) -> str:
-        safe_parts = [part.strip("/\\").replace("\\", "/") for part in parts if part]
-        return str(self.root / "organizations" / organization_id / Path(*safe_parts))
+        return str(safe_join_tenant_path(self.root, organization_id, *parts))
 
     def publish_directory(self, source_dir: str | Path, *, organization_id: str, artifact_type: str, artifact_id: str) -> ArtifactReference:
         source = Path(source_dir)
@@ -67,7 +97,7 @@ class LocalArtifactStorage:
         if source.resolve() == target.resolve():
             return target
         if target.exists():
-            shutil.rmtree(target)
+            _safe_rmtree(target)
         target.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, target, dirs_exist_ok=True)
         return target
@@ -81,8 +111,8 @@ class S3ArtifactStorage:
     secret_access_key: str | None = None
 
     def tenant_key(self, organization_id: str, *parts: str) -> str:
-        safe_parts = [part.strip("/\\").replace("\\", "/") for part in parts if part]
-        return "/".join(["organizations", organization_id, *safe_parts])
+        safe_parts = _safe_tenant_parts(organization_id, parts)
+        return "/".join(["organizations", *safe_parts])
 
     def _client(self):
         try:
@@ -132,7 +162,7 @@ class S3ArtifactStorage:
     def materialize_directory(self, reference: ArtifactReference, destination: str | Path) -> Path:
         target = Path(destination)
         if target.exists():
-            shutil.rmtree(target)
+            _safe_rmtree(target)
         target.mkdir(parents=True, exist_ok=True)
         prefix = reference.key.rstrip("/") + "/"
         client = self._ready_client()
