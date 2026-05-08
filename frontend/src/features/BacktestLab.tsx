@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, FlaskConical, Loader2, Play, ShieldAlert, 
 import { getBacktestJob, listBacktestJobs, startBacktest } from "../api/client";
 import type { BacktestJob, BacktestRunRequest, BacktestTemplate, StrategyCatalogItem } from "../api/types";
 import { Badge } from "../components/Badge";
+import { BacktestPerformanceChart } from "../components/BacktestPerformanceChart";
 import { BacktestEquityChart } from "../components/Charts";
 import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
@@ -74,6 +75,11 @@ function asOptionalString(value: unknown): string | null {
 
 function metricValue(summary: Record<string, unknown>, key: string, formatter: (value: unknown) => string) {
   return formatter(summary[key]);
+}
+
+function optionalNumber(value: unknown, digits = 2) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? formatNumber(parsed, digits) : "n/a";
 }
 
 function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
@@ -241,6 +247,23 @@ export function BacktestLab({
   const result = activeJob?.result;
   const summary = result?.summary ?? {};
   const validation = result?.validation ?? {};
+  const visualization = result?.visualization ?? activeJob?.progress_snapshot ?? null;
+  const visualMetrics = visualization?.metrics ?? {};
+  const performanceMetrics = result
+    ? {
+        total_return: summary.total_return ?? visualMetrics.total_return,
+        cagr: summary.annualized_return ?? visualMetrics.cagr,
+        sharpe: summary.sharpe ?? visualMetrics.sharpe,
+        max_drawdown: summary.max_drawdown ?? visualMetrics.max_drawdown,
+        win_rate: summary.hit_rate ?? visualMetrics.win_rate,
+        profit_factor: visualMetrics.profit_factor,
+        baseline_total_return: summary.baseline_total_return ?? visualMetrics.baseline_total_return,
+        baseline_cagr: summary.baseline_cagr ?? visualMetrics.baseline_cagr,
+        baseline_max_drawdown: summary.baseline_max_drawdown ?? visualMetrics.baseline_max_drawdown,
+        benchmark_outperformance: summary.benchmark_outperformance ?? visualMetrics.benchmark_outperformance
+      }
+    : visualMetrics;
+  const tradeRows = visualization?.trade_summary ?? result?.trade_summary ?? [];
 
   return (
     <div className="page-stack">
@@ -571,6 +594,21 @@ export function BacktestLab({
           </div>
         </Panel>
 
+        {visualization ? (
+          <Panel title="Performance vs Baseline" subtitle={visualization.baseline_label}>
+            <section className="metric-grid metric-grid--compact">
+              <MetricCard label="Total Return" value={formatPercent(performanceMetrics.total_return)} tone={toneFromNumber(performanceMetrics.total_return)} />
+              <MetricCard label="CAGR" value={formatPercent(performanceMetrics.cagr)} tone={toneFromNumber(performanceMetrics.cagr)} />
+              <MetricCard label="Sharpe" value={formatNumber(performanceMetrics.sharpe)} />
+              <MetricCard label="Max Drawdown" value={formatPercent(performanceMetrics.max_drawdown)} tone={toneFromNumber(toNumber(performanceMetrics.max_drawdown) * -1)} />
+              <MetricCard label="Win Rate" value={formatPercent(performanceMetrics.win_rate)} />
+              <MetricCard label="Profit Factor" value={optionalNumber(performanceMetrics.profit_factor)} />
+              <MetricCard label="Baseline Return" value={formatPercent(performanceMetrics.baseline_total_return)} tone={toneFromNumber(performanceMetrics.baseline_total_return)} />
+              <MetricCard label="Outperformance" value={formatPercent(performanceMetrics.benchmark_outperformance)} tone={toneFromNumber(performanceMetrics.benchmark_outperformance)} />
+            </section>
+          </Panel>
+        ) : null}
+
         <Panel title="Validation Summary" subtitle={result?.decision?.headline ?? "Waiting for completed result"}>
           {result ? (
             <>
@@ -599,13 +637,36 @@ export function BacktestLab({
         </Panel>
       </div>
 
-      {result ? (
-        <Panel title="Equity And Drawdown" subtitle={result.artifact_dir ?? "No artifact directory"}>
-          <BacktestEquityChart points={result.equity_curve_points} />
+      {visualization || result ? (
+        <Panel title="Real-Time Backtest Visualization" subtitle={result?.artifact_dir ?? activeJob?.message ?? "Waiting for synchronized fold snapshots"}>
+          {visualization ? (
+            <BacktestPerformanceChart payload={visualization} isRunning={activeJob?.status === "running"} />
+          ) : result ? (
+            <BacktestEquityChart points={result.equity_curve_points} />
+          ) : null}
           <div className="artifact-note">
             <strong>Artifacts saved to:</strong>
-            <span>{result.artifact_dir}</span>
+            <span>{result?.artifact_dir ?? "Artifacts will be available after completion."}</span>
           </div>
+        </Panel>
+      ) : null}
+
+      {visualization ? (
+        <Panel title="Trade-Level Summary" subtitle="Entries and exits inferred from risk-adjusted exposure changes">
+          <DataTable
+            rows={tradeRows}
+            empty="No entry or exit events were produced by the current backtest."
+            getKey={(row) => row.id}
+            columns={[
+              { key: "side", header: "Side", render: (row) => <Badge label={row.side} tone={row.side === "long" ? "good" : row.side === "short" ? "bad" : "neutral"} /> },
+              { key: "entry", header: "Entry", render: (row) => row.entry_timestamp.slice(0, 10) },
+              { key: "exit", header: "Exit", render: (row) => row.exit_timestamp?.slice(0, 10) ?? "Open" },
+              { key: "holding", header: "Bars", align: "right", render: (row) => formatNumber(row.holding_period_bars, 0) },
+              { key: "pnl", header: "P&L", align: "right", render: (row) => optionalNumber(row.pnl) },
+              { key: "return", header: "Return", align: "right", render: (row) => formatPercent(row.return_pct) },
+              { key: "status", header: "Status", render: (row) => <Badge label={row.status} tone={row.status === "closed" ? "neutral" : "warn"} /> }
+            ]}
+          />
         </Panel>
       ) : null}
 

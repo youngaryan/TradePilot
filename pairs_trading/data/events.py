@@ -216,6 +216,11 @@ class SecCompanyFactsEventProvider(EventProvider):
         "NetIncomeLoss",
         "ProfitLoss",
     )
+    EPS_CONCEPTS = (
+        "EarningsPerShareDiluted",
+        "EarningsPerShareBasic",
+        "IncomeLossFromContinuingOperationsPerDilutedShare",
+    )
 
     def __init__(
         self,
@@ -320,71 +325,80 @@ class SecCompanyFactsEventProvider(EventProvider):
             growth.append(float(row[value_column]) / float(prior_value) - 1.0)
         return pd.Series(growth, index=series.index)
 
-    def _build_company_events(self, ticker: str, payload: dict) -> pd.DataFrame:
+    def _build_company_events(self, ticker: str, payload: dict, cik: str | None = None) -> pd.DataFrame:
         revenue, revenue_concept = self._extract_series(payload, self.REVENUE_CONCEPTS)
         earnings, earnings_concept = self._extract_series(payload, self.EARNINGS_CONCEPTS)
+        eps, eps_concept = self._extract_series(payload, self.EPS_CONCEPTS)
 
-        if revenue.empty and earnings.empty:
+        if revenue.empty and earnings.empty and eps.empty:
             return pd.DataFrame(
                 columns=[
                     "timestamp",
                     "ticker",
+                    "cik",
                     "event_score",
                     "confidence",
                     "event_type",
                     "source",
                     "form",
+                    "revenue",
+                    "earnings",
+                    "eps",
                     "revenue_yoy",
                     "earnings_yoy",
+                    "eps_yoy",
                 ]
             )
 
+        metric_frames: list[pd.DataFrame] = []
         if not revenue.empty:
             revenue = revenue.copy()
             revenue["revenue_yoy"] = self._yoy_growth(revenue, "val")
+            metric_frames.append(revenue.rename(columns={"val": "revenue"}))
         if not earnings.empty:
             earnings = earnings.copy()
             earnings["earnings_yoy"] = self._yoy_growth(earnings, "val")
+            metric_frames.append(earnings.rename(columns={"val": "earnings"}))
+        if not eps.empty:
+            eps = eps.copy()
+            eps["eps_yoy"] = self._yoy_growth(eps, "val")
+            metric_frames.append(eps.rename(columns={"val": "eps"}))
 
-        merged = pd.merge(
-            revenue.rename(columns={"val": "revenue"}),
-            earnings.rename(columns={"val": "earnings"}),
-            on=["filed", "fy", "fp", "form"],
-            how="outer",
-        ).sort_values("filed")
+        merged = metric_frames[0]
+        for metric_frame in metric_frames[1:]:
+            merged = pd.merge(merged, metric_frame, on=["filed", "fy", "fp", "form"], how="outer")
+        merged = merged.sort_values("filed")
 
-        if "revenue_yoy" not in merged.columns:
-            merged["revenue_yoy"] = float("nan")
-        if "earnings_yoy" not in merged.columns:
-            merged["earnings_yoy"] = float("nan")
+        for column in ("revenue", "earnings", "eps", "revenue_yoy", "earnings_yoy", "eps_yoy"):
+            if column not in merged.columns:
+                merged[column] = float("nan")
 
         score_components = []
-        if "revenue_yoy" in merged.columns:
-            score_components.append(merged["revenue_yoy"].clip(-1.5, 1.5))
-        if "earnings_yoy" in merged.columns:
-            score_components.append(merged["earnings_yoy"].clip(-1.5, 1.5))
+        for column in ("revenue_yoy", "earnings_yoy", "eps_yoy"):
+            score_components.append(merged[column].clip(-1.5, 1.5))
 
-        if score_components:
-            stacked = pd.concat(score_components, axis=1)
-            merged["event_score"] = stacked.mean(axis=1, skipna=True).map(
-                lambda value: 0.0 if pd.isna(value) else float(np.tanh(2.0 * value))
-            )
-            merged["confidence"] = stacked.notna().mean(axis=1).fillna(0.0)
-        else:
-            merged["event_score"] = 0.0
-            merged["confidence"] = 0.0
+        stacked = pd.concat(score_components, axis=1)
+        merged["event_score"] = stacked.mean(axis=1, skipna=True).map(
+            lambda value: 0.0 if pd.isna(value) else float(np.tanh(2.0 * value))
+        )
+        yoy_completeness = stacked.notna().mean(axis=1).fillna(0.0)
+        metric_completeness = merged[["revenue", "earnings", "eps"]].notna().mean(axis=1).fillna(0.0)
+        merged["confidence"] = (0.65 * metric_completeness + 0.35 * yoy_completeness).clip(0.0, 1.0)
 
         merged["timestamp"] = pd.to_datetime(merged["filed"]).dt.tz_localize(None)
         merged["ticker"] = ticker
+        merged["cik"] = cik or ""
         merged["event_type"] = "edgar_companyfacts"
         merged["source"] = "sec_companyfacts"
         merged["revenue_concept"] = revenue_concept or ""
         merged["earnings_concept"] = earnings_concept or ""
+        merged["eps_concept"] = eps_concept or ""
 
         result = merged[
             [
                 "timestamp",
                 "ticker",
+                "cik",
                 "event_score",
                 "confidence",
                 "event_type",
@@ -392,10 +406,15 @@ class SecCompanyFactsEventProvider(EventProvider):
                 "form",
                 "fy",
                 "fp",
+                "revenue",
+                "earnings",
+                "eps",
                 "revenue_yoy",
                 "earnings_yoy",
+                "eps_yoy",
                 "revenue_concept",
                 "earnings_concept",
+                "eps_concept",
             ]
         ].copy()
         result = result[result["confidence"] > 0.0]
@@ -421,7 +440,7 @@ class SecCompanyFactsEventProvider(EventProvider):
                 if error.code != 404:
                     raise
                 continue
-            company_events = self._build_company_events(ticker, payload)
+            company_events = self._build_company_events(ticker, payload, cik=cik)
             if not company_events.empty:
                 events.append(company_events)
 
@@ -461,7 +480,7 @@ class SecCompanyFilingsEventProvider(EventProvider):
     TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
     SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
     SUBMISSIONS_FILE_URL = "https://data.sec.gov/submissions/{name}"
-    DEFAULT_FORMS = ("8-K", "10-Q", "10-K")
+    DEFAULT_FORMS = ("8-K", "8-K/A", "10-Q", "10-Q/A", "10-K", "10-K/A")
 
     def __init__(
         self,
@@ -557,11 +576,26 @@ class SecCompanyFilingsEventProvider(EventProvider):
         normalized_form = form.upper().strip()
         normalized_items = str(items or "").lower()
         normalized_description = str(description or "").lower()
+        event_text = f"{normalized_items} {normalized_description}"
         if normalized_form in {"10-Q", "10-Q/A"}:
             return "quarterly_earnings_report", 0.15, 0.40
         if normalized_form in {"10-K", "10-K/A"}:
             return "annual_earnings_report", 0.15, 0.45
         if normalized_form in {"8-K", "8-K/A"}:
+            if "dividend" in event_text:
+                return "dividend_announcement", 0.10, 0.45
+            if any(term in event_text for term in ("share repurchase", "stock repurchase", "buyback")):
+                return "buyback_announcement", 0.12, 0.45
+            if any(term in event_text for term in ("merger", "acquisition", "acquire", "disposition")) or "2.01" in normalized_items:
+                return "merger_acquisition_update", 0.15, 0.45
+            if any(term in event_text for term in ("debt", "credit agreement", "senior notes", "notes offering")) or "2.03" in normalized_items:
+                return "debt_financing", 0.10, 0.40
+            if any(term in event_text for term in ("equity", "common stock", "registered direct", "private placement")) or "3.02" in normalized_items:
+                return "equity_financing", 0.10, 0.40
+            if any(term in event_text for term in ("guidance", "outlook", "forecast")):
+                return "guidance_update", 0.12, 0.40
+            if "presentation" in event_text or "7.01" in normalized_items:
+                return "investor_presentation", 0.08, 0.35
             is_earnings_release = (
                 "2.02" in normalized_items
                 or "results of operations" in normalized_description
@@ -571,6 +605,12 @@ class SecCompanyFilingsEventProvider(EventProvider):
             if is_earnings_release:
                 return "earnings_release_8k", 0.20, 0.35
             return "material_8k", 0.10, 0.25
+        if normalized_form in {"S-1", "S-1/A", "S-3", "S-3/A", "424B2", "424B5"}:
+            if any(term in event_text for term in ("debt", "notes", "bond", "debenture")):
+                return "debt_financing", 0.10, 0.35
+            return "equity_financing", 0.10, 0.35
+        if normalized_form in {"DEF 14A", "DEFA14A"}:
+            return "regulatory_filing", 0.05, 0.30
         return None
 
     @staticmethod

@@ -63,6 +63,7 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
                 user_id=str(ctx.user.get("id") or ""),
                 feature="paper_job",
                 properties={"mode": "sync", "asof_start": request.asof_start, "asof_end": request.asof_end},
+                role=ctx.user.get("role")
             )
             payload = service.run_paper_batch(
                 PaperRunCommand(
@@ -95,6 +96,7 @@ def build_paper_router(settings: BackendSettings) -> APIRouter:
                 user_id=str(ctx.user.get("id") or ""),
                 feature="paper_job",
                 properties={"mode": "job", "asof_start": request.asof_start, "asof_end": request.asof_end},
+                role=ctx.user.get("role")
             )
             job = runner.submit(
                 PaperRunCommand(

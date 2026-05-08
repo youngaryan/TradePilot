@@ -150,6 +150,45 @@ class EventProviderTests(unittest.TestCase):
         self.assertIn("quarterly_earnings_report", set(events["event_type"]))
         self.assertGreater(float(events["confidence"].max()), 0.0)
 
+    def test_sec_company_filings_provider_classifies_material_financial_events(self) -> None:
+        provider = SecCompanyFilingsEventProvider(
+            user_agent="PairsTradingTest [test@example.com]",
+            cache_dir=fresh_test_dir("artifacts/test_events/sec_financial_events"),
+            forms=["8-K", "S-3", "424B5"],
+        )
+        payload = {
+            "filings": {
+                "recent": {
+                    "accessionNumber": [
+                        "0000000001-24-000010",
+                        "0000000001-24-000011",
+                        "0000000001-24-000012",
+                    ],
+                    "filingDate": ["2024-06-01", "2024-06-02", "2024-06-03"],
+                    "reportDate": ["", "", ""],
+                    "form": ["8-K", "8-K", "424B5"],
+                    "primaryDocument": ["dividend.htm", "debt.htm", "offering.htm"],
+                    "primaryDocDescription": [
+                        "Dividend announcement",
+                        "Entry into Credit Agreement and senior notes",
+                        "Prospectus supplement common stock offering",
+                    ],
+                    "items": ["8.01", "2.03", ""],
+                }
+            }
+        }
+
+        with patch.object(provider, "_load_ticker_map", return_value={"AAA": "0000000001"}), patch.object(
+            provider,
+            "_load_submission_payload",
+            return_value=payload,
+        ):
+            events = provider.get_events(["AAA"], "2024-01-01", "2024-12-31")
+
+        self.assertIn("dividend_announcement", set(events["event_type"]))
+        self.assertIn("debt_financing", set(events["event_type"]))
+        self.assertIn("equity_financing", set(events["event_type"]))
+
     def test_sec_filings_provider_skips_ticker_level_http_errors(self) -> None:
         provider = SecCompanyFilingsEventProvider(
             user_agent="PairsTradingTest [test@example.com]",

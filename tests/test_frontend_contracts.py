@@ -29,6 +29,22 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("selectedTickers.join(\" + \")", source)
         self.assertIn("SentimentHeatmapChart points={filteredDailyPoints}", source)
 
+    def test_sentiment_lab_shows_financial_events_matrix_and_analysis(self) -> None:
+        lab_source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
+        client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("getFinancialEvents", lab_source)
+        self.assertIn("FinancialEventsMatrix", lab_source)
+        self.assertIn("Financial Events Analysis", lab_source)
+        self.assertIn("financialSentimentComparison", lab_source)
+        self.assertIn("/api/sentiment/financial-events", client_source)
+        self.assertIn("export interface FinancialEventRecord", type_source)
+        self.assertIn("export interface FinancialEventsPayload", type_source)
+        self.assertIn(".matrix-comparison-grid", style_source)
+        self.assertIn(".financial-analysis-grid", style_source)
+
     def test_symbol_inputs_preserve_raw_text_while_typing_spaces(self) -> None:
         sentiment_source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
         live_source = PROJECT_ROOT.joinpath("frontend/src/features/LiveOps.tsx").read_text(encoding="utf-8")
@@ -285,6 +301,27 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("export function TelemetryCategoryBars", source)
         self.assertIn("export function TelemetryConsentBars", source)
         self.assertIn("export function TelemetryTopEventsBars", source)
+
+    def test_backtest_lab_exposes_realtime_baseline_chart_contract(self) -> None:
+        lab_source = PROJECT_ROOT.joinpath("frontend/src/features/BacktestLab.tsx").read_text(encoding="utf-8")
+        chart_source = PROJECT_ROOT.joinpath("frontend/src/components/BacktestPerformanceChart.tsx").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("progress_snapshot", lab_source)
+        self.assertIn("BacktestPerformanceChart", lab_source)
+        self.assertIn("Performance vs Baseline", lab_source)
+        self.assertIn("Trade-Level Summary", lab_source)
+        self.assertIn("createSeriesMarkers", chart_source)
+        self.assertIn("CrosshairMode.Normal", chart_source)
+        self.assertIn("Reset zoom", chart_source)
+        self.assertIn("Pane 1: strategy vs baseline equity", chart_source)
+        self.assertIn("prepared.hoverRows.get(hoverKey)", chart_source)
+        self.assertIn("prepared.hoverRows.get(latestKey)", chart_source)
+        self.assertIn("export interface BacktestVisualizationPayload", type_source)
+        self.assertIn("baseline_equity", type_source)
+        self.assertIn("trade_summary", type_source)
+        self.assertIn(".backtest-chart-canvas", style_source)
 
 
 if __name__ == "__main__":

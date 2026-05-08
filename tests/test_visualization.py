@@ -5,12 +5,53 @@ import unittest
 
 import pandas as pd
 
+from pairs_trading.backend.backtest_visuals import build_backtest_visualization
 from pairs_trading.engines.backtesting import ExperimentResult
 from tests.common import fresh_test_dir
 from pairs_trading.reporting.experiment import ExperimentVisualizer
 
 
 class VisualizationTests(unittest.TestCase):
+    def test_backtest_visualization_aligns_strategy_baseline_indicators_and_trades(self) -> None:
+        index = pd.date_range("2024-01-01", periods=8, freq="D")
+        equity_curve = pd.DataFrame(
+            {
+                "net_return": [0.0, 0.02, -0.01, 0.015, -0.005, 0.01, 0.0, 0.012],
+                "position": [0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0],
+                "signal": [0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0],
+                "forecast": [0.0, 0.8, 0.7, 0.0, -0.6, -0.5, 0.0, 0.0],
+                "turnover": [0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0],
+            },
+            index=index,
+        )
+        prices = pd.DataFrame(
+            {
+                "AAA": [100, 102, 101, 103, 104, 103, 105, 107],
+                "BBB": [50, 51, 52, 51, 52, 53, 54, 55],
+            },
+            index=index,
+        )
+
+        payload = build_backtest_visualization(
+            equity_curve=equity_curve,
+            prices=prices,
+            bars_per_year=252,
+            completed_folds=2,
+            total_folds=4,
+            status="running",
+        )
+
+        self.assertEqual(payload["status"], "running")
+        self.assertEqual(payload["completed_folds"], 2)
+        self.assertEqual(len(payload["equity"]), len(payload["price"]))
+        self.assertEqual(len(payload["equity"]), len(payload["indicators"]))
+        self.assertTrue(all(row["timestamp"] == payload["price"][idx]["timestamp"] for idx, row in enumerate(payload["equity"])))
+        self.assertAlmostEqual(payload["equity"][0]["baseline_equity"], 1.0)
+        self.assertGreater(payload["metrics"]["baseline_total_return"], 0.0)
+        self.assertGreaterEqual(len(payload["trade_events"]), 4)
+        self.assertGreaterEqual(len(payload["trade_summary"]), 2)
+        self.assertIn("rsi", payload["indicators"][-1])
+
     def test_visualizer_creates_dashboard_files(self) -> None:
         output_dir = fresh_test_dir("artifacts/test_visuals")
         index = pd.date_range("2024-01-01", periods=5, freq="D")

@@ -16,6 +16,10 @@ PAID_PLANS = {"pro", "team", "enterprise", "pro_trial"}
 PAID_STATUSES = {"active"}
 
 
+def is_admin_role(role: object) -> bool:
+    return str(role or "user").lower() == "admin"
+
+
 def is_paid_subscription(subscription: dict | None, *, allow_trial_entitlements: bool = False) -> bool:
     if not subscription:
         return False
@@ -113,6 +117,8 @@ def require_paid_context(settings: BackendSettings, *, feature: str = "premium f
                         "message": f"This machine API key is missing the required scope: {machine_scope}.",
                     },
                 )
+        if is_admin_role(ctx.user.get("role")):
+            return ctx
         subscription = store.get_subscription(organization_id=ctx.organization_id)
         if not is_paid_subscription(subscription, allow_trial_entitlements=settings.allow_trial_entitlements):
             raise HTTPException(

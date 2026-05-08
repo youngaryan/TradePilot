@@ -42,6 +42,7 @@ class BackendSettings:
     smtp_password: str | None = None
     smtp_starttls: bool = True
     email_from: str = "no-reply@quantops.local"
+    edgar_user_agent: str | None = None
     sentry_dsn: str | None = None
     otel_exporter_otlp_endpoint: str | None = None
     max_request_bytes: int = 2_000_000
@@ -174,6 +175,7 @@ class BackendSettings:
             smtp_password=os.getenv("SMTP_PASSWORD"),
             smtp_starttls=_env_bool("SMTP_STARTTLS", True),
             email_from=os.getenv("EMAIL_FROM", "no-reply@quantops.local"),
+            edgar_user_agent=os.getenv("SEC_EDGAR_USER_AGENT") or os.getenv("EDGAR_USER_AGENT"),
             sentry_dsn=os.getenv("SENTRY_DSN"),
             otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
             max_request_bytes=int(os.getenv("MAX_REQUEST_BYTES", "2000000")),

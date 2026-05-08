@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -183,6 +183,7 @@ class WalkForwardBacktester:
         self,
         experiment_name: str | None = None,
         validation_trial_returns: pd.DataFrame | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ExperimentResult:
         fold_boundaries = self._fold_boundaries()
         if not fold_boundaries:
@@ -218,6 +219,17 @@ class WalkForwardBacktester:
             )
             fold_metrics.append(metrics)
             diagnostics.append({"fold": boundary.fold, "diagnostics": evaluated_output.diagnostics})
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "completed_folds": len(fold_frames),
+                        "total_folds": len(fold_boundaries),
+                        "latest_fold": boundary.fold,
+                        "equity_curve": pd.concat(fold_frames, axis=0).sort_index(),
+                        "fold_metrics": pd.DataFrame(fold_metrics),
+                        "diagnostics": list(diagnostics),
+                    }
+                )
 
         combined = pd.concat(fold_frames, axis=0)
         overall_summary = self._compute_metrics(combined)

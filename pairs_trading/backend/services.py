@@ -30,6 +30,7 @@ from ..data.sentiment_accumulator import ShadowSentimentAccumulator
 from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from ..platform import build_metadata_store
 from .config import BackendSettings
+from .backtest_visuals import build_backtest_visualization
 from .job_queue import enqueue_quant_job
 from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
@@ -413,6 +414,22 @@ def _result_payload(run_output: dict[str, Any]) -> dict[str, Any]:
     equity_curve = getattr(result, "equity_curve", None)
     summary = json_ready(run_output.get("summary", {}))
     validation = json_ready(run_output.get("validation", {}))
+    visualization = build_backtest_visualization(
+        equity_curve=equity_curve,
+        prices=run_output.get("prices"),
+        bars_per_year=int(run_output.get("bars_per_year") or summary.get("walk_forward_config", {}).get("bars_per_year", 252) or 252),
+        completed_folds=int(summary.get("folds") or 0),
+        total_folds=int(summary.get("folds") or 0),
+        status="completed",
+    )
+    baseline_metrics = {
+        "baseline_total_return": visualization.get("metrics", {}).get("baseline_total_return"),
+        "baseline_cagr": visualization.get("metrics", {}).get("baseline_cagr"),
+        "baseline_sharpe": visualization.get("metrics", {}).get("baseline_sharpe"),
+        "baseline_max_drawdown": visualization.get("metrics", {}).get("baseline_max_drawdown"),
+        "benchmark_outperformance": visualization.get("metrics", {}).get("benchmark_outperformance"),
+    }
+    summary = {**summary, **baseline_metrics}
     return {
         "summary": summary,
         "validation": validation,
@@ -421,6 +438,9 @@ def _result_payload(run_output: dict[str, Any]) -> dict[str, Any]:
         "fold_metrics_tail": json_ready(fold_metrics.tail(12)) if hasattr(fold_metrics, "tail") else [],
         "equity_curve_tail": json_ready(equity_curve.tail(80)) if hasattr(equity_curve, "tail") else [],
         "equity_curve_points": _equity_curve_points(equity_curve),
+        "visualization": json_ready(visualization),
+        "trade_events": json_ready(visualization.get("trade_events", [])),
+        "trade_summary": json_ready(visualization.get("trade_summary", [])),
         "decision": _decision_report(summary, validation),
     }
 
@@ -481,6 +501,7 @@ class BacktestJob:
     stage: str = "queued"
     message: str = "Waiting for a worker."
     warnings: list[str] = field(default_factory=list)
+    progress_snapshot: dict[str, Any] | None = None
     started_at_utc: str | None = None
     finished_at_utc: str | None = None
     result: dict[str, Any] | None = None
@@ -499,6 +520,7 @@ class BacktestJob:
             "stage": self.stage,
             "message": self.message,
             "warnings": self.warnings,
+            "progress_snapshot": self.progress_snapshot,
             "started_at_utc": self.started_at_utc,
             "finished_at_utc": self.finished_at_utc,
             "result": self.result,
@@ -574,13 +596,18 @@ class BacktestJobRunner:
             self._save_locked(job)
 
     def _run_job(self, job_id: str, request: BacktestRunRequest, organization_id: str) -> None:
-        def progress(stage: str, message: str, value: float) -> None:
+        def progress(stage: str, message: str, value: float, snapshot: dict[str, Any] | None = None) -> None:
+            updates: dict[str, Any] = {
+                "stage": stage,
+                "message": message,
+                "progress": float(max(0.0, min(value, 0.98))),
+            }
+            if snapshot is not None:
+                updates["progress_snapshot"] = snapshot
             self._set_status(
                 job_id,
                 "running",
-                stage=stage,
-                message=message,
-                progress=float(max(0.0, min(value, 0.98))),
+                **updates,
             )
 
         self._set_status(
@@ -664,6 +691,7 @@ class BacktestJobRunner:
             job_id,
             "completed",
             result=result,
+            progress_snapshot=result.get("visualization"),
             finished_at_utc=_utc_now_iso(),
             progress=1.0,
             stage="completed",
@@ -795,11 +823,30 @@ class BacktestService:
         request: BacktestRunRequest,
         *,
         organization_id: str | None = None,
-        progress: Callable[[str, str, float], None] | None = None,
+        progress: Callable[[str, str, float, dict[str, Any] | None], None] | None = None,
     ) -> dict[str, Any]:
-        def report(stage: str, message: str, value: float) -> None:
+        def report(stage: str, message: str, value: float, snapshot: dict[str, Any] | None = None) -> None:
             if progress is not None:
-                progress(stage, message, value)
+                progress(stage, message, value, snapshot)
+
+        def snapshot_progress(payload: dict[str, Any]) -> None:
+            completed_folds = int(payload.get("completed_folds") or 0)
+            total_folds = int(payload.get("total_folds") or 0)
+            snapshot = build_backtest_visualization(
+                equity_curve=payload.get("equity_curve"),
+                prices=payload.get("prices"),
+                bars_per_year=int(payload.get("bars_per_year") or request.bars_per_year),
+                completed_folds=completed_folds,
+                total_folds=total_folds,
+                status="running",
+            )
+            fold_fraction = completed_folds / max(total_folds, 1)
+            report(
+                "simulating_folds",
+                f"Completed walk-forward fold {completed_folds} of {total_folds}. Strategy and baseline curves are synchronized through the latest test bar.",
+                0.22 + 0.66 * fold_fraction,
+                snapshot,
+            )
 
         self.validate_request(request)
         sector_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.sector_dataset_id, suffixes=(".json", ".csv", ".parquet"))
@@ -868,6 +915,7 @@ class BacktestService:
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
             )
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
@@ -885,6 +933,7 @@ class BacktestService:
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
             )
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
@@ -922,6 +971,7 @@ class BacktestService:
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
             )
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
@@ -947,6 +997,7 @@ class BacktestService:
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
             )
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
@@ -970,6 +1021,7 @@ class BacktestService:
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
             )
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
@@ -1020,6 +1072,7 @@ class BacktestService:
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
             )
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)

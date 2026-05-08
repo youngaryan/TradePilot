@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, BrainCircuit, DatabaseZap, Loader2, Newspaper, Play, RefreshCw } from "lucide-react";
+import { AlertTriangle, BrainCircuit, DatabaseZap, FileText, Loader2, Newspaper, Play, RefreshCw } from "lucide-react";
 
-import { getSentimentAccumulationJob, getSentimentDataset, startSentimentAccumulationJob } from "../api/client";
-import type { SentimentAccumulationJob, SentimentAccumulationRequest, SentimentDatasetPayload } from "../api/types";
+import { getFinancialEvents, getSentimentAccumulationJob, getSentimentDataset, startSentimentAccumulationJob } from "../api/client";
+import type { FinancialEventRecord, FinancialEventsPayload, SentimentAccumulationJob, SentimentAccumulationRequest, SentimentDailyPoint, SentimentDatasetPayload } from "../api/types";
 import { Badge } from "../components/Badge";
 import { SentimentHeatmapChart, SentimentSourceBars, SentimentTickerBars, SentimentTimelineChart } from "../components/Charts";
 import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
-import { formatDateTime, formatNumber, splitList, splitSymbols, statusTone } from "../utils/format";
+import { formatDateTime, formatNumber, formatPercent, splitList, splitSymbols, statusTone, toNumber } from "../utils/format";
 
 const DEFAULT_NEWS_FILE = "examples/news_headlines.sample.csv";
 const TABLE_PAGE_SIZE = 12;
@@ -132,6 +132,191 @@ function PaginationControls({
   );
 }
 
+function optionalText(value: string | null | undefined, fallback = "Unavailable") {
+  const trimmed = String(value ?? "").trim();
+  return trimmed || fallback;
+}
+
+function beatMissTone(status: string) {
+  if (status === "beat") return "good" as const;
+  if (status === "miss") return "bad" as const;
+  if (status === "inline") return "info" as const;
+  return "neutral" as const;
+}
+
+function directionTone(direction: string) {
+  if (direction === "positive") return "good" as const;
+  if (direction === "negative") return "bad" as const;
+  return "neutral" as const;
+}
+
+function completenessTone(level: string) {
+  if (level === "high") return "good" as const;
+  if (level === "medium") return "info" as const;
+  if (level === "low") return "warn" as const;
+  return "neutral" as const;
+}
+
+function FinancialEventCard({ row }: { row: FinancialEventRecord }) {
+  return (
+    <article className="financial-event-card">
+      <div className="financial-event-card__top">
+        <div className="financial-event-date">
+          <strong>{row.ticker}</strong>
+          <span>{row.date}</span>
+        </div>
+        <span className={`financial-event-type financial-event-type--${directionTone(row.event_direction)}`}>
+          {row.event_type_label}
+        </span>
+      </div>
+
+      <div className="financial-event-card__body">
+        <strong>{row.event_title}</strong>
+        <p>{row.summary}</p>
+      </div>
+
+      <div className="financial-event-field-grid">
+        <div className="financial-event-field">
+          <span>Reported</span>
+          <strong>{optionalText(row.reported_result)}</strong>
+        </div>
+        <div className="financial-event-field">
+          <span>Expected</span>
+          <strong>{optionalText(row.expected_result)}</strong>
+        </div>
+        <div className="financial-event-field">
+          <span>Status</span>
+          <Badge label={row.beat_miss === "not_available" ? "no consensus" : row.beat_miss} tone={beatMissTone(row.beat_miss)} />
+        </div>
+        <div className="financial-event-field">
+          <span>Market</span>
+          <strong>{optionalText(row.market_reaction)}</strong>
+        </div>
+      </div>
+
+      <div className="financial-event-card__footer">
+        <span>{row.form ?? row.source}</span>
+        {row.source_url ? (
+          <a className="source-link" href={row.source_url} target="_blank" rel="noreferrer">
+            Source
+          </a>
+        ) : (
+          <span>{row.source}</span>
+        )}
+        <Badge label={`${row.data_completeness} ${formatPercent(row.confidence, 0)}`} tone={completenessTone(row.data_completeness)} />
+      </div>
+    </article>
+  );
+}
+
+function FinancialEventsMatrix({
+  payload,
+  isLoading,
+  error,
+  page,
+  onPageChange
+}: {
+  payload: FinancialEventsPayload | null;
+  isLoading: boolean;
+  error: string | null;
+  page: number;
+  onPageChange: (page: number) => void;
+}) {
+  const rows = payload?.events ?? [];
+  const pagination = paginate(rows, page);
+  return (
+    <div className="financial-events-matrix">
+      <div className="table-toolbar">
+        <strong>
+          {payload?.request.symbols.length ? payload.request.symbols.join(" + ") : "No company selected"}
+        </strong>
+        <PaginationControls page={pagination.page} pageCount={pagination.pageCount} totalRows={rows.length} onPageChange={onPageChange} />
+      </div>
+      {isLoading ? (
+        <div className="inline-loading">
+          <Loader2 size={16} />
+          Loading verified financial events
+        </div>
+      ) : null}
+      {error ? (
+        <div className="inline-error">
+          <AlertTriangle size={16} />
+          {error}
+        </div>
+      ) : null}
+      {pagination.pageRows.length ? (
+        <div className="financial-event-list">
+          {pagination.pageRows.map((row) => (
+            <FinancialEventCard key={row.id} row={row} />
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state financial-events-empty">
+          {isLoading ? "Loading financial events." : "No verified financial events were found for the selected symbols and dates."}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function sentimentAverage(points: SentimentDailyPoint[], tickers: string[]) {
+  const tickerSet = new Set(tickers.map((ticker) => ticker.toUpperCase()));
+  const relevant = tickerSet.size ? points.filter((point) => tickerSet.has(String(point.ticker).toUpperCase())) : points;
+  const weighted = relevant.reduce(
+    (state, point) => {
+      const weight = Math.max(1, toNumber(point.article_count, 1));
+      state.score += toNumber(point.sentiment_score) * weight;
+      state.weight += weight;
+      return state;
+    },
+    { score: 0, weight: 0 }
+  );
+  return weighted.weight ? weighted.score / weighted.weight : null;
+}
+
+function financialDirectionSummary(events: FinancialEventRecord[]) {
+  return events.reduce(
+    (state, event) => {
+      const direction = event.event_direction === "positive" || event.event_direction === "negative" ? event.event_direction : "neutral";
+      state[direction] += 1;
+      return state;
+    },
+    { positive: 0, negative: 0, neutral: 0 }
+  );
+}
+
+function financialSentimentComparison(payload: FinancialEventsPayload | null, points: SentimentDailyPoint[], tickers: string[]) {
+  if (!payload?.events.length) return ["Inferred: no financial-event comparison is possible until verified event rows are available."];
+  const average = sentimentAverage(points, tickers);
+  if (average === null) return ["Inferred: verified financial events are available, but no matching sentiment rows are loaded for the current ticker filter."];
+  const directions = financialDirectionSummary(payload.events);
+  const financialSkew = directions.positive > directions.negative ? "positive" : directions.negative > directions.positive ? "negative" : "mixed";
+  const sentimentSkew = average > 0.05 ? "positive" : average < -0.05 ? "negative" : "neutral";
+  if (financialSkew === "mixed" || sentimentSkew === "neutral") {
+    return [`Inferred: sentiment averages ${formatNumber(average)} while verified financial events are ${financialSkew}; the evidence is not strongly aligned or contradictory.`];
+  }
+  return [
+    `Inferred: sentiment averages ${formatNumber(average)} and financial events skew ${financialSkew}; this ${financialSkew === sentimentSkew ? "supports" : "contradicts"} the current sentiment read.`
+  ];
+}
+
+function AnalysisList({ title, rows, empty }: { title: string; rows: string[]; empty: string }) {
+  return (
+    <div className="analysis-list">
+      <strong>{title}</strong>
+      {rows.length ? (
+        <ul>
+          {rows.map((row) => (
+            <li key={row}>{row}</li>
+          ))}
+        </ul>
+      ) : (
+        <span>{empty}</span>
+      )}
+    </div>
+  );
+}
+
 export function SentimentLab() {
   const [request, setRequest] = useState<SentimentAccumulationRequest>(() => defaultRequest());
   const [symbolsText, setSymbolsText] = useState(() => defaultRequest().symbols.join(" "));
@@ -147,6 +332,10 @@ export function SentimentLab() {
   const [headlineSearch, setHeadlineSearch] = useState("");
   const [headlinePage, setHeadlinePage] = useState(1);
   const [scoredPage, setScoredPage] = useState(1);
+  const [financialEvents, setFinancialEvents] = useState<FinancialEventsPayload | null>(null);
+  const [financialEventsLoading, setFinancialEventsLoading] = useState(false);
+  const [financialEventsError, setFinancialEventsError] = useState<string | null>(null);
+  const [financialEventsPage, setFinancialEventsPage] = useState(1);
 
   async function refreshDataset(datasetId?: string | null) {
     setError(null);
@@ -427,6 +616,17 @@ export function SentimentLab() {
   }, [filteredHeadlines]);
   const headlinePagination = paginate(filteredHeadlines, headlinePage);
   const scoredPagination = paginate(filteredScoredHeadlines, scoredPage);
+  const financialEventSymbols = useMemo(() => {
+    const baseSymbols = selectedTickers.length ? selectedTickers : availableTickers.length ? availableTickers : request.symbols;
+    return Array.from(new Set(baseSymbols.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))).slice(0, 8);
+  }, [selectedTickers, availableTickers, request.symbols]);
+  const financialEventSymbolKey = financialEventSymbols.join(",");
+  const financialEventStart = chartStart || availableDateRange.start || request.start;
+  const financialEventEnd = chartEnd || availableDateRange.end || request.end;
+  const financialComparison = useMemo(
+    () => financialSentimentComparison(financialEvents, filteredDailyPoints, financialEventSymbols),
+    [financialEvents, filteredDailyPoints, financialEventSymbols]
+  );
 
   useEffect(() => {
     if (!availableTickers.length) {
@@ -448,8 +648,37 @@ export function SentimentLab() {
   }, [availableDateRange, chartStart, chartEnd]);
 
   useEffect(() => {
+    if (!financialEventSymbols.length || !financialEventStart || !financialEventEnd) return;
+    let cancelled = false;
+    setFinancialEventsLoading(true);
+    setFinancialEventsError(null);
+    void getFinancialEvents({
+      symbols: financialEventSymbols,
+      start: financialEventStart,
+      end: financialEventEnd,
+      limit: 80
+    })
+      .then((payload) => {
+        if (cancelled) return;
+        setFinancialEvents(payload);
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        setFinancialEvents(null);
+        setFinancialEventsError(caught instanceof Error ? caught.message : "Unable to load financial events.");
+      })
+      .finally(() => {
+        if (!cancelled) setFinancialEventsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [financialEventSymbolKey, financialEventStart, financialEventEnd]);
+
+  useEffect(() => {
     setHeadlinePage(1);
     setScoredPage(1);
+    setFinancialEventsPage(1);
   }, [selectedTickers, selectedSource, chartStart, chartEnd, headlineSearch, dataset]);
 
   return (
@@ -472,13 +701,14 @@ export function SentimentLab() {
         <MetricCard label="Daily Rows" value={formatNumber(dataset?.summary.daily_rows ?? 0, 0)} detail="Ticker-date sentiment rows" />
         <MetricCard label="Tickers" value={formatNumber(dataset?.summary.ticker_count ?? request.symbols.length, 0)} detail={request.symbols.join(" ")} />
         <MetricCard label="Sources" value={formatNumber(dataset?.summary.source_count ?? request.providers.length, 0)} detail={request.providers.join(" + ")} icon={<DatabaseZap size={17} />} />
+        <MetricCard label="Financial Events" value={formatNumber(financialEvents?.summary.event_count ?? 0, 0)} detail={financialEventSymbols.join(" ") || "No company selected"} icon={<FileText size={17} />} />
       </section>
 
       <div className="content-grid">
         <Panel title="1. Sources And Symbols" subtitle="RSS works without a key; API providers are optional supplements and report warnings if credentials fail">
           <label>
             Symbols
-            <input value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="AAPL MSFT NVDA GLD" />
+            <input value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="AAPL MSFT NVDA GLD KO COKE" />
           </label>
           <div className="provider-check-grid">
             {SOURCE_OPTIONS.map((source) => (
@@ -767,8 +997,36 @@ export function SentimentLab() {
         />
       </Panel>
 
-      <Panel title="Sentiment Heat Map" subtitle="Ticker by date matrix with a zero-centered professional diverging palette">
-        <SentimentHeatmapChart points={filteredDailyPoints} />
+      <div className="matrix-comparison-grid">
+        <Panel title="Sentiment Matrix" subtitle="Ticker by date matrix with a zero-centered professional diverging palette" className="matrix-panel">
+          <SentimentHeatmapChart points={filteredDailyPoints} />
+        </Panel>
+        <Panel title="Financial Events Matrix" subtitle="Verified company events, reported results, consensus gaps, reactions, and source confidence" className="matrix-panel">
+          <FinancialEventsMatrix
+            payload={financialEvents}
+            isLoading={financialEventsLoading}
+            error={financialEventsError}
+            page={financialEventsPage}
+            onPageChange={setFinancialEventsPage}
+          />
+        </Panel>
+      </div>
+
+      <Panel title="Financial Events Analysis" subtitle="Verified facts are separated from inferred implications and sentiment comparison">
+        <div className="financial-analysis-summary">
+          <strong>{financialEvents?.analysis.summary ?? "No financial-events analysis loaded yet."}</strong>
+          <span>
+            Window {financialEventStart || "-"} to {financialEventEnd || "-"} | {financialEventSymbols.join(" + ") || "No company selected"}
+          </span>
+        </div>
+        <div className="financial-analysis-grid">
+          <AnalysisList title="Verified Data" rows={financialEvents?.analysis.verified ?? []} empty="No verified financial event facts found for this selection." />
+          <AnalysisList title="Inferred Analysis" rows={[...(financialEvents?.analysis.inferred ?? []), ...financialComparison]} empty="No inference available." />
+          <AnalysisList title="Risks" rows={financialEvents?.analysis.risks ?? []} empty="No financing, filing, or event risks were identified in retrieved rows." />
+          <AnalysisList title="Catalysts" rows={financialEvents?.analysis.catalysts ?? []} empty="No catalyst-class events were identified in retrieved rows." />
+          <AnalysisList title="Missing Or Unavailable Data" rows={financialEvents?.analysis.missing_data ?? []} empty="No missing-data notes." />
+          <AnalysisList title="Source Notes" rows={financialEvents?.analysis.source_notes ?? []} empty="No source notes." />
+        </div>
       </Panel>
 
       <div className="content-grid">

@@ -21,6 +21,7 @@ import type {
   SentimentAccumulationRequest,
   SentimentAccumulationJob,
   SentimentDatasetPayload,
+  FinancialEventsPayload,
   PaperStrategy,
   PricingPayload,
   SignupRequest,
@@ -359,6 +360,15 @@ export function getBacktestJob(jobId: string) {
 export function getSentimentDataset(datasetId?: string | null) {
   const suffix = datasetId ? `?dataset_id=${encodeURIComponent(datasetId)}` : "";
   return requestJson<SentimentDatasetPayload>(`/api/sentiment/dataset${suffix}`);
+}
+
+export function getFinancialEvents(params: { symbols: string[]; start: string; end: string; limit?: number }) {
+  const search = new URLSearchParams();
+  search.set("symbols", params.symbols.join(","));
+  search.set("start", params.start);
+  search.set("end", params.end);
+  if (params.limit) search.set("limit", String(params.limit));
+  return requestJson<FinancialEventsPayload>(`/api/sentiment/financial-events?${search.toString()}`);
 }
 
 export function accumulateSentiment(request: SentimentAccumulationRequest) {

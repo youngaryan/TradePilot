@@ -17,6 +17,10 @@ DEFAULT_QUOTAS: dict[str, float] = {
 }
 
 
+def _is_admin_role(role: object) -> bool:
+    return str(role or "user").lower() == "admin"
+
+
 @dataclass(frozen=True)
 class QuotaExceeded(Exception):
     feature: str
@@ -53,7 +57,9 @@ class QuotaService:
                 continue
         return quotas
 
-    def check(self, *, organization_id: str, feature: str, quantity: float = 1.0) -> dict[str, Any]:
+    def check(self, *, organization_id: str, feature: str, quantity: float = 1.0, role: object = "user") -> dict[str, Any]:
+        if _is_admin_role(role):
+            return {"feature": feature, "limit": None, "used": 0.0, "remaining": None, "bypassed": True}
         quotas = self.quotas_for_org(organization_id=organization_id)
         limit = float(quotas.get(feature, DEFAULT_QUOTAS.get(feature, 0)))
         used = self.store.usage_count_since(
@@ -74,7 +80,12 @@ class QuotaService:
             properties=properties,
         )
 
-    def check_and_record(self, *, organization_id: str, feature: str, quantity: float = 1.0, user_id: str | None = None, properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    def check_and_record(self, *, organization_id: str, feature: str, quantity: float = 1.0, user_id: str | None = None, properties: dict[str, Any] | None = None, role: object = "user") -> dict[str, Any]:
+        if _is_admin_role(role):
+            return {
+                "allowance": self.check(organization_id=organization_id, feature=feature, quantity=quantity, role=role),
+                "usage": None,
+            }
         allowance = self.check(organization_id=organization_id, feature=feature, quantity=quantity)
         usage = self.record(
             organization_id=organization_id,

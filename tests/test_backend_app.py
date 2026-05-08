@@ -399,6 +399,51 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(reactivate.status_code, 200)
         self.assertEqual(reactivate.json()["role"], "admin")
 
+    def test_admin_role_bypasses_paid_subscription_for_premium_routes(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+        from pairs_trading.platform import SQLiteMetadataStore
+
+        workspace = fresh_test_dir("artifacts/test_backend_admin_paid_bypass")
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "runs",
+            paper_job_state_dir=workspace / "paper_jobs",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            sentiment_job_state_dir=workspace / "sentiment_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            default_paper_config=workspace / "missing.json",
+        )
+        app = create_app(settings)
+        client = TestClient(app)
+
+        user_login = client.post("/api/auth/login", json={"email": "user@quantops.local", "password": "quantops-user"})
+        self.assertEqual(user_login.status_code, 200)
+        headers = {
+            "X-Organization-Id": user_login.json()["active_organization_id"],
+            "X-CSRF-Token": client.cookies.get("quantops_csrf") or "",
+        }
+
+        billing_before = client.get("/api/billing/status", headers=headers)
+        self.assertEqual(billing_before.status_code, 200)
+        self.assertFalse(billing_before.json()["premium"])
+        blocked = client.post("/api/backtests/run", headers=headers, json={})
+        self.assertEqual(blocked.status_code, 402)
+        self.assertEqual(blocked.json()["detail"]["code"], "payment_required")
+
+        store = SQLiteMetadataStore(settings.metadata_db_path)
+        store.update_user_role(user_id=user_login.json()["user"]["id"], role="admin")
+
+        me_after = client.get("/api/auth/me", headers=headers)
+        self.assertEqual(me_after.status_code, 200)
+        self.assertEqual(me_after.json()["user"]["role"], "admin")
+        billing_after = client.get("/api/billing/status", headers=headers)
+        self.assertEqual(billing_after.status_code, 200)
+        self.assertTrue(billing_after.json()["premium"])
+        self.assertEqual(billing_after.json()["access"], "admin")
+        allowed = client.post("/api/backtests/run", headers=headers, json={})
+        self.assertEqual(allowed.status_code, 202)
+
     def test_signup_and_landing_analytics_are_recorded_for_admins(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings

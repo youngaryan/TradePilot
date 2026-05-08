@@ -35,6 +35,7 @@ def build_backtest_router(settings: BackendSettings) -> APIRouter:
                 user_id=str(ctx.user.get("id") or ""),
                 feature="backtest_job",
                 properties={"pipeline": request.pipeline, "symbols": request.symbols},
+                role=ctx.user.get("role")
             )
             return runner.submit(request, organization_id=ctx.organization_id, user_id=str(ctx.user.get("id") or ""))
         except QuotaExceeded as exc:

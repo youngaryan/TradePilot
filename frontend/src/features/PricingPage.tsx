@@ -15,10 +15,12 @@ function planTone(plan: PricingPlan, currentPlan?: string | null) {
 export function PricingPage({
   workspace,
   reason,
+  isAdminAccess,
   onRefresh
 }: {
   workspace: WorkspacePayload | null;
   reason?: string | null;
+  isAdminAccess?: boolean;
   onRefresh: () => Promise<void>;
 }) {
   const [pricing, setPricing] = useState<PricingPayload | null>(null);
@@ -51,6 +53,9 @@ export function PricingPage({
     String(subscription?.status ?? "") === "active" &&
     String(subscription?.plan ?? "free") !== "free"
   );
+  const hasAccess = Boolean(isAdminAccess || isPremium);
+  const accessLabel = isAdminAccess || billing?.access === "admin" ? "Admin access" : isPremium ? "Premium active" : "Free access";
+  const premiumDetail = isAdminAccess || billing?.access === "admin" ? "Unlocked by admin role" : "Checked server-side on premium APIs";
 
   async function handleCheckout(plan: PricingPlan) {
     if (!plan.premium) return;
@@ -90,10 +95,10 @@ export function PricingPage({
   return (
     <div className="pricing-page">
       <SectionHeader eyebrow="Pricing and Access" title="Choose the plan that unlocks the research workflow">
-        <Badge label={isPremium ? "Premium active" : "Free access"} tone={isPremium ? "good" : "warn"} />
+        <Badge label={accessLabel} tone={hasAccess ? "good" : "warn"} />
       </SectionHeader>
 
-      {reason ? (
+      {reason && !isAdminAccess ? (
         <section className="payment-wall-banner">
           <LockKeyhole size={20} />
           <div>
@@ -108,7 +113,7 @@ export function PricingPage({
 
       <div className="metric-grid">
         <MetricCard label="Current plan" value={subscription?.plan ?? "free"} detail={subscription?.status ?? "No paid subscription"} icon={<CreditCard size={18} />} />
-        <MetricCard label="Premium access" value={isPremium ? "Enabled" : "Locked"} detail="Checked server-side on premium APIs" tone={isPremium ? "good" : "warn"} icon={<ShieldCheck size={18} />} />
+        <MetricCard label="Premium access" value={hasAccess ? "Enabled" : "Locked"} detail={premiumDetail} tone={hasAccess ? "good" : "warn"} icon={<ShieldCheck size={18} />} />
         <MetricCard label="Billing period" value={subscription?.current_period_end_utc ? "Synced" : "Not synced"} detail={subscription?.current_period_end_utc ?? "Stripe webhook has not set a period yet"} />
       </div>
 
@@ -166,7 +171,7 @@ export function PricingPage({
         <Explainer
           icon={<ShieldCheck size={17} />}
           title="Why the payment wall is server-side"
-          body="The frontend explains access, but the backend enforces it. Backtest, sentiment, paper-trading, and refresh run endpoints return payment_required unless the active workspace has an active paid subscription."
+          body="The frontend explains access, but the backend enforces it. Backtest, sentiment, paper-trading, and refresh run endpoints return payment_required unless the workspace has an active paid subscription or the current user has admin access."
         />
       </Panel>
     </div>

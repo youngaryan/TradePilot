@@ -258,7 +258,7 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
 
     @router.get("/billing/status")
     def billing_status(ctx: RequestContext = Depends(context)) -> dict[str, Any]:
-        return billing_service.status(organization_id=ctx.organization_id)
+        return billing_service.status(organization_id=ctx.organization_id, role=ctx.user.get("role"))
 
     @router.post("/workspaces/projects", status_code=201)
     def create_project(request: ProjectCreateRequest, ctx: RequestContext = Depends(context), _: None = Depends(csrf_guard)) -> dict[str, Any]:

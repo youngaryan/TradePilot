@@ -297,6 +297,10 @@ function viewFromLocationHash(): ViewId | null {
   return views.some((view) => view.id === candidate) ? candidate as ViewId : null;
 }
 
+function isAdminRole(role: unknown) {
+  return String(role ?? "user").toLowerCase() === "admin";
+}
+
 function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("demo@quantops.local");
@@ -851,15 +855,17 @@ export default function App() {
   }, [telemetryConsent]);
 
   const activeMeta = useMemo(() => views.find((view) => view.id === activeView) ?? views[0], [activeView]);
+  const isAdminAccess = isAdminRole(auth?.user.role);
   const hasPremiumAccess = useMemo(() => {
+    if (isAdminAccess) return true;
     const subscription = workspace?.subscription;
     const plan = String(subscription?.plan ?? "free");
     const status = String(subscription?.status ?? "");
     return plan !== "free" && status === "active";
-  }, [workspace?.subscription]);
+  }, [workspace?.subscription, isAdminAccess]);
   const visibleViews = useMemo(
-    () => views.filter((view) => !view.adminOnly || auth?.user.role === "admin"),
-    [auth?.user.role]
+    () => views.filter((view) => !view.adminOnly || isAdminAccess),
+    [isAdminAccess]
   );
 
   function premiumReason(view: ViewId) {
@@ -880,7 +886,7 @@ export default function App() {
   }
 
   function navigateTo(view: ViewId) {
-    if (view === "admin" && auth?.user.role !== "admin") {
+    if (view === "admin" && !isAdminAccess) {
       setPaymentWallReason("Admin dashboard access requires an admin account.");
       setRoutedView("pricing");
       return;
@@ -913,21 +919,25 @@ export default function App() {
   }, [activeView]);
 
   useEffect(() => {
+    if (auth && hasPremiumAccess) {
+      setPaymentWallReason(null);
+    }
     if (auth && premiumViews.has(activeView) && workspace && !hasPremiumAccess) {
       setPaymentWallReason(premiumReason(activeView));
       setRoutedView("pricing", { replace: true });
     }
-    if (auth && activeView === "admin" && auth.user.role !== "admin") {
+    if (auth && activeView === "admin" && !isAdminAccess) {
       setPaymentWallReason("Admin dashboard access requires an admin account.");
       setRoutedView("pricing", { replace: true });
     }
-  }, [auth?.user.role, activeView, hasPremiumAccess, workspace?.organization_id]);
+  }, [isAdminAccess, activeView, hasPremiumAccess, workspace?.organization_id]);
 
   function handleLogin(nextAuth: AuthResponse) {
     setAuth(nextAuth);
     setOrganizations(nextAuth.organizations);
     setActiveOrgId(nextAuth.active_organization_id);
     setApiAuth(null, nextAuth.active_organization_id);
+    setPaymentWallReason(null);
     if (nextAuth.active_organization_id) window.localStorage.setItem(ORG_STORAGE_KEY, nextAuth.active_organization_id);
     setRoutedView("workspace", { replace: true });
     void trackTelemetryEvent({
@@ -958,6 +968,7 @@ export default function App() {
     setOrganizations([]);
     setActiveOrgId(null);
     setActiveView("command");
+    setPaymentWallReason(null);
     window.history.replaceState(null, "", window.location.pathname);
     setApiAuth(null, null);
     window.localStorage.removeItem(ORG_STORAGE_KEY);
@@ -1196,7 +1207,7 @@ export default function App() {
         {activeView === "account" ? <AccountSecurity auth={auth} onDeleted={() => void handleLogout()} /> : null}
 
         {activeView === "pricing" ? (
-          <PricingPage workspace={workspace} reason={paymentWallReason} onRefresh={refreshAll} />
+          <PricingPage workspace={workspace} reason={paymentWallReason} isAdminAccess={isAdminAccess} onRefresh={refreshAll} />
         ) : null}
 
         {activeView === "sentiment" ? <SentimentLab /> : null}
@@ -1219,7 +1230,7 @@ export default function App() {
           />
         ) : null}
 
-        {activeView === "admin" && auth.user.role === "admin" ? <AdminDashboard auth={auth} /> : null}
+        {activeView === "admin" && isAdminAccess ? <AdminDashboard auth={auth} /> : null}
 
         <section className="research-note">
           <Gauge size={16} />

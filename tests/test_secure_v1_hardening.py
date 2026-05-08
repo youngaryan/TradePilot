@@ -41,6 +41,7 @@ class SecureV1HardeningTests(unittest.TestCase):
 
         self.assertEqual(client.get("/api/paper/summary").status_code, 401)
         self.assertEqual(client.get("/api/sentiment/dataset").status_code, 401)
+        self.assertEqual(client.get("/api/sentiment/financial-events?symbols=AAPL&start=2024-01-01&end=2024-01-31").status_code, 401)
         self.assertEqual(client.get("/api/system/metadata").status_code, 401)
 
     def test_cookie_session_and_csrf_guard_mutating_routes(self) -> None:
@@ -203,9 +204,12 @@ class SecureV1HardeningTests(unittest.TestCase):
         org_id = str(payload["organization_id"])
         store.upsert_organization_quotas(organization_id=org_id, quotas={"backtest_job": 1})
         quotas = QuotaService(settings)
-        quotas.check_and_record(organization_id=org_id, feature="backtest_job")
+        quotas.check_and_record(organization_id=org_id, feature="backtest_job", role="user")
         with self.assertRaises(QuotaExceeded):
-            quotas.check_and_record(organization_id=org_id, feature="backtest_job")
+            quotas.check_and_record(organization_id=org_id, feature="backtest_job", role="user")
+        admin_allowance = quotas.check_and_record(organization_id=org_id, feature="backtest_job", role="admin")
+        self.assertTrue(admin_allowance["allowance"]["bypassed"])
+        self.assertIsNone(admin_allowance["usage"])
 
     def test_postgres_metadata_store_is_selected_lazily_for_production(self) -> None:
         from pairs_trading.platform import PostgresMetadataStore, build_metadata_store

@@ -91,17 +91,21 @@ class DirectionalPipelineTests(unittest.TestCase):
             name="directional_smoke",
         )
 
+        snapshots = []
         result = WalkForwardBacktester(
             strategy=pipeline,
             prices=prices,
             config=WalkForwardConfig(train_bars=260, test_bars=80, step_bars=80, bars_per_year=252),
             cost_model=CostModel(commission_bps=0.2, spread_bps=0.5, slippage_bps=0.3, borrow_bps_annual=15.0),
             experiment_root=fresh_test_dir("artifacts/test_runs/directional"),
-        ).run("directional_smoke")
+        ).run("directional_smoke", progress_callback=snapshots.append)
 
         self.assertGreater(len(result.fold_metrics), 0)
         self.assertTrue(any(column.startswith("weight_") for column in result.equity_curve.columns))
         self.assertTrue(result.artifact_dir.exists())
+        self.assertEqual(len(snapshots), len(result.fold_metrics))
+        self.assertEqual(snapshots[-1]["completed_folds"], len(result.fold_metrics))
+        self.assertIn("equity_curve", snapshots[-1])
 
 
 if __name__ == "__main__":

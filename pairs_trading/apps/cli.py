@@ -544,6 +544,7 @@ def _run_pipeline_with_validation(
     artifact_root: str,
     trial_strategies: Mapping[str, object] | None = None,
     validation_config: ValidationConfig = ValidationConfig(),
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     trial_returns = None
     trial_metrics = pd.DataFrame()
@@ -557,6 +558,18 @@ def _run_pipeline_with_validation(
             experiment_root=Path(artifact_root) / "trial_grid" / experiment_name,
         )
 
+    def report_walk_forward_progress(payload: dict[str, Any]) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                **payload,
+                "prices": prices,
+                "bars_per_year": config.bars_per_year,
+                "strategy_name": experiment_name,
+            }
+        )
+
     result = WalkForwardBacktester(
         strategy=pipeline,
         prices=prices,
@@ -568,6 +581,7 @@ def _run_pipeline_with_validation(
     ).run(
         experiment_name=experiment_name,
         validation_trial_returns=trial_returns,
+        progress_callback=report_walk_forward_progress if progress_callback is not None else None,
     )
 
     if not trial_metrics.empty:
@@ -594,6 +608,8 @@ def _run_pipeline_with_validation(
         "summary": json_ready(result.summary),
         "validation": json_ready(result.validation),
         "trial_metrics": trial_metrics,
+        "prices": prices,
+        "bars_per_year": config.bars_per_year,
     }
 
 
@@ -772,6 +788,7 @@ def run_stat_arb_pipeline(
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     sector_map = load_sector_map(sector_map_path)
     tickers = list(sector_map.keys())
@@ -886,6 +903,7 @@ def run_stat_arb_pipeline(
             embargo_bars=embargo_bars,
             pbo_partitions=pbo_partitions,
         ),
+        progress_callback=progress_callback,
     )
 
 
@@ -908,6 +926,7 @@ def run_graph_stat_arb_pipeline(
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     sector_map = load_sector_map(sector_map_path)
     tickers = list(sector_map.keys())
@@ -982,6 +1001,7 @@ def run_graph_stat_arb_pipeline(
             embargo_bars=embargo_bars,
             pbo_partitions=pbo_partitions,
         ),
+        progress_callback=progress_callback,
     )
 
 
@@ -1037,6 +1057,7 @@ def run_directional_pipeline(
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if not symbols:
         raise ValueError("Directional pipelines require at least one symbol.")
@@ -1141,6 +1162,7 @@ def run_directional_pipeline(
             embargo_bars=embargo_bars,
             pbo_partitions=pbo_partitions,
         ),
+        progress_callback=progress_callback,
     )
 
 
@@ -1155,6 +1177,7 @@ def run_etf_trend_pipeline(
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     symbols = list(dict.fromkeys(symbols or DEFAULT_ETF_UNIVERSE))
     price_provider = CachedParquetProvider(
@@ -1209,6 +1232,7 @@ def run_etf_trend_pipeline(
             embargo_bars=embargo_bars,
             pbo_partitions=pbo_partitions,
         ),
+        progress_callback=progress_callback,
     )
 
 
@@ -1229,6 +1253,7 @@ def run_event_driven_pipeline(
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     symbols = list(dict.fromkeys(symbols or DEFAULT_EVENT_SYMBOLS))
     price_provider = CachedParquetProvider(
@@ -1303,6 +1328,7 @@ def run_event_driven_pipeline(
             embargo_bars=embargo_bars,
             pbo_partitions=pbo_partitions,
         ),
+        progress_callback=progress_callback,
     )
 
 
@@ -1350,6 +1376,7 @@ def run_pead_sentiment_pipeline(
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     symbols = list(dict.fromkeys(symbols or DEFAULT_EVENT_SYMBOLS))
     price_provider = CachedParquetProvider(
@@ -1465,6 +1492,7 @@ def run_pead_sentiment_pipeline(
             embargo_bars=embargo_bars,
             pbo_partitions=pbo_partitions,
         ),
+        progress_callback=progress_callback,
     )
 
 

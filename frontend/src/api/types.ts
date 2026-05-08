@@ -430,6 +430,7 @@ export interface PricingPayload {
 export interface BillingStatusPayload {
   subscription: SubscriptionRecord | null;
   premium: boolean;
+  access?: "admin" | "subscription" | string;
   pricing: PricingPlan[];
 }
 
@@ -557,6 +558,9 @@ export interface BacktestJobResult {
     drawdown: number;
     net_return: number;
   }>;
+  visualization?: BacktestVisualizationPayload;
+  trade_events?: BacktestTradeEvent[];
+  trade_summary?: BacktestTradeSummary[];
   decision: {
     verdict: string;
     headline: string;
@@ -571,6 +575,89 @@ export interface BacktestJobResult {
   };
 }
 
+export interface BacktestEquityPoint {
+  timestamp: string;
+  equity: number;
+  drawdown: number;
+  net_return: number;
+  baseline_equity?: number | null;
+  baseline_drawdown?: number | null;
+  baseline_return?: number | null;
+}
+
+export interface BacktestPricePoint {
+  timestamp: string;
+  close?: number | null;
+  sma_20?: number | null;
+  sma_50?: number | null;
+  sma_200?: number | null;
+}
+
+export interface BacktestIndicatorPoint {
+  timestamp: string;
+  forecast?: number | null;
+  signal?: number | null;
+  position?: number | null;
+  turnover?: number | null;
+  gross_exposure?: number | null;
+  risk_scale?: number | null;
+  rsi?: number | null;
+  macd?: number | null;
+  macd_signal?: number | null;
+  macd_histogram?: number | null;
+  realized_volatility?: number | null;
+  strategy_drawdown?: number | null;
+  baseline_drawdown?: number | null;
+  sentiment_strength?: number | null;
+  sentiment_confidence?: number | null;
+}
+
+export interface BacktestTradeEvent {
+  id: string;
+  timestamp: string;
+  type: "entry" | "exit" | "buy" | "sell" | string;
+  side: "long" | "short" | "flat" | string;
+  label: string;
+  exposure?: number | null;
+  exposure_change?: number | null;
+  price?: number | null;
+  strategy_equity?: number | null;
+  baseline_equity?: number | null;
+  pnl?: number | null;
+  return_pct?: number | null;
+}
+
+export interface BacktestTradeSummary {
+  id: string;
+  side: "long" | "short" | string;
+  entry_timestamp: string;
+  exit_timestamp?: string | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  entry_equity: number;
+  exit_equity?: number | null;
+  pnl?: number | null;
+  return_pct?: number | null;
+  holding_period_bars: number;
+  status: "open" | "closed" | string;
+}
+
+export interface BacktestVisualizationPayload {
+  status: "running" | "completed" | string;
+  completed_folds: number;
+  total_folds: number;
+  primary_symbol?: string | null;
+  baseline_label: string;
+  equity: BacktestEquityPoint[];
+  price: BacktestPricePoint[];
+  indicators: BacktestIndicatorPoint[];
+  trade_events: BacktestTradeEvent[];
+  trade_summary: BacktestTradeSummary[];
+  metrics: Record<string, unknown>;
+  sampled: boolean;
+  source_points: number;
+}
+
 export interface BacktestJob {
   id: string;
   status: "queued" | "running" | "completed" | "failed" | "interrupted" | string;
@@ -581,6 +668,7 @@ export interface BacktestJob {
   stage?: string;
   message?: string;
   warnings?: string[];
+  progress_snapshot?: BacktestVisualizationPayload | null;
   started_at_utc?: string | null;
   finished_at_utc?: string | null;
   result?: BacktestJobResult | null;
@@ -664,6 +752,66 @@ export interface SentimentHeadline {
   confidence?: number;
   label?: string;
   [key: string]: unknown;
+}
+
+export interface FinancialEventRecord {
+  id: string;
+  date: string;
+  ticker: string;
+  event_type: string;
+  event_type_label: string;
+  event_title: string;
+  summary: string;
+  reported_result?: string | null;
+  reported_metrics: {
+    revenue?: number | null;
+    earnings?: number | null;
+    eps?: number | null;
+    revenue_yoy?: number | null;
+    earnings_yoy?: number | null;
+    eps_yoy?: number | null;
+  };
+  expected_result?: string | null;
+  beat_miss: "beat" | "miss" | "inline" | "not_available" | string;
+  market_reaction?: string | null;
+  market_reaction_pct?: number | null;
+  market_reaction_source?: string | null;
+  source: string;
+  source_url?: string | null;
+  confidence: number;
+  data_completeness: "high" | "medium" | "low" | string;
+  verified_fields: string[];
+  inferred_fields: string[];
+  missing_fields: string[];
+  event_direction: "positive" | "negative" | "neutral" | string;
+  form?: string | null;
+  report_date?: string | null;
+  accession_number?: string | null;
+}
+
+export interface FinancialEventsPayload {
+  request: {
+    symbols: string[];
+    start: string;
+    end: string;
+    limit: number;
+  };
+  events: FinancialEventRecord[];
+  summary: {
+    event_count: number;
+    symbols: string[];
+    sources: string[];
+  };
+  analysis: {
+    summary: string;
+    verified: string[];
+    inferred: string[];
+    risks: string[];
+    catalysts: string[];
+    missing_data: string[];
+    source_notes: string[];
+  };
+  warnings: string[];
 }
 
 export interface SentimentDatasetPayload {

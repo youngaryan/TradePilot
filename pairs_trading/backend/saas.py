@@ -680,15 +680,21 @@ class BillingService:
         ]
         return {"plans": plans, "subscription": subscription}
 
-    def status(self, *, organization_id: str) -> dict[str, Any]:
+    def status(self, *, organization_id: str, role: object = "user") -> dict[str, Any]:
         subscription = self.store.get_subscription(organization_id=organization_id)
         allowed_statuses = {"active"} | ({"trialing"} if self.settings.allow_trial_entitlements else set())
-        premium = (
+        subscription_premium = (
             subscription is not None
             and str(subscription.get("plan")) in {"pro", "team", "enterprise", "pro_trial"}
             and str(subscription.get("status")) in allowed_statuses
         )
-        return {"subscription": subscription, "premium": premium, "pricing": self.pricing(organization_id=organization_id)["plans"]}
+        admin_override = str(role or "user").lower() == "admin"
+        return {
+            "subscription": subscription,
+            "premium": admin_override or subscription_premium,
+            "access": "admin" if admin_override else "subscription",
+            "pricing": self.pricing(organization_id=organization_id)["plans"],
+        }
 
     def checkout(self, *, organization_id: str, request: BillingCheckoutRequest) -> dict[str, Any]:
         if request.price_id and self.settings.is_production:

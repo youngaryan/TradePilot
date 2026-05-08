@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..authz import require_auth_context, require_csrf, require_paid_context
 from ..config import BackendSettings
+from ..financial_events import FinancialEventsService
 from ..quotas import QuotaExceeded, QuotaService
 from ..redaction import redact_paths
 from ..saas import RequestContext
@@ -16,6 +17,7 @@ from ..services import SentimentJobRunner, SentimentService
 def build_sentiment_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/sentiment", tags=["sentiment"])
     service = SentimentService(settings)
+    financial_events = FinancialEventsService(settings)
     runner = SentimentJobRunner(settings)
     quotas = QuotaService(settings)
     auth_context = require_auth_context(settings)
@@ -28,6 +30,21 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
         ctx: RequestContext = Depends(auth_context),
     ) -> dict[str, Any]:
         return service.dataset(dataset_id=dataset_id, organization_id=ctx.organization_id)
+
+    @router.get("/financial-events")
+    def get_financial_events(
+        symbols: str = Query(..., description="Comma-separated ticker symbols."),
+        start: str = Query(..., description="Start date, formatted as YYYY-MM-DD."),
+        end: str = Query(..., description="End date, formatted as YYYY-MM-DD."),
+        limit: int = Query(default=80, ge=1, le=200),
+        ctx: RequestContext = Depends(auth_context),
+    ) -> dict[str, Any]:
+        del ctx
+        try:
+            tickers = [symbol.strip().upper() for symbol in symbols.split(",") if symbol.strip()]
+            return financial_events.events(tickers, start, end, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/accumulate")
     def accumulate(request: SentimentAccumulationRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
@@ -43,6 +60,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
                 user_id=str(ctx.user.get("id") or ""),
                 feature="sentiment_job",
                 properties={"providers": request.providers, "symbols": request.symbols, "mode": "sync"},
+                role=ctx.user.get("role")
             )
             payload = service.accumulate(request, organization_id=ctx.organization_id)
             return redact_paths(payload) if settings.is_production else payload
@@ -62,8 +80,8 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
                 estimated_news_pages = float(max(1, len(request.symbols)) * max(1, request.web_research_max_articles))
                 if request.local_web_search_urls or request.web_research_domains:
                     estimated_news_pages += float(max(1, len(request.local_web_search_urls) + len(request.web_research_domains)) * request.local_web_max_pages_per_source)
-                quotas.check(organization_id=ctx.organization_id, feature="news_pages", quantity=estimated_news_pages)
-            quotas.check(organization_id=ctx.organization_id, feature="sentiment_job")
+                quotas.check(organization_id=ctx.organization_id, feature="news_pages", quantity=estimated_news_pages, role=ctx.user.get("role"))
+            quotas.check(organization_id=ctx.organization_id, feature="sentiment_job", role=ctx.user.get("role"))
             if estimated_news_pages:
                 quotas.record(
                     organization_id=ctx.organization_id,
