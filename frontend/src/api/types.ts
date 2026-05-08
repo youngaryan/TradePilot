@@ -760,6 +760,103 @@ export interface BacktestJob {
   error?: string | null;
 }
 
+export type MarketResearchDecision = "BUY" | "HOLD" | "SELL" | "AVOID" | string;
+export type MarketResearchHorizon = "intraday" | "swing" | "long-term" | string;
+
+export interface MarketResearchRunRequest {
+  ticker: string;
+  analysis_date?: string | null;
+  horizon: MarketResearchHorizon;
+  provider?: string;
+  model?: string;
+  options?: Record<string, unknown>;
+}
+
+export interface MarketResearchSignal {
+  label: string;
+  direction: "bullish" | "bearish" | "neutral" | "mixed" | string;
+  strength: number;
+  rationale: string;
+  evidence: string[];
+  provenance: string[];
+}
+
+export interface MarketResearchAgentOutput {
+  agent_name: string;
+  display_name: string;
+  version: string;
+  prompt_version: string;
+  summary: string;
+  signals: MarketResearchSignal[];
+  confidence: number;
+  warnings: string[];
+  details: Record<string, unknown>;
+}
+
+export interface MarketResearchAuditEvent {
+  agent_name: string;
+  display_name: string;
+  status: "completed" | "failed" | "timeout" | string;
+  prompt_version: string;
+  started_at_utc: string;
+  finished_at_utc: string;
+  duration_ms: number;
+  warnings: string[];
+  error?: string | null;
+}
+
+export interface MarketResearchProvenance {
+  source: string;
+  provider: string;
+  detail: string;
+  observed_at_utc: string;
+  url?: string | null;
+}
+
+export interface MarketResearchReport {
+  ticker: string;
+  analysis_date: string;
+  decision: MarketResearchDecision;
+  confidence: number;
+  time_horizon: MarketResearchHorizon;
+  summary: string;
+  bull_thesis: string;
+  bear_thesis: string;
+  technical_signals: MarketResearchSignal[];
+  fundamental_signals: MarketResearchSignal[];
+  news_sentiment_signals: MarketResearchSignal[];
+  risk_assessment: MarketResearchAgentOutput;
+  data_quality_notes: string[];
+  disclaimer: string;
+  raw_agent_outputs: MarketResearchAgentOutput[];
+  audit_trail: MarketResearchAuditEvent[];
+  provenance: MarketResearchProvenance[];
+  warnings: string[];
+  metadata: Record<string, unknown>;
+  created_at_utc: string;
+  artifact?: Record<string, unknown>;
+  artifact_id?: string;
+  report_path?: string | null;
+}
+
+export interface MarketResearchJob {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "interrupted" | string;
+  request: MarketResearchRunRequest | Record<string, unknown>;
+  created_at_utc: string;
+  updated_at_utc: string;
+  organization_id?: string | null;
+  user_id?: string | null;
+  progress: number;
+  stage: string;
+  message: string;
+  warnings: string[];
+  started_at_utc?: string | null;
+  finished_at_utc?: string | null;
+  result?: MarketResearchReport | null;
+  error?: string | null;
+}
+
 export interface SentimentAccumulationRequest {
   symbols: string[];
   start: string;

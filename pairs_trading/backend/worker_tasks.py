@@ -5,8 +5,9 @@ from typing import Any
 
 from ..platform import build_metadata_store
 from .config import BackendSettings
-from .schemas import BacktestRunRequest, SentimentAccumulationRequest
+from .schemas import BacktestRunRequest, MarketResearchRunRequest, SentimentAccumulationRequest
 from .backtest_services import BacktestJobRunner
+from .market_research_services import MarketResearchJobRunner
 from .paper_services import PaperRunCommand, PaperRunJobRunner
 from .sentiment_services import SentimentJobRunner
 
@@ -42,6 +43,11 @@ def run_queued_job(kind: str, job_id: str) -> dict[str, Any]:
     if kind == "sentiment":
         runner = SentimentJobRunner(settings, mark_interrupted_on_load=False)
         runner._run_job(job_id, SentimentAccumulationRequest.model_validate(request), organization_id)
+        return runner.get_job(job_id, organization_id=organization_id) or {"id": job_id, "kind": kind}
+
+    if kind == "market_research":
+        runner = MarketResearchJobRunner(settings, mark_interrupted_on_load=False)
+        runner._run_job(job_id, MarketResearchRunRequest.model_validate(request), organization_id)
         return runner.get_job(job_id, organization_id=organization_id) or {"id": job_id, "kind": kind}
 
     raise ValueError(f"Unsupported queued job kind: {kind}")

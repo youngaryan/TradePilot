@@ -1125,6 +1125,65 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["headline_count"], 1)
         self.assertTrue(any("FailingBackend failed" in warning for warning in payload["warnings"]))
 
+    def test_market_research_job_api_generates_demo_report(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+
+        workspace = fresh_test_dir("artifacts/test_backend_market_research")
+        app = create_app(
+            BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                sentiment_job_state_dir=workspace / "sentiment_jobs",
+                market_research_job_state_dir=workspace / "market_research_jobs",
+                market_research_artifact_root=workspace / "market_research_reports",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                market_research_data_provider="demo",
+            )
+        )
+        client = TestClient(app)
+        headers = self.auth_headers(client)
+
+        unauth = TestClient(app).post("/api/market-research/run-job", json={"ticker": "AAPL", "horizon": "swing"})
+        self.assertEqual(unauth.status_code, 401)
+        invalid = client.post("/api/market-research/run-job", headers=headers, json={"ticker": "BAD SYMBOL", "horizon": "swing"})
+        self.assertIn(invalid.status_code, {400, 422})
+
+        submitted = client.post(
+            "/api/market-research/run-job",
+            headers=headers,
+            json={"ticker": "aapl", "analysis_date": "2026-05-08", "horizon": "swing"},
+        )
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        job_id = submitted.json()["id"]
+        completed_payload = None
+        for _ in range(50):
+            job = client.get(f"/api/market-research/jobs/{job_id}", headers=headers)
+            self.assertEqual(job.status_code, 200)
+            if job.json()["status"] == "completed":
+                completed_payload = job.json()
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(completed_payload)
+        assert completed_payload is not None
+        report = completed_payload["result"]
+        self.assertEqual(report["ticker"], "AAPL")
+        self.assertIn(report["decision"], {"BUY", "HOLD", "SELL", "AVOID"})
+        self.assertGreaterEqual(report["confidence"], 0)
+        self.assertEqual(report["disclaimer"], "For research and educational purposes only. Not financial advice.")
+        self.assertTrue(report["raw_agent_outputs"])
+        self.assertTrue(report["audit_trail"])
+        self.assertTrue(report["artifact_id"])
+        self.assertEqual(report["metadata"]["trade_execution"], "disabled")
+
+        jobs = client.get("/api/market-research/jobs", headers=headers)
+        self.assertEqual(jobs.status_code, 200)
+        self.assertIn(job_id, {job["id"] for job in jobs.json()})
+
 
 if __name__ == "__main__":
     unittest.main()

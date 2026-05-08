@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..research.market_research_agents import ResearchHorizon
+
 
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9^][A-Z0-9.^=_-]{0,31}$")
 
@@ -140,6 +142,38 @@ class BacktestRunRequest(BaseModel):
         if date.fromisoformat(self.end) <= date.fromisoformat(self.start):
             raise ValueError("end must be after start.")
         return self
+
+
+class MarketResearchRunRequest(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    ticker: str = Field(default="AAPL", min_length=1, max_length=32, description="Ticker symbol to research.")
+    analysis_date: str | None = Field(default=None, description="Analysis date formatted as YYYY-MM-DD. Defaults to today.")
+    horizon: ResearchHorizon = Field(default=ResearchHorizon.SWING, description="Research horizon: intraday, swing, or long-term.")
+    provider: str = Field(default="mock", max_length=80, description="Optional LLM/provider label for audit metadata.")
+    model: str = Field(default="mock-research-v1", max_length=120, description="Optional model label for audit metadata.")
+    options: dict[str, Any] = Field(default_factory=dict, description="Non-secret provider/model options for future providers.")
+
+    @field_validator("ticker")
+    @classmethod
+    def normalize_ticker(cls, value: str) -> str:
+        return _normalized_symbols([value])[0]
+
+    @field_validator("analysis_date")
+    @classmethod
+    def normalize_analysis_date(cls, value: str | None) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        return _normalized_date(value, field_name="analysis_date")
+
+    @field_validator("options")
+    @classmethod
+    def reject_secret_options(cls, value: dict[str, Any]) -> dict[str, Any]:
+        sensitive = {"api_key", "apikey", "token", "secret", "password", "credential", "credentials"}
+        for key in value:
+            if str(key).strip().lower() in sensitive:
+                raise ValueError("options must not contain raw secrets. Use environment or vault references for real providers.")
+        return value
 
 
 class StrategyBuilderMessage(BaseModel):

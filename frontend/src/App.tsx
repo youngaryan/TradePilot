@@ -69,9 +69,10 @@ const LiveOps = React.lazy(() => import("./features/LiveOps").then((module) => (
 const PricingPage = React.lazy(() => import("./features/PricingPage").then((module) => ({ default: module.PricingPage })));
 const SaaSWorkspace = React.lazy(() => import("./features/SaaSWorkspace").then((module) => ({ default: module.SaaSWorkspace })));
 const SentimentLab = React.lazy(() => import("./features/SentimentLab").then((module) => ({ default: module.SentimentLab })));
+const MarketResearchLab = React.lazy(() => import("./features/MarketResearchLab").then((module) => ({ default: module.MarketResearchLab })));
 const SystemGuide = React.lazy(() => import("./features/SystemGuide").then((module) => ({ default: module.SystemGuide })));
 
-type ViewId = "command" | "workspace" | "account" | "pricing" | "live" | "sentiment" | "backtests" | "admin" | "system";
+type ViewId = "command" | "workspace" | "account" | "pricing" | "live" | "sentiment" | "research" | "backtests" | "admin" | "system";
 type ThemeMode = "light" | "dark" | "system";
 type TelemetryConsent = "granted" | "denied";
 
@@ -111,6 +112,12 @@ const views: Array<{ id: ViewId; label: string; description: string; icon: React
     label: "News & Sentiment",
     description: "Build the news dataset and inspect what the model read before it affects strategies.",
     icon: <Newspaper size={18} />
+  },
+  {
+    id: "research",
+    label: "AI Research",
+    description: "Run a research-only market committee that creates structured reports without placing trades.",
+    icon: <BrainCircuit size={18} />
   },
   {
     id: "backtests",
@@ -231,6 +238,7 @@ const viewHeadlines: Record<ViewId, string> = {
   pricing: "Upgrade only when the workflow is worth unlocking.",
   live: "Deploy paper agents with clear controls and guardrails.",
   sentiment: "Build the news dataset before agents trade from it.",
+  research: "Run a research-only AI market committee.",
   backtests: "Test strategy ideas with validation, not vibes.",
   admin: "Operate the SaaS layer with real permissions.",
   system: "Learn how the backend, data, and agent flow fit together."
@@ -244,7 +252,7 @@ const ORG_STORAGE_KEY = "quantops.organization_id";
 const THEME_STORAGE_KEY = "quantops.theme";
 const TELEMETRY_STORAGE_KEY = "quantops.telemetry_consent";
 const LANDING_ANON_STORAGE_KEY = "quantops.landing_visitor";
-const premiumViews = new Set<ViewId>(["live", "sentiment", "backtests"]);
+const premiumViews = new Set<ViewId>(["live", "sentiment", "research", "backtests"]);
 const legalPages: Record<string, { title: string; body: string[] }> = {
   "/privacy": {
     title: "Privacy Policy",
@@ -1225,6 +1233,8 @@ export default function App() {
           ) : null}
 
           {activeView === "sentiment" ? <SentimentLab /> : null}
+
+          {activeView === "research" ? <MarketResearchLab /> : null}
 
           {activeView === "backtests" ? (
             <BacktestLab

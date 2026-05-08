@@ -1591,6 +1591,105 @@ textarea:focus {
   background: linear-gradient(135deg, rgba(254, 242, 242, 0.94), rgba(255, 247, 237, 0.9));
 }
 
+.market-research-lab,
+.market-research-report {
+  display: grid;
+  gap: 22px;
+}
+
+.research-disclaimer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(217, 119, 6, 0.26);
+  border-radius: 14px;
+  background: rgba(255, 251, 235, 0.82);
+  color: #7c2d12;
+}
+
+.market-research-summary,
+.market-research-thesis {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+.market-research-signal-list,
+.market-research-audit,
+.market-research-job-list {
+  display: grid;
+  gap: 10px;
+}
+
+.market-research-signal {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.market-research-signal > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.market-research-signal span,
+.audit-row span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.market-research-signal ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.signal-score,
+.audit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.audit-row,
+.job-history-row {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-solid);
+}
+
+.audit-row > div {
+  display: grid;
+  gap: 3px;
+}
+
+.job-history-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  text-align: left;
+}
+
+.job-history-row--active {
+  border-color: rgba(14, 116, 144, 0.42);
+  background: rgba(236, 253, 245, 0.78);
+}
+
+.market-research-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .job-step-row {
   display: flex;
   flex-wrap: wrap;
@@ -2583,6 +2682,21 @@ textarea:focus {
   background: linear-gradient(135deg, rgba(69, 10, 10, 0.72), rgba(42, 25, 15, 0.74));
 }
 
+:root[data-theme="dark"] .research-disclaimer {
+  background: rgba(67, 20, 7, 0.64);
+  border-color: rgba(251, 191, 36, 0.32);
+  color: #fde68a;
+}
+
+:root[data-theme="dark"] .market-research-signal {
+  background: rgba(15, 23, 42, 0.54);
+}
+
+:root[data-theme="dark"] .job-history-row--active {
+  background: rgba(20, 83, 45, 0.38);
+  border-color: rgba(45, 212, 191, 0.36);
+}
+
 :root[data-theme="dark"] .job-step {
   color: var(--muted);
   background: rgba(15, 23, 42, 0.72);
@@ -2842,6 +2956,7 @@ textarea:focus {
   .explain-grid,
   .sentiment-filter-grid,
   .financial-analysis-grid,
+  .market-research-config-grid,
   .chart-stat-strip,
   .telemetry-chart-grid,
   .provider-check-grid,

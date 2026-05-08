@@ -25,6 +25,7 @@ Strategy explanations live in [docs/strategy_catalog.md](docs/strategy_catalog.m
 Interactive backtest agent workflows live in [docs/backtest_agent_workbench.md](docs/backtest_agent_workbench.md).
 The SaaS-readiness workflow lives in [docs/saas_readiness_workflow.md](docs/saas_readiness_workflow.md).
 The UX/theme/refresh/telemetry audit lives in [docs/product_ux_observability_audit.md](docs/product_ux_observability_audit.md).
+The research-only AI market committee workflow lives in [docs/market_research_agents.md](docs/market_research_agents.md).
 
 ## Main Sleeves
 
@@ -244,6 +245,29 @@ The repo now includes that frontend boundary:
 - local frontend: `frontend/`
 - primary API payload: `GET /api/paper/summary`
 - interactive backtest launch: `POST /api/backtests/run`
+- research-only AI committee launch: `POST /api/market-research/run-job`
+
+## Market Research Agents
+
+The app includes a TradingAgents-inspired research committee that produces structured ticker reports with a simulated `BUY`, `HOLD`, `SELL`, or `AVOID` decision. It is research-only, uses a deterministic demo provider by default, records source provenance and agent audit output, and does not place trades or connect to brokers.
+
+Every report includes: `For research and educational purposes only. Not financial advice.`
+
+Configure the default offline mode with:
+
+```powershell
+PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER=demo
+```
+
+Use the web app's `AI Research` view or the authenticated API routes:
+
+```text
+POST /api/market-research/run-job
+GET /api/market-research/jobs
+GET /api/market-research/jobs/{job_id}
+```
+
+More detail is in [docs/market_research_agents.md](docs/market_research_agents.md).
 
 ## Tests
 

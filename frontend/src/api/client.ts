@@ -11,6 +11,8 @@ import type {
   BillingStatusPayload,
   ExperimentRecord,
   HealthResponse,
+  MarketResearchJob,
+  MarketResearchRunRequest,
   PaperDashboardPayload,
   PaperRunRequest,
   PaperRunJob,
@@ -408,6 +410,21 @@ export function listBacktestJobs() {
 
 export function getBacktestJob(jobId: string) {
   return requestJson<BacktestJob>(`/api/backtests/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function startMarketResearchJob(request: MarketResearchRunRequest) {
+  return requestJson<MarketResearchJob>("/api/market-research/run-job", {
+    method: "POST",
+    body: JSON.stringify(request)
+  });
+}
+
+export function listMarketResearchJobs() {
+  return requestJson<MarketResearchJob[]>("/api/market-research/jobs");
+}
+
+export function getMarketResearchJob(jobId: string) {
+  return requestJson<MarketResearchJob>(`/api/market-research/jobs/${encodeURIComponent(jobId)}`);
 }
 
 export function getSentimentDataset(datasetId?: string | null) {

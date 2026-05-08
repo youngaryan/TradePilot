@@ -7,6 +7,7 @@ import unittest
 from pairs_trading.api import build_paper_dashboard_payload
 from pairs_trading.apps.cli import main
 from pairs_trading.backend.backtest_services import BacktestService
+from pairs_trading.backend.market_research_services import MarketResearchService
 from pairs_trading.backend.paper_services import PaperService
 from pairs_trading.backend.sentiment_services import SentimentService
 from pairs_trading.core import PortfolioManager, StrategyOutput
@@ -30,6 +31,7 @@ class ArchitectureLayoutTests(unittest.TestCase):
         self.assertIsNotNone(LocalNewsFileProvider)
         self.assertIsNotNone(PaperDashboardVisualizer)
         self.assertIsNotNone(BacktestService)
+        self.assertIsNotNone(MarketResearchService)
         self.assertIsNotNone(PaperService)
         self.assertIsNotNone(SentimentService)
 

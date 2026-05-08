@@ -8,6 +8,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FrontendContractTests(unittest.TestCase):
+    def test_market_research_lab_exposes_committee_api_and_disclaimer(self) -> None:
+        app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        lab_source = PROJECT_ROOT.joinpath("frontend/src/features/MarketResearchLab.tsx").read_text(encoding="utf-8")
+        client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id: "research"', app_source)
+        self.assertIn("MarketResearchLab", app_source)
+        self.assertIn('"research"', app_source)
+        self.assertIn("For research and educational purposes only. Not financial advice.", lab_source)
+        self.assertIn("startMarketResearchJob", lab_source)
+        self.assertIn("getMarketResearchJob", lab_source)
+        self.assertIn("listMarketResearchJobs", lab_source)
+        self.assertIn("/api/market-research/run-job", client_source)
+        self.assertIn("/api/market-research/jobs", client_source)
+        self.assertIn("export interface MarketResearchReport", type_source)
+        self.assertIn("export interface MarketResearchJob", type_source)
+        self.assertIn("technical_signals", type_source)
+        self.assertIn("risk_assessment", type_source)
+        self.assertIn(".market-research-lab", style_source)
+        self.assertIn(".research-disclaimer", style_source)
+
     def test_sentiment_explorer_uses_additive_multi_symbol_filters(self) -> None:
         source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
 

@@ -9,6 +9,7 @@ from .config import BackendSettings
 from .routers.admin import build_admin_router
 from .routers.backtests import build_backtest_router
 from .routers.health import router as health_router
+from .routers.market_research import build_market_research_router
 from .routers.paper import build_paper_router
 from .routers.refresh import build_refresh_router
 from .routers.saas import build_saas_router
@@ -90,6 +91,7 @@ def create_app(settings: BackendSettings | None = None) -> FastAPI:
     app.include_router(health_router, prefix="/api")
     app.include_router(build_strategy_router(app_settings), prefix="/api")
     app.include_router(build_backtest_router(app_settings), prefix="/api")
+    app.include_router(build_market_research_router(app_settings), prefix="/api")
     app.include_router(build_paper_router(app_settings), prefix="/api")
     app.include_router(build_saas_router(app_settings), prefix="/api")
     app.include_router(build_admin_router(app_settings), prefix="/api")

@@ -66,6 +66,10 @@ class BackendSettings:
     default_paper_config: Path = Path("examples/paper_deployment.sample.json")
     backtest_artifact_root: Path = Path("artifacts/backtests/experiments")
     backtest_job_state_dir: Path = Path("artifacts/backtests/jobs")
+    market_research_artifact_root: Path = Path("artifacts/market_research/reports")
+    market_research_job_state_dir: Path = Path("artifacts/market_research/jobs")
+    market_research_data_provider: str = "demo"
+    market_research_agent_timeout_seconds: float = 8.0
     price_cache_dir: Path = Path("data/cache")
     sentiment_cache_dir: Path = Path("data/sentiment_cache")
     sentiment_job_state_dir: Path = Path("artifacts/sentiment/jobs")
@@ -190,6 +194,10 @@ class BackendSettings:
             default_paper_config=Path(os.getenv("PAIRS_TRADING_PAPER_CONFIG", "examples/paper_deployment.sample.json")),
             backtest_artifact_root=Path(os.getenv("PAIRS_TRADING_BACKTEST_ARTIFACT_ROOT", "artifacts/backtests/experiments")),
             backtest_job_state_dir=Path(os.getenv("PAIRS_TRADING_BACKTEST_JOB_STATE_DIR", "artifacts/backtests/jobs")),
+            market_research_artifact_root=Path(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_ARTIFACT_ROOT", "artifacts/market_research/reports")),
+            market_research_job_state_dir=Path(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_JOB_STATE_DIR", "artifacts/market_research/jobs")),
+            market_research_data_provider=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER", "demo").strip().lower() or "demo",
+            market_research_agent_timeout_seconds=float(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS", "8.0")),
             price_cache_dir=Path(os.getenv("PAIRS_TRADING_PRICE_CACHE_DIR", "data/cache")),
             sentiment_cache_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_CACHE_DIR", "data/sentiment_cache")),
             sentiment_job_state_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_JOB_STATE_DIR", "artifacts/sentiment/jobs")),
