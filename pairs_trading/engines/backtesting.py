@@ -16,12 +16,14 @@ from ..pipelines import SectorStatArbPipeline, StatArbConfig
 from ..research import PairScreenConfig
 from .broker import BrokerAdapter, BrokerConfig, SimulatedBroker
 from .execution import ExecutionConfig
+from .ledger import LedgerBacktestResult, LedgerBacktestSimulator, LedgerConfig
 from .risk import RiskConfig
 from .validation import ValidationConfig, build_validation_report, build_walk_forward_boundaries
 
 
 @dataclass(frozen=True)
 class CostModel:
+    initial_cash: float = 100_000.0
     commission_bps: float = 1.0
     spread_bps: float = 1.0
     slippage_bps: float = 1.0
@@ -29,6 +31,8 @@ class CostModel:
     borrow_bps_annual: float = 50.0
     funding_bps_annual: float = 0.0
     delay_bars: int = 0
+    execution_mode: str = "next_bar_close"
+    risk_free_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class ExperimentResult:
     diagnostics: list[dict[str, Any]]
     artifact_dir: Path
     validation: dict[str, Any] = field(default_factory=dict)
+    ledger: dict[str, Any] = field(default_factory=dict)
 
 
 def json_ready(value: Any) -> Any:
@@ -108,6 +113,12 @@ class WalkForwardBacktester:
         self.experiment_root.mkdir(parents=True, exist_ok=True)
 
     def _fold_boundaries(self):
+        step = self.config.step_bars or self.config.test_bars
+        if step < self.config.test_bars:
+            raise ValueError(
+                "Overlapping walk-forward test windows are not supported by ledger accounting. "
+                "Set step_bars >= test_bars or use a dedicated combinatorial validation path."
+            )
         return build_walk_forward_boundaries(
             total_bars=len(self.prices),
             train_bars=self.config.train_bars,
@@ -116,6 +127,34 @@ class WalkForwardBacktester:
             purge_bars=self.config.purge_bars,
             embargo_bars=self.config.embargo_bars,
         )
+
+    def _ledger_config(self) -> LedgerConfig:
+        return LedgerConfig(
+            initial_cash=self.cost_model.initial_cash,
+            execution_mode=self.cost_model.execution_mode,
+            bars_per_year=self.config.bars_per_year,
+            commission_bps=self.cost_model.commission_bps,
+            spread_bps=self.cost_model.spread_bps,
+            slippage_bps=self.cost_model.slippage_bps,
+            market_impact_bps=self.cost_model.market_impact_bps,
+            risk_free_rate=self.cost_model.risk_free_rate,
+        )
+
+    def _apply_ledger_accounting(self, frame: pd.DataFrame) -> tuple[pd.DataFrame, LedgerBacktestResult]:
+        ledger = LedgerBacktestSimulator(self._ledger_config()).run(strategy_frame=frame, prices=self.prices)
+        accounted = frame.copy().sort_index()
+        if not ledger.snapshots.empty:
+            overlapping = [column for column in ledger.snapshots.columns if column in accounted.columns]
+            if overlapping:
+                accounted = accounted.rename(columns={column: f"target_{column}" for column in overlapping})
+            accounted = accounted.join(ledger.snapshots, how="left")
+            portfolio_value = pd.to_numeric(accounted["portfolio_value"], errors="coerce").ffill()
+            accounted["equity_curve"] = portfolio_value / max(self.cost_model.initial_cash, 1e-12)
+            accounted["net_return"] = portfolio_value.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            accounted["drawdown"] = accounted["equity_curve"] / accounted["equity_curve"].cummax().replace(0.0, np.nan) - 1.0
+        if not ledger.benchmark_snapshots.empty:
+            accounted = accounted.join(ledger.benchmark_snapshots, how="left")
+        return accounted, ledger
 
     def _compute_metrics(self, frame: pd.DataFrame) -> dict[str, float]:
         if frame.empty:
@@ -164,6 +203,7 @@ class WalkForwardBacktester:
         equity_curve: pd.DataFrame,
         diagnostics: list[dict[str, Any]],
         validation: dict[str, Any],
+        ledger: dict[str, Any] | None = None,
     ) -> Path:
         artifact_dir = self.experiment_root / experiment_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +214,9 @@ class WalkForwardBacktester:
             json.dump(json_ready(diagnostics), handle, indent=2)
         with (artifact_dir / "validation.json").open("w", encoding="utf-8") as handle:
             json.dump(json_ready(validation), handle, indent=2)
+        if ledger is not None:
+            with (artifact_dir / "ledger.json").open("w", encoding="utf-8") as handle:
+                json.dump(json_ready(ledger), handle, indent=2)
 
         fold_metrics.to_parquet(artifact_dir / "fold_metrics.parquet")
         equity_curve.to_parquet(artifact_dir / "equity_curve.parquet")
@@ -193,9 +236,10 @@ class WalkForwardBacktester:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         experiment_id = f"{timestamp}_{experiment_label}"
 
-        fold_frames: list[pd.DataFrame] = []
+        target_fold_frames: list[pd.DataFrame] = []
         fold_metrics: list[dict[str, Any]] = []
         diagnostics: list[dict[str, Any]] = []
+        latest_ledger: LedgerBacktestResult | None = None
 
         for boundary in fold_boundaries:
             train_data = self.prices.iloc[boundary.train_start : boundary.train_end].copy()
@@ -205,9 +249,11 @@ class WalkForwardBacktester:
             evaluated_output = self.broker.process(output, bars_per_year=self.config.bars_per_year)
             evaluated = evaluated_output.frame.copy()
             evaluated["fold"] = boundary.fold
-            fold_frames.append(evaluated)
+            target_fold_frames.append(evaluated)
+            progress_frame, latest_ledger = self._apply_ledger_accounting(pd.concat(target_fold_frames, axis=0).sort_index())
 
-            metrics = self._compute_metrics(evaluated)
+            fold_accounted, _ = self._apply_ledger_accounting(evaluated)
+            metrics = self._compute_metrics(fold_accounted)
             metrics.update(
                 {
                     "fold": boundary.fold,
@@ -222,17 +268,20 @@ class WalkForwardBacktester:
             if progress_callback is not None:
                 progress_callback(
                     {
-                        "completed_folds": len(fold_frames),
+                        "completed_folds": len(target_fold_frames),
                         "total_folds": len(fold_boundaries),
                         "latest_fold": boundary.fold,
-                        "equity_curve": pd.concat(fold_frames, axis=0).sort_index(),
+                        "equity_curve": progress_frame,
+                        "ledger": latest_ledger.payload() if latest_ledger is not None else {},
                         "fold_metrics": pd.DataFrame(fold_metrics),
                         "diagnostics": list(diagnostics),
                     }
                 )
 
-        combined = pd.concat(fold_frames, axis=0)
+        combined_targets = pd.concat(target_fold_frames, axis=0).sort_index()
+        combined, final_ledger = self._apply_ledger_accounting(combined_targets)
         overall_summary = self._compute_metrics(combined)
+        overall_summary.update(final_ledger.metrics)
         validation_summary = build_validation_report(
             returns=combined["net_return"],
             bars_per_year=self.config.bars_per_year,
@@ -242,7 +291,7 @@ class WalkForwardBacktester:
         overall_summary.update(
             {
                 "experiment_id": experiment_id,
-                "folds": len(fold_frames),
+                "folds": len(target_fold_frames),
                 "strategy": experiment_label,
                 "cost_model": asdict(self.cost_model),
                 "walk_forward_config": asdict(self.config),
@@ -260,6 +309,7 @@ class WalkForwardBacktester:
             equity_curve=combined,
             diagnostics=diagnostics,
             validation=validation_summary,
+            ledger=final_ledger.payload(),
         )
 
         return ExperimentResult(
@@ -270,6 +320,7 @@ class WalkForwardBacktester:
             diagnostics=diagnostics,
             validation=validation_summary,
             artifact_dir=artifact_dir,
+            ledger=final_ledger.payload(),
         )
 
 

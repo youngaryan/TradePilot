@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, RefreshCw, Search, ShieldCheck, UserCog, UserX } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, UserCog, UserX } from "lucide-react";
 
-import { getAdminOverview, listAdminUsers, updateAdminUser } from "../api/client";
-import type { AdminOverviewPayload, AdminUserRecord, AuthResponse } from "../api/types";
+import { deleteAdminUserStrategy, getAdminOverview, listAdminUserStrategies, listAdminUsers, updateAdminUser, updateAdminUserStrategy } from "../api/client";
+import type { AdminOverviewPayload, AdminUserRecord, AuthResponse, UserStrategyRecord } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel, SectionHeader } from "../components/Cards";
 import { HorizontalBars, TelemetryTimelineChart } from "../components/Charts";
@@ -19,9 +19,12 @@ function userTone(user: AdminUserRecord) {
 export function AdminDashboard({ auth }: { auth: AuthResponse }) {
   const [overview, setOverview] = useState<AdminOverviewPayload | null>(null);
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
+  const [strategies, setStrategies] = useState<UserStrategyRecord[]>([]);
   const [search, setSearch] = useState("");
   const [role, setRole] = useState("");
   const [status, setStatus] = useState("");
+  const [strategyStatus, setStrategyStatus] = useState("");
+  const [strategyRisk, setStrategyRisk] = useState("");
   const [sortBy, setSortBy] = useState<UserSort>("created_at_utc");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [landingSearch, setLandingSearch] = useState("");
@@ -33,7 +36,7 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
     setIsLoading(true);
     setError(null);
     try {
-      const [nextOverview, nextUsers] = await Promise.all([
+      const [nextOverview, nextUsers, nextStrategies] = await Promise.all([
         getAdminOverview(),
         listAdminUsers({
           search,
@@ -42,14 +45,21 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
           sort_by: sortBy,
           sort_dir: sortDir,
           limit: 300
+        }),
+        listAdminUserStrategies({
+          status: strategyStatus || undefined,
+          risk_level: strategyRisk || undefined,
+          limit: 300
         })
       ]);
       setOverview(nextOverview);
       setUsers(nextUsers);
+      setStrategies(nextStrategies);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load admin dashboard.");
       setOverview(null);
       setUsers([]);
+      setStrategies([]);
     } finally {
       setIsLoading(false);
     }
@@ -104,6 +114,38 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not update the user.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function updateStrategy(strategy: UserStrategyRecord, nextStatus: "active" | "disabled") {
+    if (!window.confirm(`Confirm ${nextStatus === "disabled" ? "disable" : "reactivate"} ${strategy.name}. This affects backtest availability immediately.`)) return;
+    setIsLoading(true);
+    setNotice(null);
+    setError(null);
+    try {
+      await updateAdminUserStrategy(strategy.id, nextStatus);
+      setNotice(`${strategy.name} is now ${nextStatus}.`);
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update the strategy.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function deleteStrategy(strategy: UserStrategyRecord) {
+    if (!window.confirm(`Delete ${strategy.name}? This removes it from the owner's allowed strategy list.`)) return;
+    setIsLoading(true);
+    setNotice(null);
+    setError(null);
+    try {
+      await deleteAdminUserStrategy(strategy.id);
+      setNotice(`Deleted ${strategy.name}.`);
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete the strategy.");
     } finally {
       setIsLoading(false);
     }
@@ -246,6 +288,72 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
             }
           ]}
           rows={users}
+        />
+      </Panel>
+
+      <Panel title="User-created strategies" subtitle="Audit AI-generated specs, ownership, approval history, usage, and safety status.">
+        <div className="admin-toolbar admin-toolbar--strategy">
+          <label>
+            Status
+            <select value={strategyStatus} onChange={(event) => setStrategyStatus(event.target.value)}>
+              <option value="">All statuses</option>
+              <option value="active">Active</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
+          <label>
+            Risk
+            <select value={strategyRisk} onChange={(event) => setStrategyRisk(event.target.value)}>
+              <option value="">All risk levels</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <button type="button" className="primary-button" onClick={() => void load()} disabled={isLoading}>
+            {isLoading ? <RefreshCw size={16} className="spin" /> : <Search size={16} />}
+            Apply
+          </button>
+        </div>
+        <DataTable
+          rows={strategies}
+          empty="No user-created strategies match these filters."
+          getKey={(strategy) => strategy.id}
+          columns={[
+            { key: "name", header: "Strategy", render: (strategy) => <strong>{strategy.name}<br /><small>v{strategy.version} · {strategy.id}</small></strong> },
+            { key: "owner", header: "Owner", render: (strategy) => strategy.owner_email ?? strategy.owner_user_id },
+            { key: "status", header: "Status", render: (strategy) => <Badge label={strategy.status} tone={statusTone(strategy.status)} /> },
+            { key: "risk", header: "Risk", render: (strategy) => <Badge label={strategy.risk_level} tone={strategy.risk_level === "high" ? "bad" : strategy.risk_level === "medium" ? "warn" : "good"} /> },
+            { key: "created", header: "Created", render: (strategy) => formatDateTime(strategy.created_at_utc) },
+            { key: "approved", header: "Approved", render: (strategy) => formatDateTime(strategy.approved_at_utc) },
+            { key: "backtests", header: "Backtests", align: "right", render: (strategy) => formatNumber(strategy.backtest_count, 0) },
+            {
+              key: "spec",
+              header: "Audit",
+              render: (strategy) => (
+                <details className="table-details">
+                  <summary>View audit</summary>
+                  <pre>{JSON.stringify({ spec: strategy.spec, approval: strategy.approval, validation: strategy.validation }, null, 2)}</pre>
+                </details>
+              )
+            },
+            {
+              key: "actions",
+              header: "Actions",
+              render: (strategy) => (
+                <div className="table-actions">
+                  <button type="button" className="ghost-button" onClick={() => void updateStrategy(strategy, strategy.status === "active" ? "disabled" : "active")} disabled={isLoading}>
+                    {strategy.status === "active" ? <Ban size={14} /> : <RotateCcw size={14} />}
+                    {strategy.status === "active" ? "Disable" : "Reactivate"}
+                  </button>
+                  <button type="button" className="ghost-button danger-button" onClick={() => void deleteStrategy(strategy)} disabled={isLoading}>
+                    <Trash2 size={14} />
+                    Delete
+                  </button>
+                </div>
+              )
+            }
+          ]}
         />
       </Panel>
 

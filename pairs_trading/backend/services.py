@@ -22,6 +22,7 @@ from ..apps.cli import (
     run_event_driven_pipeline,
     run_graph_stat_arb_pipeline,
     run_pead_sentiment_pipeline,
+    run_rule_based_strategy_pipeline,
     run_stat_arb_pipeline,
 )
 from ..operations.paper_trading import run_paper_batch
@@ -35,6 +36,7 @@ from .job_queue import enqueue_quant_job
 from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
 from .storage import ArtifactReference, build_artifact_storage
+from .strategy_builder import parse_custom_strategy_pipeline
 from .validators import validate_relative_path, validate_url
 
 
@@ -351,7 +353,10 @@ def _equity_curve_points(equity_curve: Any, *, max_points: int = 500) -> list[di
         return []
     frame = equity_curve.copy()
     net_returns = frame["net_return"].fillna(0.0)
-    equity = (1.0 + net_returns).cumprod()
+    if "equity_curve" in frame.columns:
+        equity = pd.to_numeric(frame["equity_curve"], errors="coerce").ffill().fillna(1.0)
+    else:
+        equity = (1.0 + net_returns).cumprod()
     drawdown = equity / equity.cummax() - 1.0
     sampled = frame.assign(_equity=equity, _drawdown=drawdown, _net_return=net_returns).tail(max_points)
     points: list[dict[str, float | str]] = []
@@ -412,11 +417,13 @@ def _result_payload(run_output: dict[str, Any]) -> dict[str, Any]:
     artifact_dir = getattr(result, "artifact_dir", None)
     fold_metrics = getattr(result, "fold_metrics", None)
     equity_curve = getattr(result, "equity_curve", None)
+    ledger = getattr(result, "ledger", {}) or {}
     summary = json_ready(run_output.get("summary", {}))
     validation = json_ready(run_output.get("validation", {}))
     visualization = build_backtest_visualization(
         equity_curve=equity_curve,
         prices=run_output.get("prices"),
+        ledger=ledger,
         bars_per_year=int(run_output.get("bars_per_year") or summary.get("walk_forward_config", {}).get("bars_per_year", 252) or 252),
         completed_folds=int(summary.get("folds") or 0),
         total_folds=int(summary.get("folds") or 0),
@@ -439,6 +446,7 @@ def _result_payload(run_output: dict[str, Any]) -> dict[str, Any]:
         "equity_curve_tail": json_ready(equity_curve.tail(80)) if hasattr(equity_curve, "tail") else [],
         "equity_curve_points": _equity_curve_points(equity_curve),
         "visualization": json_ready(visualization),
+        "ledger": json_ready(ledger),
         "trade_events": json_ready(visualization.get("trade_events", [])),
         "trade_summary": json_ready(visualization.get("trade_summary", [])),
         "decision": _decision_report(summary, validation),
@@ -543,7 +551,7 @@ class BacktestJobRunner:
         self._load_jobs()
 
     def submit(self, request: BacktestRunRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
-        BacktestService(self.settings).validate_request(request)
+        BacktestService(self.settings).validate_request(request, organization_id=organization_id, user_id=user_id)
         now = _utc_now_iso()
         job = BacktestJob(
             id=uuid4().hex,
@@ -563,7 +571,7 @@ class BacktestJobRunner:
             self._trim_locked()
 
         if self.settings.enable_in_process_jobs and self.executor is not None:
-            future = self.executor.submit(self._run_job, job.id, request, organization_id)
+            future = self.executor.submit(self._run_job, job.id, request, organization_id, user_id)
             future.add_done_callback(lambda completed: self._finalize_unhandled(job.id, completed))
         else:
             queue_payload = enqueue_quant_job(self.settings, kind="backtest", job_id=job.id)
@@ -595,7 +603,7 @@ class BacktestJobRunner:
                 setattr(job, key, value)
             self._save_locked(job)
 
-    def _run_job(self, job_id: str, request: BacktestRunRequest, organization_id: str) -> None:
+    def _run_job(self, job_id: str, request: BacktestRunRequest, organization_id: str, user_id: str | None = None) -> None:
         def progress(stage: str, message: str, value: float, snapshot: dict[str, Any] | None = None) -> None:
             updates: dict[str, Any] = {
                 "stage": stage,
@@ -619,7 +627,7 @@ class BacktestJobRunner:
             progress=0.08,
         )
         try:
-            result = BacktestService(self.settings).run_backtest(request, organization_id=organization_id, progress=progress)
+            result = BacktestService(self.settings).run_backtest(request, organization_id=organization_id, user_id=user_id, progress=progress)
             summary = result.get("summary", {})
             validation = result.get("validation", {})
             experiment_id = str(summary.get("experiment_id") or job_id)
@@ -800,9 +808,25 @@ class BacktestService:
             return next((item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in suffixes), None)
         raise ValueError(f"Dataset {dataset_id} does not expose a usable artifact file.")
 
-    def validate_request(self, request: BacktestRunRequest) -> None:
+    def validate_request(self, request: BacktestRunRequest, *, organization_id: str | None = None, user_id: str | None = None) -> None:
         if not request.pipeline:
             raise ValueError("Choose a pipeline before launching a backtest.")
+        custom_strategy_id = parse_custom_strategy_pipeline(request.pipeline)
+        if custom_strategy_id:
+            if not organization_id or not user_id:
+                raise ValueError("User-created strategies require an authenticated workspace.")
+            strategy = self.metadata_store.get_user_strategy(
+                organization_id=organization_id,
+                strategy_id=custom_strategy_id,
+                owner_user_id=user_id,
+                active_only=True,
+            )
+            if strategy is None:
+                raise ValueError("User-created strategy not found, disabled, or not owned by this user.")
+            spec = strategy.get("spec") if isinstance(strategy.get("spec"), dict) else {}
+            symbols = request.symbols or spec.get("asset_universe", {}).get("symbols", [])
+            if not symbols:
+                raise ValueError("User-created strategies require at least one symbol.")
         if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
         if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.event_dataset_id and not request.use_sec_companyfacts and not request.include_sec_filings:
@@ -817,12 +841,15 @@ class BacktestService:
         validate_relative_path(request.event_file, settings=self.settings, field_name="event_file")
         if request.train_bars <= request.purge_bars + 5:
             raise ValueError("Training bars must be meaningfully larger than purge bars.")
+        if request.step_bars < request.test_bars:
+            raise ValueError("step_bars must be greater than or equal to test_bars to avoid overlapping out-of-sample accounting.")
 
     def run_backtest(
         self,
         request: BacktestRunRequest,
         *,
         organization_id: str | None = None,
+        user_id: str | None = None,
         progress: Callable[[str, str, float, dict[str, Any] | None], None] | None = None,
     ) -> dict[str, Any]:
         def report(stage: str, message: str, value: float, snapshot: dict[str, Any] | None = None) -> None:
@@ -835,6 +862,7 @@ class BacktestService:
             snapshot = build_backtest_visualization(
                 equity_curve=payload.get("equity_curve"),
                 prices=payload.get("prices"),
+                ledger=payload.get("ledger"),
                 bars_per_year=int(payload.get("bars_per_year") or request.bars_per_year),
                 completed_folds=completed_folds,
                 total_folds=total_folds,
@@ -848,7 +876,7 @@ class BacktestService:
                 snapshot,
             )
 
-        self.validate_request(request)
+        self.validate_request(request, organization_id=organization_id, user_id=user_id)
         sector_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.sector_dataset_id, suffixes=(".json", ".csv", ".parquet"))
         event_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.event_dataset_id, suffixes=(".csv", ".json", ".parquet"))
         if sector_file or event_file:
@@ -860,6 +888,51 @@ class BacktestService:
         params = _clean_parameters(request.parameters)
         artifact_root = str(request.artifact_root or self.settings.backtest_artifact_root)
         experiment_name = request.experiment_name or f"{pipeline}_ui"
+
+        custom_strategy_id = parse_custom_strategy_pipeline(pipeline)
+        if custom_strategy_id:
+            if not organization_id or not user_id:
+                raise ValueError("User-created strategies require an authenticated workspace.")
+            strategy_record = self.metadata_store.get_user_strategy(
+                organization_id=organization_id,
+                strategy_id=custom_strategy_id,
+                owner_user_id=user_id,
+                active_only=True,
+            )
+            if strategy_record is None:
+                raise ValueError("User-created strategy not found, disabled, or not owned by this user.")
+            spec = strategy_record.get("spec") if isinstance(strategy_record.get("spec"), dict) else {}
+            spec_symbols = spec.get("asset_universe", {}).get("symbols", []) if isinstance(spec.get("asset_universe"), dict) else []
+            symbols = request.symbols or list(spec_symbols)
+            report("running_user_strategy", f"Running user strategy {strategy_record.get('name')} across {len(symbols)} symbols.", 0.22)
+            run_output = run_rule_based_strategy_pipeline(
+                spec=spec,
+                symbols=symbols,
+                start=request.start,
+                end=request.end,
+                interval=request.interval,
+                experiment_name=experiment_name if request.experiment_name else str(strategy_record.get("name") or custom_strategy_id),
+                price_cache_dir=str(self.settings.price_cache_dir),
+                artifact_root=artifact_root,
+                train_bars=request.train_bars,
+                test_bars=request.test_bars,
+                step_bars=request.step_bars,
+                bars_per_year=request.bars_per_year,
+                purge_bars=request.purge_bars,
+                embargo_bars=request.embargo_bars,
+                pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
+            )
+            self.metadata_store.increment_user_strategy_backtest_count(strategy_id=custom_strategy_id)
+            report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
+            payload = _result_payload(run_output)
+            payload["user_strategy"] = {
+                "id": custom_strategy_id,
+                "name": strategy_record.get("name"),
+                "version": strategy_record.get("version"),
+                "risk_level": strategy_record.get("risk_level"),
+            }
+            return payload
 
         if pipeline in DIRECTIONAL_PIPELINES:
             report("running_directional", f"Running {pipeline} across {len(request.symbols)} symbols.", 0.22)

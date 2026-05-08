@@ -17,6 +17,7 @@ from .directional import (
 from .events import EventDriftStrategy, PEADSentimentStrategy
 from .graph_stat_arb import GraphClusterResidualStrategy, GraphClusterTradingConfig
 from .pairs import KalmanPairsStrategy
+from .rule_based import RuleBasedDirectionalStrategy, build_rule_based_strategy_factory
 from .stat_arb import SectorResidualMeanReversionStrategy
 
 __all__ = [
@@ -35,12 +36,14 @@ __all__ = [
     "MovingAverageCrossStrategy",
     "PriceSMADeviationStrategy",
     "RSIMeanReversionStrategy",
+    "RuleBasedDirectionalStrategy",
     "SectorResidualMeanReversionStrategy",
     "StochasticOscillatorStrategy",
     "StrategyOutput",
     "TimeSeriesMomentumStrategy",
     "VolatilityTargetTrendStrategy",
     "WalkForwardStrategy",
+    "build_rule_based_strategy_factory",
     "estimate_half_life",
     "rolling_adf_pvalue",
 ]

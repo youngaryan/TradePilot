@@ -182,6 +182,12 @@ class KalmanPairsStrategy(WalkForwardStrategy):
         analysis["spread_return"] = analysis["spread_return"].fillna(0.0)
         analysis["unit_return"] = analysis["spread_return"]
         analysis["gross_return"] = analysis["position"].shift(1).fillna(0.0) * analysis["unit_return"]
+        analysis[f"target_weight_{self.ticker1}"] = (
+            analysis["position"] / analysis["gross_exposure_per_unit"].replace(0.0, np.nan)
+        ).fillna(0.0)
+        analysis[f"target_weight_{self.ticker2}"] = (
+            -analysis["position"] * prev_beta / analysis["gross_exposure_per_unit"].replace(0.0, np.nan)
+        ).fillna(0.0)
         analysis["short_exposure_per_unit"] = np.where(
             analysis["position"] >= 0.0,
             prev_beta.abs(),
@@ -211,6 +217,8 @@ class KalmanPairsStrategy(WalkForwardStrategy):
             "zscore",
             "adf_pvalue",
             "hedge_instability",
+            f"target_weight_{self.ticker1}",
+            f"target_weight_{self.ticker2}",
         ):
             test_frame[column] = test_frame[column].fillna(0.0)
         test_frame["break_flag"] = test_frame["break_flag"].fillna(True)

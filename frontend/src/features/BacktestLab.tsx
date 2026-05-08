@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, FlaskConical, Loader2, Play, ShieldAlert, SlidersHorizontal } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, FlaskConical, Loader2, Play, Save, Send, ShieldAlert, SlidersHorizontal } from "lucide-react";
 
-import { getBacktestJob, listBacktestJobs, startBacktest } from "../api/client";
-import type { BacktestJob, BacktestRunRequest, BacktestTemplate, StrategyCatalogItem } from "../api/types";
+import { approveStrategySpec, chatStrategyBuilder, getBacktestJob, getStrategyCatalog, listBacktestJobs, startBacktest } from "../api/client";
+import type { BacktestJob, BacktestRunRequest, BacktestTemplate, StrategyBuilderMessage, StrategyBuilderResponse, StrategyCatalogItem, StrategySpec } from "../api/types";
 import { Badge } from "../components/Badge";
 import { BacktestPerformanceChart } from "../components/BacktestPerformanceChart";
 import { BacktestEquityChart } from "../components/Charts";
@@ -108,12 +108,14 @@ export function BacktestLab({
   catalog,
   templates,
   jobs,
-  onJobsChange
+  onJobsChange,
+  onCatalogChange
 }: {
   catalog: StrategyCatalogItem[];
   templates: BacktestTemplate[];
   jobs: BacktestJob[];
   onJobsChange: (jobs: BacktestJob[]) => void;
+  onCatalogChange: (catalog: StrategyCatalogItem[]) => void;
 }) {
   const [request, setRequest] = useState<BacktestRunRequest>(defaultRequest);
   const [symbolsText, setSymbolsText] = useState(defaultRequest.symbols.join(" "));
@@ -121,6 +123,13 @@ export function BacktestLab({
   const [activeJob, setActiveJob] = useState<BacktestJob | null>(jobs[0] ?? null);
   const [error, setError] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
+  const [builderMessages, setBuilderMessages] = useState<StrategyBuilderMessage[]>([]);
+  const [builderInput, setBuilderInput] = useState("");
+  const [builderResponse, setBuilderResponse] = useState<StrategyBuilderResponse | null>(null);
+  const [draftSpec, setDraftSpec] = useState<StrategySpec | null>(null);
+  const [builderNotice, setBuilderNotice] = useState<string | null>(null);
+  const [builderError, setBuilderError] = useState<string | null>(null);
+  const [isBuilderBusy, setIsBuilderBusy] = useState(false);
   const activeStrategy = useMemo(
     () => catalog.find((item) => item.pipeline === request.pipeline || item.id === request.pipeline),
     [catalog, request.pipeline]
@@ -230,6 +239,45 @@ export function BacktestLab({
       setError(caught instanceof Error ? caught.message : "Unable to launch backtest.");
     } finally {
       setIsLaunching(false);
+    }
+  }
+
+  async function sendBuilderMessage() {
+    const content = builderInput.trim();
+    if (!content) return;
+    const nextMessages: StrategyBuilderMessage[] = [...builderMessages, { role: "user", content }];
+    setBuilderMessages(nextMessages);
+    setBuilderInput("");
+    setBuilderError(null);
+    setBuilderNotice(null);
+    setIsBuilderBusy(true);
+    try {
+      const response = await chatStrategyBuilder(nextMessages, draftSpec as unknown as Record<string, unknown> | null);
+      setBuilderResponse(response);
+      setDraftSpec(response.draft_spec ?? null);
+      setBuilderMessages([...nextMessages, { role: "assistant", content: response.assistant_message }]);
+    } catch (caught) {
+      setBuilderError(caught instanceof Error ? caught.message : "The strategy builder could not process that request.");
+    } finally {
+      setIsBuilderBusy(false);
+    }
+  }
+
+  async function approveDraft() {
+    if (!draftSpec) return;
+    setBuilderError(null);
+    setBuilderNotice(null);
+    setIsBuilderBusy(true);
+    try {
+      const response = await approveStrategySpec(draftSpec as unknown as Record<string, unknown>, `Approved ${draftSpec.name} from the strategy-builder UI.`);
+      const nextCatalog = await getStrategyCatalog();
+      onCatalogChange(nextCatalog);
+      applyPipeline(response.catalog_item.pipeline);
+      setBuilderNotice(`Saved ${response.strategy.name}. It is now available only in your strategy list.`);
+    } catch (caught) {
+      setBuilderError(caught instanceof Error ? caught.message : "The strategy could not be approved.");
+    } finally {
+      setIsBuilderBusy(false);
     }
   }
 
@@ -556,6 +604,95 @@ export function BacktestLab({
           ) : null}
         </Panel>
 
+        <Panel title="AI Strategy Builder" subtitle="Clarify, review, approve, then backtest">
+          <div className="strategy-builder">
+            <div className="strategy-builder__messages">
+              {builderMessages.length ? (
+                builderMessages.map((message, index) => (
+                  <div key={`${message.role}-${index}`} className={`chat-bubble chat-bubble--${message.role}`}>
+                    <strong>{message.role === "user" ? "You" : "Builder"}</strong>
+                    <span>{message.content}</span>
+                  </div>
+                ))
+              ) : (
+                <Explainer
+                  title="Schema-first generation"
+                  body="The builder only creates validated rule specs from supported indicators. It will ask for missing details and requires approval before saving."
+                  icon={<Bot size={17} />}
+                />
+              )}
+            </div>
+
+            {builderResponse?.questions.length ? (
+              <div className="strategy-builder__questions">
+                <strong>Clarify these points</strong>
+                <ul>
+                  {builderResponse.questions.map((question) => <li key={question}>{question}</li>)}
+                </ul>
+              </div>
+            ) : null}
+
+            {draftSpec ? (
+              <div className="strategy-spec-review">
+                <div className="strategy-spec-review__top">
+                  <div>
+                    <strong>{draftSpec.name}</strong>
+                    <span>{draftSpec.summary}</span>
+                  </div>
+                  <Badge label={builderResponse?.state ?? "draft"} tone={builderResponse?.state === "ready_for_approval" ? "good" : "warn"} />
+                </div>
+                <div className="strategy-spec-grid">
+                  <span><strong>Universe</strong>{draftSpec.asset_universe.symbols.join(", ")}</span>
+                  <span><strong>Timeframe</strong>{draftSpec.timeframe}</span>
+                  <span><strong>Side</strong>{draftSpec.side.replace("_", " ")}</span>
+                  <span><strong>Sizing</strong>{String(draftSpec.position_sizing.max_position_per_symbol ?? "n/a")} max per symbol</span>
+                </div>
+                <DataTable
+                  rows={[...draftSpec.entry_rules.map((rule) => ({ ...rule, group: "Entry" })), ...draftSpec.exit_rules.map((rule) => ({ ...rule, group: "Exit" }))]}
+                  empty="No rules in the draft spec."
+                  getKey={(row) => `${row.group}-${row.kind}`}
+                  columns={[
+                    { key: "group", header: "Rule", render: (row) => <Badge label={row.group} tone={row.group === "Entry" ? "good" : "warn"} /> },
+                    { key: "kind", header: "Condition", render: (row) => row.kind },
+                    { key: "params", header: "Parameters", render: (row) => JSON.stringify(row.parameters) }
+                  ]}
+                />
+                {builderResponse?.validation.warnings.length ? (
+                  <div className="inline-warning">
+                    <AlertTriangle size={16} />
+                    {builderResponse.validation.warnings.join(" ")}
+                  </div>
+                ) : null}
+                <details>
+                  <summary>Full StrategySpec JSON</summary>
+                  <pre>{JSON.stringify(draftSpec, null, 2)}</pre>
+                </details>
+                <button type="button" className="primary-button" onClick={() => void approveDraft()} disabled={isBuilderBusy || builderResponse?.state !== "ready_for_approval"}>
+                  {isBuilderBusy ? <Loader2 size={17} /> : <Save size={17} />}
+                  Approve and save strategy
+                </button>
+              </div>
+            ) : null}
+
+            <div className="strategy-builder__input">
+              <textarea
+                rows={4}
+                value={builderInput}
+                onChange={(event) => setBuilderInput(event.target.value)}
+                placeholder="Example: Trade SPY and QQQ on daily bars. Buy equal weight when RSI 14 is below 30, exit above 55, use a 10% stop loss and 3 bps costs."
+              />
+              <button type="button" className="primary-button" onClick={() => void sendBuilderMessage()} disabled={isBuilderBusy || !builderInput.trim()}>
+                {isBuilderBusy ? <Loader2 size={17} /> : <Send size={17} />}
+                Send
+              </button>
+            </div>
+
+            {builderNotice ? <div className="inline-success"><CheckCircle2 size={16} />{builderNotice}</div> : null}
+            {builderError ? <div className="inline-error"><AlertTriangle size={16} />{builderError}</div> : null}
+            <small className="strategy-builder__disclaimer">AI-generated strategies are user-approved research specs. Backtest performance does not guarantee future results.</small>
+          </div>
+        </Panel>
+
         <Panel title="What The Agent Will Do" subtitle="Backend execution plan">
           <div className="research-plan">
             <div>
@@ -652,12 +789,13 @@ export function BacktestLab({
       ) : null}
 
       {visualization ? (
-        <Panel title="Trade-Level Summary" subtitle="Entries and exits inferred from risk-adjusted exposure changes">
+        <Panel title="Trade-Level Summary" subtitle="Closed trades from the fill ledger">
           <DataTable
             rows={tradeRows}
             empty="No entry or exit events were produced by the current backtest."
             getKey={(row) => row.id}
             columns={[
+              { key: "symbol", header: "Symbol", render: (row) => row.symbol ?? "Portfolio" },
               { key: "side", header: "Side", render: (row) => <Badge label={row.side} tone={row.side === "long" ? "good" : row.side === "short" ? "bad" : "neutral"} /> },
               { key: "entry", header: "Entry", render: (row) => row.entry_timestamp.slice(0, 10) },
               { key: "exit", header: "Exit", render: (row) => row.exit_timestamp?.slice(0, 10) ?? "Open" },

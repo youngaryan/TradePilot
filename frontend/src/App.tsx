@@ -1218,6 +1218,7 @@ export default function App() {
             templates={templates}
             jobs={backtestJobs}
             onJobsChange={setBacktestJobs}
+            onCatalogChange={setCatalog}
           />
         ) : null}
 

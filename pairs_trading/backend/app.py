@@ -13,7 +13,7 @@ from .routers.paper import build_paper_router
 from .routers.refresh import build_refresh_router
 from .routers.saas import build_saas_router
 from .routers.sentiment import build_sentiment_router
-from .routers.strategies import router as strategies_router
+from .routers.strategies import build_strategy_router
 from .routers.system import build_system_router
 from .routers.telemetry import build_telemetry_router
 from .security import install_security_middleware
@@ -88,7 +88,7 @@ def create_app(settings: BackendSettings | None = None) -> FastAPI:
     )
     install_security_middleware(app, app_settings)
     app.include_router(health_router, prefix="/api")
-    app.include_router(strategies_router, prefix="/api")
+    app.include_router(build_strategy_router(app_settings), prefix="/api")
     app.include_router(build_backtest_router(app_settings), prefix="/api")
     app.include_router(build_paper_router(app_settings), prefix="/api")
     app.include_router(build_saas_router(app_settings), prefix="/api")

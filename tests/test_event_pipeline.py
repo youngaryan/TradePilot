@@ -247,7 +247,7 @@ class EventPipelineTests(unittest.TestCase):
             config=WalkForwardConfig(
                 train_bars=260,
                 test_bars=80,
-                step_bars=40,
+                step_bars=80,
                 bars_per_year=252,
                 purge_bars=5,
             ),

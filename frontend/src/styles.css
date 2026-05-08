@@ -1649,13 +1649,25 @@ textarea:focus {
   border: 1px solid #f8d999;
 }
 
+.inline-success {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  color: #116149;
+  background: #e4f8ef;
+  border: 1px solid #a8e4c7;
+}
+
 .alert-card {
   margin-bottom: 18px;
 }
 
 .alert-card span,
 .inline-error span,
-.inline-warning span {
+.inline-warning span,
+.inline-success span {
   display: block;
 }
 
@@ -1985,6 +1997,150 @@ textarea:focus {
   border-color: rgba(15, 118, 110, 0.26);
 }
 
+.strategy-builder {
+  display: grid;
+  gap: 16px;
+}
+
+.strategy-builder__messages {
+  display: grid;
+  gap: 10px;
+}
+
+.chat-bubble {
+  display: grid;
+  gap: 5px;
+  max-width: 92%;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.chat-bubble--user {
+  justify-self: end;
+  background: rgba(231, 240, 255, 0.88);
+}
+
+.chat-bubble--assistant {
+  justify-self: start;
+}
+
+.chat-bubble strong,
+.chat-bubble span {
+  display: block;
+}
+
+.chat-bubble span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.strategy-builder__questions {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(245, 158, 11, 0.34);
+  border-radius: 16px;
+  background: rgba(255, 251, 235, 0.82);
+}
+
+.strategy-builder__questions ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.strategy-spec-review {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.strategy-spec-review__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.strategy-spec-review__top strong,
+.strategy-spec-review__top span {
+  display: block;
+}
+
+.strategy-spec-review__top span {
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.strategy-spec-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-spec-grid span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.58);
+  word-break: break-word;
+}
+
+.strategy-spec-grid strong {
+  color: var(--ink);
+}
+
+.strategy-spec-review details {
+  display: grid;
+  gap: 10px;
+}
+
+.strategy-spec-review summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 850;
+}
+
+.strategy-spec-review pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(11, 18, 32, 0.04);
+  color: var(--ink);
+  font-size: 0.82rem;
+}
+
+.strategy-builder__input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.strategy-builder__input textarea {
+  min-height: 108px;
+}
+
+.strategy-builder__disclaimer {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .explain-grid--simple {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
@@ -2299,6 +2455,29 @@ textarea:focus {
   margin-bottom: 16px;
 }
 
+.admin-toolbar--strategy {
+  grid-template-columns: repeat(2, minmax(160px, 220px)) auto;
+  justify-content: start;
+}
+
+.table-details summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 850;
+}
+
+.table-details pre {
+  max-width: min(560px, 70vw);
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(11, 18, 32, 0.04);
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
 .table-actions {
   display: flex;
   gap: 8px;
@@ -2333,6 +2512,10 @@ textarea:focus {
 :root[data-theme="dark"] .table-shell,
 :root[data-theme="dark"] .empty-state,
 :root[data-theme="dark"] .sentiment-panel,
+:root[data-theme="dark"] .strategy-spec-review,
+:root[data-theme="dark"] .strategy-spec-grid span,
+:root[data-theme="dark"] .strategy-builder__questions,
+:root[data-theme="dark"] .chat-bubble,
 :root[data-theme="dark"] .advanced-details,
 :root[data-theme="dark"] .warning-disclosure,
 :root[data-theme="dark"] .wizard-step,
@@ -2670,6 +2853,10 @@ textarea:focus {
   .form-row {
     grid-template-columns: 1fr;
   }
+
+  .strategy-spec-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -2696,7 +2883,9 @@ textarea:focus {
   .matrix-comparison-grid,
   .financial-analysis-grid,
   .chart-stat-strip,
-  .flow-lane {
+  .flow-lane,
+  .strategy-spec-grid,
+  .strategy-builder__input {
     grid-template-columns: 1fr;
   }
 

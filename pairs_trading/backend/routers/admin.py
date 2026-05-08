@@ -7,12 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..authz import require_admin_context, require_csrf
 from ..config import BackendSettings
 from ..saas import AdminService, RequestContext
-from ..schemas import AdminUserUpdateRequest
+from ..schemas import AdminStrategyStatusUpdateRequest, AdminUserUpdateRequest
+from ..strategy_builder import StrategyBuilderService
 
 
 def build_admin_router(settings: BackendSettings) -> APIRouter:
     router = APIRouter(prefix="/admin", tags=["admin"])
     admin_service = AdminService(settings)
+    strategy_service = StrategyBuilderService(settings)
     admin_context = require_admin_context(settings)
     csrf_guard = require_csrf(settings)
 
@@ -45,6 +47,52 @@ def build_admin_router(settings: BackendSettings) -> APIRouter:
         _: RequestContext = Depends(admin_context),
     ) -> list[dict[str, Any]]:
         return admin_service.audit_log(limit=limit)
+
+    @router.get("/user-strategies")
+    def user_strategies(
+        organization_id: str | None = Query(default=None, max_length=120),
+        user_id: str | None = Query(default=None, max_length=120),
+        status: str | None = Query(default=None, pattern="^(active|disabled)$"),
+        risk_level: str | None = Query(default=None, pattern="^(low|medium|high)$"),
+        limit: int = Query(default=200, ge=1, le=1000),
+        _: RequestContext = Depends(admin_context),
+    ) -> list[dict[str, Any]]:
+        return strategy_service.admin_list(
+            organization_id=organization_id,
+            user_id=user_id,
+            status=status,
+            risk_level=risk_level,
+            limit=limit,
+        )
+
+    @router.patch("/user-strategies/{strategy_id}")
+    def update_user_strategy(
+        strategy_id: str,
+        request: AdminStrategyStatusUpdateRequest,
+        ctx: RequestContext = Depends(admin_context),
+        _: None = Depends(csrf_guard),
+    ) -> dict[str, Any]:
+        try:
+            return strategy_service.admin_update_status(
+                strategy_id=strategy_id,
+                status=request.status,
+                actor_user_id=str(ctx.user["id"]),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.delete("/user-strategies/{strategy_id}")
+    def delete_user_strategy(
+        strategy_id: str,
+        ctx: RequestContext = Depends(admin_context),
+        _: None = Depends(csrf_guard),
+    ) -> dict[str, Any]:
+        try:
+            return strategy_service.admin_delete(strategy_id=strategy_id, actor_user_id=str(ctx.user["id"]))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.get("/system-health")
     def system_health(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:

@@ -110,6 +110,10 @@ class SectorResidualMeanReversionStrategy(WalkForwardStrategy):
         analysis["gross_exposure_per_unit"] = gross_exposure_per_unit
         analysis["unit_return"] = analysis["residual_return"] / max(gross_exposure_per_unit, 1e-6)
         analysis["gross_return"] = analysis["position"].shift(1).fillna(0.0) * analysis["unit_return"]
+        analysis[f"target_weight_{self.symbol}"] = analysis["position"] / max(gross_exposure_per_unit, 1e-6)
+        hedge_weight = -analysis["position"] * beta / max(gross_exposure_per_unit, 1e-6)
+        for benchmark_symbol in benchmark_symbols:
+            analysis[f"target_weight_{benchmark_symbol}"] = hedge_weight / max(len(benchmark_symbols), 1)
         analysis["short_exposure_per_unit"] = np.where(
             analysis["position"] >= 0.0,
             abs(beta) / max(gross_exposure_per_unit, 1e-6),
@@ -133,6 +137,8 @@ class SectorResidualMeanReversionStrategy(WalkForwardStrategy):
             "gross_exposure_per_unit",
             "short_exposure_per_unit",
             "residual_zscore",
+            f"target_weight_{self.symbol}",
+            *(f"target_weight_{benchmark_symbol}" for benchmark_symbol in benchmark_symbols),
         ):
             test_frame[column] = test_frame[column].fillna(0.0)
 

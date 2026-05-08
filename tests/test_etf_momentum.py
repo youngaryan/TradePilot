@@ -22,7 +22,7 @@ class ETFMomentumTests(unittest.TestCase):
             config=WalkForwardConfig(
                 train_bars=500,
                 test_bars=84,
-                step_bars=21,
+                step_bars=84,
                 bars_per_year=252,
                 purge_bars=5,
             ),

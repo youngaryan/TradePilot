@@ -60,6 +60,7 @@ class PortfolioManager:
         strategy_forecasts = pd.DataFrame(index=portfolio_index)
         strategy_sentiment_strength = pd.DataFrame(index=portfolio_index)
         strategy_sentiment_confidence = pd.DataFrame(index=portfolio_index)
+        strategy_symbol_targets: dict[str, pd.DataFrame] = {}
 
         strategy_summaries: list[dict[str, float | str]] = []
 
@@ -85,10 +86,10 @@ class PortfolioManager:
                 errors="coerce",
             ).fillna(0.0)
 
-            rolling_vol = frame["unit_return"].rolling(self.volatility_window).std()
-            fallback_vol = frame["unit_return"].std()
-            fallback_vol = float(fallback_vol) if pd.notna(fallback_vol) and fallback_vol > 0 else 0.01
-            rolling_vol = rolling_vol.replace(0.0, np.nan).fillna(fallback_vol)
+            rolling_vol = frame["unit_return"].rolling(self.volatility_window, min_periods=2).std()
+            expanding_vol = frame["unit_return"].expanding(min_periods=2).std()
+            rolling_vol = rolling_vol.replace(0.0, np.nan).fillna(expanding_vol.replace(0.0, np.nan)).fillna(0.01)
+            fallback_vol = float(rolling_vol.iloc[-1]) if not rolling_vol.empty else 0.01
 
             conviction = frame["forecast"].abs().clip(lower=self.forecast_floor, upper=2.0)
             cost_penalty = (1.0 / (1.0 + frame["cost_estimate"] * 10_000.0)).clip(lower=0.25, upper=1.0)
@@ -106,6 +107,9 @@ class PortfolioManager:
             strategy_forecasts[strategy_name] = frame["forecast"]
             strategy_sentiment_strength[strategy_name] = frame["sentiment_strength"]
             strategy_sentiment_confidence[strategy_name] = frame["sentiment_confidence"]
+            target_columns = [column for column in frame.columns if str(column).startswith("target_weight_")]
+            if target_columns:
+                strategy_symbol_targets[strategy_name] = frame[target_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
             strategy_summaries.append(
                 {
@@ -153,6 +157,18 @@ class PortfolioManager:
 
         for strategy_name in scaled_weights.columns:
             portfolio_frame[f"weight_{strategy_name}"] = scaled_weights[strategy_name]
+
+        symbol_targets: dict[str, pd.Series] = {}
+        for strategy_name, target_frame in strategy_symbol_targets.items():
+            if strategy_name not in scaled_weights.columns:
+                continue
+            strategy_allocation = scaled_weights[strategy_name]
+            for column in target_frame.columns:
+                symbol = str(column).removeprefix("target_weight_")
+                contribution = strategy_allocation * target_frame[column]
+                symbol_targets[symbol] = symbol_targets.get(symbol, pd.Series(0.0, index=portfolio_index)) + contribution
+        for symbol, series in sorted(symbol_targets.items()):
+            portfolio_frame[f"target_weight_{symbol}"] = series.fillna(0.0)
 
         diagnostics = {
             "portfolio_name": portfolio_name,

@@ -128,6 +128,7 @@ class GraphClusterResidualStrategy(WalkForwardStrategy):
 
         for symbol in available_symbols:
             analysis[f"cluster_weight_{symbol}"] = internal_weights[symbol]
+            analysis[f"target_weight_{symbol}"] = internal_weights[symbol]
             analysis[f"cluster_zscore_{symbol}"] = zscores[symbol]
 
         test_frame = analysis.reindex(test_data.index).copy()
@@ -144,6 +145,8 @@ class GraphClusterResidualStrategy(WalkForwardStrategy):
             "cluster_dispersion",
         ):
             test_frame[column] = test_frame[column].fillna(0.0)
+        for symbol in available_symbols:
+            test_frame[f"target_weight_{symbol}"] = test_frame[f"target_weight_{symbol}"].fillna(0.0)
 
         diagnostics = {
             "strategy_type": "graph_cluster_residual",

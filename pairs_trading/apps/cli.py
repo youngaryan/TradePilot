@@ -67,6 +67,7 @@ from ..strategies import (
     TimeSeriesMomentumStrategy,
     VolatilityTargetTrendStrategy,
     GraphClusterTradingConfig,
+    build_rule_based_strategy_factory,
 )
 
 
@@ -1166,6 +1167,95 @@ def run_directional_pipeline(
     )
 
 
+def run_rule_based_strategy_pipeline(
+    *,
+    spec: dict[str, Any],
+    symbols: list[str],
+    start: str = "2018-01-01",
+    end: str = "2026-04-15",
+    interval: str = "1d",
+    experiment_name: str | None = None,
+    price_cache_dir: str = "data/cache",
+    artifact_root: str = "artifacts/experiments",
+    train_bars: int = 252,
+    test_bars: int = 63,
+    step_bars: int = 63,
+    bars_per_year: int = 252,
+    purge_bars: int = 5,
+    embargo_bars: int = 0,
+    pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if not symbols:
+        raise ValueError("User-created strategies require at least one symbol.")
+
+    strategy_factory, min_history = build_rule_based_strategy_factory(spec)
+    price_provider = CachedParquetProvider(
+        upstream=YahooFinanceProvider(),
+        cache_dir=price_cache_dir,
+    )
+    prices = price_provider.get_close_prices(
+        symbols=symbols,
+        start=start,
+        end=end,
+        interval=interval,
+    )
+
+    costs = spec.get("costs") if isinstance(spec.get("costs"), dict) else {}
+    cost_model = CostModel(
+        commission_bps=float(costs.get("commission_bps", 0.5)),
+        spread_bps=float(costs.get("spread_bps", 1.0)),
+        slippage_bps=float(costs.get("slippage_bps", 0.75)),
+        market_impact_bps=float(costs.get("market_impact_bps", 0.5)),
+        borrow_bps_annual=float(costs.get("borrow_bps_annual", 25.0)),
+        delay_bars=int(costs.get("delay_bars", 1)),
+    )
+    sizing = spec.get("position_sizing") if isinstance(spec.get("position_sizing"), dict) else {}
+    max_gross = float(sizing.get("max_gross_exposure", 1.0))
+    pipeline_name = experiment_name or str(spec.get("name") or "user_rule_strategy")
+    pipeline = DirectionalStrategyPipeline(
+        strategy_factory=strategy_factory,
+        portfolio_manager=PortfolioManager(
+            max_leverage=max(0.1, max_gross),
+            risk_per_trade=min(0.20, max(0.01, float(sizing.get("max_position_per_symbol", 0.25)))),
+            volatility_window=20,
+            max_strategy_weight=min(1.0, max(0.01, float(sizing.get("max_position_per_symbol", 0.25)))),
+        ),
+        config=DirectionalPipelineConfig.from_symbols(symbols=symbols, min_history=min_history),
+        name=pipeline_name,
+    )
+
+    walk_forward = WalkForwardConfig(
+        train_bars=train_bars,
+        test_bars=test_bars,
+        step_bars=step_bars,
+        bars_per_year=bars_per_year,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
+    )
+    broker = _build_broker(
+        max_gross_leverage=max(0.1, max_gross),
+        max_net_leverage=max(0.1, min(max_gross, 1.0)),
+        max_turnover=1.0,
+        cost_model=cost_model,
+    )
+    return _run_pipeline_with_validation(
+        pipeline=pipeline,
+        prices=prices,
+        config=walk_forward,
+        cost_model=cost_model,
+        broker=broker,
+        experiment_name=pipeline_name,
+        artifact_root=artifact_root,
+        validation_config=ValidationConfig(
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+            pbo_partitions=pbo_partitions,
+        ),
+        progress_callback=progress_callback,
+    )
+
+
 def run_etf_trend_pipeline(
     symbols: list[str] | None = None,
     start: str = "2010-01-01",
@@ -1198,7 +1288,7 @@ def run_etf_trend_pipeline(
     walk_forward = WalkForwardConfig(
         train_bars=756,
         test_bars=63,
-        step_bars=21,
+        step_bars=63,
         bars_per_year=252,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
@@ -1294,7 +1384,7 @@ def run_event_driven_pipeline(
     walk_forward = WalkForwardConfig(
         train_bars=504,
         test_bars=63,
-        step_bars=21,
+        step_bars=63,
         bars_per_year=252,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
@@ -1453,7 +1543,7 @@ def run_pead_sentiment_pipeline(
     walk_forward = WalkForwardConfig(
         train_bars=504,
         test_bars=63,
-        step_bars=21,
+        step_bars=63,
         bars_per_year=252,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,

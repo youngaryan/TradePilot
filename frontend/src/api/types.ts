@@ -504,6 +504,76 @@ export interface StrategyCatalogItem {
   key_parameters: string[];
   example_cli: string;
   paper_config_example: Record<string, unknown>;
+  user_strategy?: boolean;
+  owner_user_id?: string | null;
+  status?: string;
+  version?: number;
+  risk_level?: string;
+}
+
+export interface StrategyBuilderMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface StrategySpec {
+  schema_version: "strategy_spec/v1";
+  name: string;
+  summary: string;
+  asset_universe: { type: string; symbols: string[] };
+  timeframe: string;
+  side: "long_only" | "short_only" | "long_short";
+  required_indicators: Array<{ name: string; kind: string; parameters: Record<string, unknown> }>;
+  entry_rules: Array<{ kind: string; parameters: Record<string, unknown>; description?: string | null }>;
+  exit_rules: Array<{ kind: string; parameters: Record<string, unknown>; description?: string | null }>;
+  position_sizing: Record<string, unknown>;
+  risk_controls: Record<string, unknown>;
+  rebalancing: Record<string, unknown>;
+  costs: Record<string, unknown>;
+  assumptions: string[];
+  limitations: string[];
+  editable_parameters: Array<{ name: string; default: unknown; min?: number | null; max?: number | null; description: string }>;
+  compatibility: Record<string, unknown>;
+}
+
+export interface UserStrategyRecord {
+  id: string;
+  organization_id: string;
+  owner_user_id: string;
+  owner_email?: string | null;
+  owner_name?: string | null;
+  root_strategy_id: string;
+  version: number;
+  name: string;
+  status: string;
+  risk_level: string;
+  spec: StrategySpec;
+  validation: Record<string, unknown>;
+  approval: Record<string, unknown>;
+  created_at_utc: string;
+  updated_at_utc: string;
+  approved_at_utc?: string | null;
+  disabled_at_utc?: string | null;
+  deleted_at_utc?: string | null;
+  backtest_count: number;
+}
+
+export interface StrategyBuilderResponse {
+  state: "needs_clarification" | "ready_for_approval" | "rejected" | string;
+  assistant_message: string;
+  questions: string[];
+  draft_spec?: StrategySpec | null;
+  validation: {
+    ok: boolean;
+    errors: string[];
+    warnings: string[];
+  };
+}
+
+export interface StrategyBuilderApprovalResponse {
+  strategy: UserStrategyRecord;
+  catalog_item: StrategyCatalogItem;
+  validation: Record<string, unknown>;
 }
 
 export interface BacktestTemplate {
@@ -625,21 +695,27 @@ export interface BacktestTradeEvent {
   baseline_equity?: number | null;
   pnl?: number | null;
   return_pct?: number | null;
+  quantity?: number | null;
+  commission?: number | null;
 }
 
 export interface BacktestTradeSummary {
   id: string;
+  symbol?: string | null;
   side: "long" | "short" | string;
   entry_timestamp: string;
   exit_timestamp?: string | null;
   entry_price?: number | null;
   exit_price?: number | null;
-  entry_equity: number;
+  entry_equity?: number | null;
   exit_equity?: number | null;
+  quantity?: number | null;
   pnl?: number | null;
   return_pct?: number | null;
   holding_period_bars: number;
   status: "open" | "closed" | string;
+  entry_commission?: number | null;
+  exit_commission?: number | null;
 }
 
 export interface BacktestVisualizationPayload {

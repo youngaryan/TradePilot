@@ -61,6 +61,7 @@ class EventDriftStrategy(WalkForwardStrategy):
         analysis["signal"] = np.sign(analysis["position"]).replace({-0.0: 0.0}).fillna(0.0)
         analysis["short_exposure_per_unit"] = (analysis["position"] < 0.0).astype(float)
         analysis["gross_exposure_per_unit"] = 1.0
+        analysis[f"target_weight_{self.symbol}"] = analysis["position"].fillna(0.0)
 
         test_frame = analysis.reindex(test_data.index).copy()
         for column in (
@@ -73,6 +74,7 @@ class EventDriftStrategy(WalkForwardStrategy):
             "turnover",
             "short_exposure_per_unit",
             "gross_exposure_per_unit",
+            f"target_weight_{self.symbol}",
         ):
             test_frame[column] = test_frame[column].fillna(0.0)
 
@@ -242,6 +244,7 @@ class PEADSentimentStrategy(WalkForwardStrategy):
         analysis["signal"] = np.sign(analysis["position"]).replace({-0.0: 0.0}).fillna(0.0)
         analysis["short_exposure_per_unit"] = (analysis["position"] < 0.0).astype(float)
         analysis["gross_exposure_per_unit"] = 1.0
+        analysis[f"target_weight_{self.symbol}"] = analysis["position"].fillna(0.0)
 
         test_frame = analysis.reindex(test_data.index).copy()
         for column in (
@@ -258,6 +261,7 @@ class PEADSentimentStrategy(WalkForwardStrategy):
             "sentiment_strength",
             "event_component",
             "sentiment_component",
+            f"target_weight_{self.symbol}",
         ):
             test_frame[column] = test_frame[column].fillna(0.0)
 

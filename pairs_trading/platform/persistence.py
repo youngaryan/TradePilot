@@ -404,6 +404,32 @@ class SQLiteMetadataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_audit_org_time
                     ON audit_log(organization_id, occurred_at_utc DESC);
+
+                CREATE TABLE IF NOT EXISTS user_strategies (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    root_strategy_id TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    spec_json TEXT NOT NULL,
+                    validation_json TEXT NOT NULL,
+                    approval_json TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    approved_at_utc TEXT,
+                    disabled_at_utc TEXT,
+                    deleted_at_utc TEXT,
+                    backtest_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_user_strategies_owner_status
+                    ON user_strategies(organization_id, owner_user_id, status, updated_at_utc DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_user_strategies_admin
+                    ON user_strategies(status, risk_level, created_at_utc DESC);
                 """
             )
         self._migrate_legacy_columns()
@@ -1137,6 +1163,176 @@ class SQLiteMetadataStore:
             item["metadata"] = _json_load(item.pop("metadata_json"), {})
             records.append(item)
         return records
+
+    def _user_strategy_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        payload = dict(row)
+        payload["spec"] = _json_load(payload.pop("spec_json"), {})
+        payload["validation"] = _json_load(payload.pop("validation_json"), {})
+        payload["approval"] = _json_load(payload.pop("approval_json"), {})
+        return payload
+
+    def create_user_strategy(
+        self,
+        *,
+        organization_id: str,
+        owner_user_id: str,
+        spec: dict[str, Any],
+        validation: dict[str, Any],
+        approval: dict[str, Any],
+        status: str = "active",
+        risk_level: str = "medium",
+    ) -> dict[str, Any]:
+        now = _utc_now_iso()
+        strategy_id = self.stable_id("ustr", f"{organization_id}:{owner_user_id}:{uuid4().hex}")
+        root_id = self.stable_id("ustr_root", f"{organization_id}:{owner_user_id}:{spec.get('name')}:{uuid4().hex}")
+        approved_at = str(approval.get("approved_at_utc") or now)
+        name = str(spec.get("name") or "User Strategy")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_strategies (
+                    id, organization_id, owner_user_id, root_strategy_id, version, name,
+                    status, risk_level, spec_json, validation_json, approval_json,
+                    created_at_utc, updated_at_utc, approved_at_utc, disabled_at_utc,
+                    deleted_at_utc, backtest_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    strategy_id,
+                    organization_id,
+                    owner_user_id,
+                    root_id,
+                    1,
+                    name,
+                    status,
+                    risk_level,
+                    _json_dump(spec),
+                    _json_dump(validation),
+                    _json_dump(approval),
+                    now,
+                    now,
+                    approved_at,
+                    None,
+                    None,
+                    0,
+                ),
+            )
+            row = connection.execute("SELECT * FROM user_strategies WHERE id = ?", (strategy_id,)).fetchone()
+        return self._user_strategy_row(row)
+
+    def get_user_strategy(
+        self,
+        *,
+        organization_id: str,
+        strategy_id: str,
+        owner_user_id: str | None = None,
+        active_only: bool = False,
+        include_deleted: bool = False,
+    ) -> dict[str, Any] | None:
+        clauses = ["organization_id = ?", "id = ?"]
+        params: list[Any] = [organization_id, strategy_id]
+        if owner_user_id is not None:
+            clauses.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        if active_only:
+            clauses.append("status = 'active'")
+        if not include_deleted:
+            clauses.append("deleted_at_utc IS NULL")
+        query = f"SELECT * FROM user_strategies WHERE {' AND '.join(clauses)}"
+        with self._connect() as connection:
+            row = connection.execute(query, tuple(params)).fetchone()
+        return None if row is None else self._user_strategy_row(row)
+
+    def list_user_strategies(
+        self,
+        *,
+        organization_id: str,
+        owner_user_id: str,
+        active_only: bool = True,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["organization_id = ?", "owner_user_id = ?", "deleted_at_utc IS NULL"]
+        params: list[Any] = [organization_id, owner_user_id]
+        if active_only:
+            clauses.append("status = 'active'")
+        params.append(int(limit))
+        query = f"""
+            SELECT * FROM user_strategies
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at_utc DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._user_strategy_row(row) for row in rows]
+
+    def list_admin_user_strategies(
+        self,
+        *,
+        organization_id: str | None = None,
+        owner_user_id: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["us.deleted_at_utc IS NULL"]
+        params: list[Any] = []
+        if organization_id:
+            clauses.append("us.organization_id = ?")
+            params.append(organization_id)
+        if owner_user_id:
+            clauses.append("us.owner_user_id = ?")
+            params.append(owner_user_id)
+        if status:
+            clauses.append("us.status = ?")
+            params.append(status)
+        if risk_level:
+            clauses.append("us.risk_level = ?")
+            params.append(risk_level)
+        params.append(int(limit))
+        query = f"""
+            SELECT us.*, u.email AS owner_email, u.display_name AS owner_name
+            FROM user_strategies us
+            LEFT JOIN users u ON u.id = us.owner_user_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY us.created_at_utc DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._user_strategy_row(row) for row in rows]
+
+    def update_user_strategy_status(self, *, strategy_id: str, status: str) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        disabled_at = now if status == "disabled" else None
+        deleted_at = now if status == "deleted" else None
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE user_strategies
+                SET status = ?,
+                    disabled_at_utc = ?,
+                    deleted_at_utc = COALESCE(?, deleted_at_utc),
+                    updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (status, disabled_at, deleted_at, now, strategy_id),
+            )
+            row = connection.execute("SELECT * FROM user_strategies WHERE id = ?", (strategy_id,)).fetchone()
+        return None if row is None else self._user_strategy_row(row)
+
+    def increment_user_strategy_backtest_count(self, *, strategy_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE user_strategies
+                SET backtest_count = backtest_count + 1,
+                    updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (_utc_now_iso(), strategy_id),
+            )
 
     def upsert_dataset(self, *, organization_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = _utc_now_iso()

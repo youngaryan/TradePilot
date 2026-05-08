@@ -32,14 +32,18 @@ def _build_standard_output(
     transaction_cost_bps: float,
     diagnostics: dict[str, object],
 ) -> StrategyOutput:
-    frame = analysis.reindex(test_index).copy()
-    frame["turnover"] = frame["position"].diff().abs().fillna(frame["position"].abs())
-    frame["cost_estimate"] = frame["turnover"] * (transaction_cost_bps / 10_000.0)
-    frame["gross_return"] = frame["position"].shift(1).fillna(0.0) * frame["unit_return"].fillna(0.0)
-    frame["signal"] = np.sign(frame["position"]).replace({-0.0: 0.0}).fillna(0.0)
+    full = analysis.copy()
+    full["turnover"] = full["position"].diff().abs().fillna(full["position"].abs())
+    full["cost_estimate"] = full["turnover"] * (transaction_cost_bps / 10_000.0)
+    full["gross_return"] = full["position"].shift(1).fillna(0.0) * full["unit_return"].fillna(0.0)
+    full["signal"] = np.sign(full["position"]).replace({-0.0: 0.0}).fillna(0.0)
+    frame = full.reindex(test_index).copy()
     frame["short_exposure_per_unit"] = (frame["position"] < 0.0).astype(float)
     frame["gross_exposure_per_unit"] = 1.0
     frame["instrument_return"] = frame["unit_return"].fillna(0.0)
+    symbol = str(diagnostics.get("symbol") or "")
+    if symbol:
+        frame[f"target_weight_{symbol}"] = np.sign(frame["position"]).replace({-0.0: 0.0}).fillna(0.0) * frame["position"].abs()
 
     for column in (
         "signal",

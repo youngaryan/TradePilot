@@ -243,10 +243,65 @@ def _sample_positions(index: pd.Index, max_points: int, preserve: Iterable[Any] 
     return sorted(positions)
 
 
+def _ledger_trade_events_and_summary(
+    *,
+    ledger: dict[str, Any],
+    strategy_equity: pd.Series,
+    baseline_equity: pd.Series,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    fills = ledger.get("fills", []) if isinstance(ledger, dict) else []
+    trades = ledger.get("trades", []) if isinstance(ledger, dict) else []
+    events: list[dict[str, Any]] = []
+    for index, fill in enumerate(fills[-250:], start=max(1, len(fills) - 249)):
+        timestamp = pd.Timestamp(fill.get("timestamp"))
+        side = str(fill.get("side") or "")
+        events.append(
+            {
+                "id": fill.get("id") or f"fill-{index}",
+                "timestamp": _iso_timestamp(timestamp),
+                "type": "buy" if side == "buy" else "sell",
+                "side": "long" if side == "buy" else "short",
+                "label": "Buy fill" if side == "buy" else "Sell fill",
+                "exposure": None,
+                "exposure_change": None,
+                "price": _safe_float(fill.get("price"), None),
+                "strategy_equity": _safe_float(strategy_equity.reindex([timestamp]).ffill().iloc[-1], None) if not strategy_equity.empty else None,
+                "baseline_equity": _safe_float(baseline_equity.reindex([timestamp]).ffill().iloc[-1], None) if not baseline_equity.empty else None,
+                "quantity": _safe_float(fill.get("quantity"), None),
+                "commission": _safe_float(fill.get("commission"), None),
+                "pnl": _safe_float(fill.get("realized_pnl"), None),
+                "return_pct": None,
+            }
+        )
+
+    summary: list[dict[str, Any]] = []
+    for index, trade in enumerate(trades[-250:], start=max(1, len(trades) - 249)):
+        summary.append(
+            {
+                "id": trade.get("id") or f"trade-{index}",
+                "symbol": trade.get("symbol"),
+                "side": trade.get("side"),
+                "entry_timestamp": trade.get("entry_timestamp"),
+                "exit_timestamp": trade.get("exit_timestamp"),
+                "entry_price": _safe_float(trade.get("entry_price"), None),
+                "exit_price": _safe_float(trade.get("exit_price"), None),
+                "quantity": _safe_float(trade.get("quantity"), None),
+                "pnl": _safe_float(trade.get("pnl"), None),
+                "return_pct": _safe_float(trade.get("return_pct"), None),
+                "holding_period_bars": int(trade.get("holding_period_bars") or 0),
+                "status": "closed",
+                "entry_commission": _safe_float(trade.get("entry_commission"), None),
+                "exit_commission": _safe_float(trade.get("exit_commission"), None),
+            }
+        )
+    return events, summary
+
+
 def build_backtest_visualization(
     *,
     equity_curve: Any,
     prices: Any,
+    ledger: dict[str, Any] | None = None,
     bars_per_year: int = 252,
     completed_folds: int | None = None,
     total_folds: int | None = None,
@@ -272,8 +327,15 @@ def build_backtest_visualization(
         }
 
     raw_frame = equity_curve.copy()
-    raw_returns = _series_or_default(raw_frame, "net_return", 0.0)
-    raw_strategy_equity = _equity_from_returns(raw_returns)
+    ledger_config = ledger.get("config", {}) if isinstance(ledger, dict) else {}
+    initial_cash = float(ledger_config.get("initial_cash") or 1.0)
+    if "portfolio_value" in raw_frame.columns:
+        portfolio_value = pd.to_numeric(raw_frame["portfolio_value"], errors="coerce").ffill()
+        raw_returns = portfolio_value.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        raw_strategy_equity = portfolio_value / max(initial_cash, 1e-12)
+    else:
+        raw_returns = _series_or_default(raw_frame, "net_return", 0.0)
+        raw_strategy_equity = _equity_from_returns(raw_returns)
     raw_strategy_drawdown = _drawdown(raw_strategy_equity)
     frame = raw_frame.assign(_strategy_equity=raw_strategy_equity, _strategy_drawdown=raw_strategy_drawdown).sort_index(kind="mergesort")
     if frame.index.has_duplicates:
@@ -283,9 +345,15 @@ def build_backtest_visualization(
     strategy_drawdown = pd.to_numeric(frame["_strategy_drawdown"], errors="coerce").ffill().fillna(0.0)
 
     price_frame = _as_numeric_frame(prices)
-    baseline_returns, baseline_label = _baseline_returns(price_frame, frame.index)
-    baseline_equity = _equity_from_returns(baseline_returns)
-    baseline_drawdown = _drawdown(baseline_equity)
+    if "benchmark_equity" in frame.columns:
+        baseline_equity = pd.to_numeric(frame["benchmark_equity"], errors="coerce").ffill().fillna(1.0)
+        baseline_returns = pd.to_numeric(frame.get("benchmark_return", baseline_equity.pct_change()), errors="coerce").fillna(0.0)
+        baseline_drawdown = pd.to_numeric(frame.get("benchmark_drawdown", _drawdown(baseline_equity)), errors="coerce").fillna(0.0)
+        baseline_label = "Fixed-share buy and hold"
+    else:
+        baseline_returns, baseline_label = _baseline_returns(price_frame, frame.index)
+        baseline_equity = _equity_from_returns(baseline_returns)
+        baseline_drawdown = _drawdown(baseline_equity)
 
     symbol = _primary_symbol(price_frame, primary_symbol)
     primary_price = None
@@ -294,12 +362,19 @@ def build_backtest_visualization(
         indicator_source = price_frame[symbol].ffill()
         primary_price = indicator_source.reindex(frame.index).ffill()
 
-    trade_events, trade_summary = _trade_events_and_summary(
-        frame,
-        strategy_equity=strategy_equity,
-        baseline_equity=baseline_equity,
-        price=primary_price,
-    )
+    if isinstance(ledger, dict) and ledger.get("fills") is not None:
+        trade_events, trade_summary = _ledger_trade_events_and_summary(
+            ledger=ledger,
+            strategy_equity=strategy_equity,
+            baseline_equity=baseline_equity,
+        )
+    else:
+        trade_events, trade_summary = _trade_events_and_summary(
+            frame,
+            strategy_equity=strategy_equity,
+            baseline_equity=baseline_equity,
+            price=primary_price,
+        )
     event_timestamps = [pd.Timestamp(event["timestamp"]) for event in trade_events]
     sample = _sample_positions(frame.index, max_points=max_points, preserve=event_timestamps)
     sampled_index = frame.index.take(sample)
@@ -389,6 +464,13 @@ def build_backtest_visualization(
         "completed_folds": int(completed_folds or 0),
         "total_folds": int(total_folds or 0),
     }
+    if isinstance(ledger, dict) and isinstance(ledger.get("metrics"), dict):
+        ledger_metrics = dict(ledger["metrics"])
+        metrics.update(ledger_metrics)
+        if "benchmark_total_return" in ledger_metrics:
+            metrics["baseline_total_return"] = ledger_metrics.get("benchmark_total_return")
+        if "benchmark_relative_return" in ledger_metrics:
+            metrics["benchmark_outperformance"] = ledger_metrics.get("benchmark_relative_return")
 
     return {
         "status": status,

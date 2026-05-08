@@ -73,6 +73,26 @@ class BacktestRunRequest(BaseModel):
     )
 
 
+class StrategyBuilderMessage(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=5000)
+
+
+class StrategyBuilderChatRequest(BaseModel):
+    messages: list[StrategyBuilderMessage] = Field(default_factory=list, max_length=20)
+    draft_spec: dict[str, Any] | None = Field(default=None, description="Optional structured spec revision to validate.")
+
+
+class StrategyBuilderApprovalRequest(BaseModel):
+    spec: dict[str, Any]
+    approved: bool = Field(default=False)
+    approval_text: str = Field(default="", max_length=500)
+
+
+class AdminStrategyStatusUpdateRequest(BaseModel):
+    status: str = Field(pattern="^(active|disabled)$")
+
+
 class SentimentAccumulationRequest(BaseModel):
     symbols: list[str] = Field(
         default_factory=lambda: ["AAPL", "MSFT", "NVDA"],

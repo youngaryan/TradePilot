@@ -25,10 +25,14 @@ import type {
   PaperStrategy,
   PricingPayload,
   SignupRequest,
+  StrategyBuilderApprovalResponse,
+  StrategyBuilderMessage,
+  StrategyBuilderResponse,
   StrategyCatalogItem,
   SystemMetadata,
   TelemetryEventRecord,
   TelemetryEventRequest,
+  UserStrategyRecord,
   WorkspacePayload
 } from "./types";
 
@@ -335,7 +339,51 @@ export function getPaperRunJob(jobId: string) {
 }
 
 export function getStrategyCatalog() {
+  return requestJson<StrategyCatalogItem[]>("/api/strategies/allowed");
+}
+
+export function getPublicStrategyCatalog() {
   return requestJson<StrategyCatalogItem[]>("/api/strategies/catalog");
+}
+
+export function listUserStrategies() {
+  return requestJson<UserStrategyRecord[]>("/api/strategies/user");
+}
+
+export function chatStrategyBuilder(messages: StrategyBuilderMessage[], draftSpec?: Record<string, unknown> | null) {
+  return requestJson<StrategyBuilderResponse>("/api/strategies/builder/chat", {
+    method: "POST",
+    body: JSON.stringify({ messages, draft_spec: draftSpec ?? null })
+  });
+}
+
+export function approveStrategySpec(spec: Record<string, unknown>, approvalText: string) {
+  return requestJson<StrategyBuilderApprovalResponse>("/api/strategies/builder/approve", {
+    method: "POST",
+    body: JSON.stringify({ spec, approved: true, approval_text: approvalText })
+  });
+}
+
+export function listAdminUserStrategies(params?: { organization_id?: string; user_id?: string; status?: string; risk_level?: string; limit?: number }) {
+  const search = new URLSearchParams();
+  Object.entries(params ?? {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
+  });
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<UserStrategyRecord[]>(`/api/admin/user-strategies${suffix}`);
+}
+
+export function updateAdminUserStrategy(strategyId: string, status: "active" | "disabled") {
+  return requestJson<UserStrategyRecord>(`/api/admin/user-strategies/${encodeURIComponent(strategyId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status })
+  });
+}
+
+export function deleteAdminUserStrategy(strategyId: string) {
+  return requestJson<UserStrategyRecord>(`/api/admin/user-strategies/${encodeURIComponent(strategyId)}`, {
+    method: "DELETE"
+  });
 }
 
 export function getBacktestTemplates() {

@@ -29,7 +29,7 @@ def build_backtest_router(settings: BackendSettings) -> APIRouter:
     @router.post("/run", status_code=202)
     def run_backtest(request: BacktestRunRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
-            service.validate_request(request)
+            service.validate_request(request, organization_id=ctx.organization_id, user_id=str(ctx.user.get("id") or ""))
             quotas.check_and_record(
                 organization_id=ctx.organization_id,
                 user_id=str(ctx.user.get("id") or ""),
