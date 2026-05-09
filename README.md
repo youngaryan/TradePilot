@@ -262,12 +262,27 @@ PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=mock
 
 For real hosted generation, set `PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=openai` or `anthropic` plus the matching `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` environment/vault reference. Production rejects mock/disabled LLM configuration for this workflow.
 
+For a free local development LLM, run Ollama and set:
+
+```powershell
+ollama pull llama3.2:1b
+PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=ollama
+PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL=llama3.2:1b
+PAIRS_TRADING_MARKET_RESEARCH_OLLAMA_BASE_URL=http://127.0.0.1:11434
+PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS=120
+PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS=120
+PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY=1
+```
+
+Restart the backend after changing these variables. The authenticated `GET /api/market-research/runtime` route shows the active provider/model, data provider, timeout settings, and Ollama reachability without exposing secrets.
+
 Use the web app's `AI Research` view, Workspace `Reports`, or the authenticated API routes:
 
 ```text
 POST /api/market-research/run-job
 GET /api/market-research/jobs
 GET /api/market-research/jobs/{job_id}
+GET /api/market-research/runtime
 GET /api/workspaces/reports
 GET /api/workspaces/reports/{report_id}
 ```

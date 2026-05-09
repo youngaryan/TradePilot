@@ -7,7 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..authz import require_csrf, require_paid_context
 from ..config import BackendSettings
-from ..market_research_services import MarketResearchJobRunner
+from ..market_research_services import MarketResearchJobRunner, MarketResearchService
 from ..quotas import QuotaExceeded, QuotaService
 from ..saas import AuthService, BillingService, CSRF_COOKIE_NAME, MFA_COOKIE_NAME, RequestContext, SaaSService, SESSION_COOKIE_NAME
 from ..schemas import (
@@ -321,6 +321,7 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
         )
         try:
             request_model = MarketResearchRunRequest.model_validate(request_payload)
+            MarketResearchService(settings).preflight_runtime()
             quotas.check_and_record(
                 organization_id=ctx.organization_id,
                 user_id=str(ctx.user.get("id") or ""),

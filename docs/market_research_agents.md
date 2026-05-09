@@ -27,12 +27,28 @@ The default local configuration is offline and deterministic. It requires no API
 
 ```powershell
 PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER=demo
-PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS=8.0
+PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS=120.0
 PAIRS_TRADING_MARKET_RESEARCH_ARTIFACT_ROOT=artifacts/market_research/reports
 PAIRS_TRADING_MARKET_RESEARCH_JOB_STATE_DIR=artifacts/market_research/jobs
 PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=mock
 PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL=mock-research-v1
+PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS=120
+PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY=1
 ```
+
+For a free local development model, install Ollama, pull a small model, and run the backend with the local provider:
+
+```powershell
+ollama pull llama3.2:1b
+$env:PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER="ollama"
+$env:PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL="llama3.2:1b"
+$env:PAIRS_TRADING_MARKET_RESEARCH_OLLAMA_BASE_URL="http://127.0.0.1:11434"
+$env:PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS="120"
+$env:PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS="120"
+$env:PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY="1"
+```
+
+Ollama mode uses the local `/api/chat` endpoint with schema/JSON output validation. It is intended for development and tests only; production startup rejects `ollama`. Restart the backend after changing environment variables. Use `GET /api/market-research/runtime` to confirm the active provider/model, timeout settings, data provider, and whether the configured Ollama model is reachable.
 
 Set `PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER=cached_yahoo` to use the existing cached Yahoo price provider for close prices. If that provider fails or returns no usable rows, the workflow falls back to demo data and records a warning in the report.
 
@@ -67,6 +83,7 @@ Authenticated premium route:
 POST /api/market-research/run-job
 GET /api/market-research/jobs
 GET /api/market-research/jobs/{job_id}
+GET /api/market-research/runtime
 GET /api/workspaces/reports
 GET /api/workspaces/reports/{report_id}
 DELETE /api/workspaces/reports/{report_id}

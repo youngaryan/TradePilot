@@ -1208,6 +1208,94 @@ class BackendAppTests(unittest.TestCase):
         reports_after_delete = client.get("/api/workspaces/reports", headers=headers)
         self.assertNotIn(report_id, {item["id"] for item in reports_after_delete.json()})
 
+    def test_market_research_job_api_reports_ollama_runtime_metadata_when_configured(self) -> None:
+        from pairs_trading.backend.app import create_app
+        from pairs_trading.backend.config import BackendSettings
+        from pairs_trading.research.llm_providers import LLMCallResult
+
+        class FastOllamaProvider:
+            provider_name = "ollama"
+            model_name = "llama3.2:1b"
+
+            def generate_structured(self, prompt, schema, options=None):  # noqa: ANN001
+                del prompt, options
+                return LLMCallResult(
+                    value=schema.model_validate(
+                        {
+                            "agent_name": "ollama",
+                            "display_name": "Ollama Agent",
+                            "summary": "Local Ollama structured output for backend contract testing.",
+                            "signals": [],
+                            "confidence": 60,
+                            "warnings": [],
+                            "details": {"local_llm": True},
+                        }
+                    ),
+                    provider="ollama",
+                    model="llama3.2:1b",
+                    latency_ms=1,
+                )
+
+        workspace = fresh_test_dir("artifacts/test_backend_market_research_ollama")
+        app = create_app(
+            BackendSettings(
+                paper_state_dir=workspace / "state",
+                paper_artifact_root=workspace / "runs",
+                paper_job_state_dir=workspace / "paper_jobs",
+                backtest_job_state_dir=workspace / "backtest_jobs",
+                sentiment_job_state_dir=workspace / "sentiment_jobs",
+                market_research_job_state_dir=workspace / "market_research_jobs",
+                market_research_artifact_root=workspace / "market_research_reports",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+                market_research_data_provider="demo",
+                market_research_llm_provider="ollama",
+                market_research_llm_model="llama3.2:1b",
+            )
+        )
+        client = TestClient(app)
+        headers = self.auth_headers(client)
+        ollama_status = {
+            "base_url": "http://127.0.0.1:11434",
+            "reachable": True,
+            "model_available": True,
+            "configured_model": "llama3.2:1b",
+            "models": ["llama3.2:1b"],
+            "error": None,
+        }
+
+        with patch("pairs_trading.backend.llm_config.probe_ollama_runtime", return_value=ollama_status), patch(
+            "pairs_trading.backend.market_research_services.build_structured_llm_provider",
+            return_value=FastOllamaProvider(),
+        ):
+            runtime = client.get("/api/market-research/runtime", headers=headers)
+            self.assertEqual(runtime.status_code, 200, runtime.text)
+            self.assertEqual(runtime.json()["llm_provider"], "ollama")
+            self.assertTrue(runtime.json()["ollama"]["model_available"])
+
+            submitted = client.post(
+                "/api/market-research/run-job",
+                headers=headers,
+                json={"ticker": "AAPL", "analysis_date": "2026-05-08", "horizon": "swing"},
+            )
+            self.assertEqual(submitted.status_code, 202, submitted.text)
+            job_id = submitted.json()["id"]
+            completed_payload = None
+            for _ in range(50):
+                job = client.get(f"/api/market-research/jobs/{job_id}", headers=headers)
+                self.assertEqual(job.status_code, 200)
+                if job.json()["status"] == "completed":
+                    completed_payload = job.json()
+                    break
+                time.sleep(0.05)
+
+        self.assertIsNotNone(completed_payload)
+        assert completed_payload is not None
+        metadata = completed_payload["result"]["metadata"]
+        self.assertEqual(metadata["llm_provider"], "ollama")
+        self.assertEqual(metadata["llm_model"], "llama3.2:1b")
+        self.assertTrue(completed_payload["result"]["raw_agent_outputs"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,11 +30,17 @@ def build_market_research_router(settings: BackendSettings) -> APIRouter:
     ) -> dict[str, Any]:
         try:
             service.validate_request(request)
+            service.preflight_runtime()
             quotas.check_and_record(
                 organization_id=ctx.organization_id,
                 user_id=str(ctx.user.get("id") or ""),
                 feature="market_research_job",
-                properties={"ticker": request.ticker, "horizon": request.horizon, "provider": request.provider},
+                properties={
+                    "ticker": request.ticker,
+                    "horizon": request.horizon,
+                    "provider": settings.market_research_llm_provider,
+                    "model": settings.market_research_llm_model,
+                },
                 role=ctx.user.get("role"),
             )
             job = runner.submit(request, organization_id=ctx.organization_id, user_id=str(ctx.user.get("id") or ""))
@@ -43,6 +49,11 @@ def build_market_research_router(settings: BackendSettings) -> APIRouter:
             raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/runtime")
+    def get_market_research_runtime(ctx: RequestContext = Depends(auth_context)) -> dict[str, Any]:
+        del ctx
+        return service.runtime_diagnostics()
 
     @router.get("/jobs")
     def list_jobs(ctx: RequestContext = Depends(auth_context)) -> list[dict[str, Any]]:

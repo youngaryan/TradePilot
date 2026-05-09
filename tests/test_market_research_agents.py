@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from pairs_trading.backend.config import BackendSettings
-from pairs_trading.backend.llm_config import validate_market_research_llm_settings
-from pairs_trading.research.llm_providers import LLMCallResult
+from pairs_trading.backend.llm_config import (
+    build_structured_llm_provider,
+    market_research_runtime_diagnostics,
+    preflight_market_research_llm,
+    probe_ollama_runtime,
+    validate_market_research_llm_settings,
+)
+from pairs_trading.research.llm_providers import LLMCallResult, OllamaStructuredLLMProvider
 from pairs_trading.research.market_research_agents import (
+    AgentOutput,
     BearResearcher,
     BullResearcher,
     DemoMarketResearchDataProvider,
@@ -153,6 +161,137 @@ class MarketResearchAgentTests(unittest.TestCase):
                     market_research_llm_provider="mock",
                 )
             )
+        with self.assertRaises(RuntimeError):
+            validate_market_research_llm_settings(
+                BackendSettings(
+                    app_env="production",
+                    enable_demo_accounts=False,
+                    enable_in_process_jobs=False,
+                    session_secret="x" * 32,
+                    csrf_secret="y" * 32,
+                    cors_origins=("https://app.example.com",),
+                    database_url="postgresql://quantops:quantops@example.com:5432/quantops",
+                    redis_url="redis://example.com:6379/0",
+                    stripe_secret_key="sk_live_demo",
+                    stripe_webhook_secret="whsec_demo",
+                    stripe_price_pro_monthly="price_demo",
+                    smtp_host="smtp.example.com",
+                    email_from="ops@example.com",
+                    s3_bucket="quantops",
+                    s3_access_key_id="access",
+                    s3_secret_access_key="secret",
+                    market_research_llm_provider="ollama",
+                    market_research_llm_model="llama3.2:1b",
+                )
+            )
+
+    def test_ollama_provider_builds_from_development_config(self) -> None:
+        provider = build_structured_llm_provider(
+            BackendSettings(
+                market_research_llm_provider="ollama",
+                market_research_llm_model="llama3.2:1b",
+                market_research_ollama_base_url="http://127.0.0.1:11434",
+            )
+        )
+
+        self.assertEqual(provider.provider_name, "ollama")
+        self.assertEqual(provider.model_name, "llama3.2:1b")
+
+    def test_ollama_provider_validates_local_structured_output(self) -> None:
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "message": {
+                "content": (
+                    '{"agent_name":"local","display_name":"Local LLM","summary":"Schema-valid local output",'
+                    '"signals":[],"confidence":58,"warnings":[],"details":{"mode":"ollama"}}'
+                )
+            },
+            "prompt_eval_count": 12,
+            "eval_count": 24,
+            "total_duration": 1000,
+        }
+        provider = OllamaStructuredLLMProvider(model="llama3.2:1b", timeout_seconds=1.0)
+
+        with patch("httpx.post", return_value=response) as post:
+            result = provider.generate_structured("Return JSON", AgentOutput, {"system": "Only JSON."})
+
+        self.assertEqual(result.value.summary, "Schema-valid local output")
+        self.assertEqual(result.provider, "ollama")
+        self.assertEqual(result.model, "llama3.2:1b")
+        self.assertEqual(result.usage["eval_count"], 24)
+        request_payload = post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["model"], "llama3.2:1b")
+        self.assertEqual(request_payload["stream"], False)
+        self.assertIsInstance(request_payload["format"], dict)
+
+    def test_ollama_provider_falls_back_to_json_mode_when_schema_format_fails(self) -> None:
+        schema_response = Mock()
+        schema_response.status_code = 400
+        schema_response.json.return_value = {"error": "schema format unsupported"}
+        json_response = Mock()
+        json_response.status_code = 200
+        json_response.json.return_value = {
+            "message": {
+                "content": (
+                    '{"agent_name":"local","display_name":"Local LLM","summary":"JSON fallback output",'
+                    '"signals":[],"confidence":57,"warnings":[],"details":{"mode":"json"}}'
+                )
+            },
+            "prompt_eval_count": 10,
+            "eval_count": 20,
+        }
+        provider = OllamaStructuredLLMProvider(model="llama3.2:1b", timeout_seconds=1.0, max_retries=0)
+
+        with patch("httpx.post", side_effect=[schema_response, json_response]) as post:
+            result = provider.generate_structured("Return JSON", AgentOutput, {"system": "Only JSON."})
+
+        self.assertEqual(result.value.summary, "JSON fallback output")
+        self.assertEqual(result.metadata["format"], "json")
+        self.assertTrue(result.warnings)
+        self.assertEqual(post.call_count, 2)
+
+    def test_ollama_runtime_probe_and_preflight_report_missing_model(self) -> None:
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"models": [{"model": "llama3.2:1b"}]}
+        settings = BackendSettings(
+            market_research_llm_provider="ollama",
+            market_research_llm_model="missing-model",
+            market_research_ollama_base_url="http://127.0.0.1:11434",
+        )
+
+        with patch("httpx.get", return_value=response):
+            diagnostics = probe_ollama_runtime(settings)
+
+        self.assertTrue(diagnostics["reachable"])
+        self.assertFalse(diagnostics["model_available"])
+        self.assertIn("missing-model", str(diagnostics["error"]))
+        with patch("pairs_trading.backend.llm_config.probe_ollama_runtime", return_value=diagnostics):
+            with self.assertRaises(Exception) as raised:
+                preflight_market_research_llm(settings)
+        self.assertIn("ollama pull missing-model", str(raised.exception))
+
+    def test_runtime_diagnostics_are_safe_and_include_ollama_status(self) -> None:
+        settings = BackendSettings(
+            market_research_data_provider="demo",
+            market_research_llm_provider="ollama",
+            market_research_llm_model="llama3.2:1b",
+        )
+        status = {
+            "base_url": "http://127.0.0.1:11434",
+            "reachable": True,
+            "model_available": True,
+            "configured_model": "llama3.2:1b",
+            "models": ["llama3.2:1b"],
+            "error": None,
+        }
+        with patch("pairs_trading.backend.llm_config.probe_ollama_runtime", return_value=status):
+            diagnostics = market_research_runtime_diagnostics(settings)
+
+        self.assertEqual(diagnostics["llm_provider"], "ollama")
+        self.assertEqual(diagnostics["ollama"], status)
+        self.assertNotIn("api_key", " ".join(diagnostics.keys()).lower())
 
 
 if __name__ == "__main__":

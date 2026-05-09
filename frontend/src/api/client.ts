@@ -14,6 +14,7 @@ import type {
   MarketResearchJob,
   MarketResearchReportDetail,
   MarketResearchReportListQuery,
+  MarketResearchRuntimeConfig,
   MarketResearchReportSummary,
   MarketResearchRunRequest,
   PaperDashboardPayload,
@@ -420,6 +421,10 @@ export function startMarketResearchJob(request: MarketResearchRunRequest) {
     method: "POST",
     body: JSON.stringify(request)
   });
+}
+
+export function getMarketResearchRuntime() {
+  return requestJson<MarketResearchRuntimeConfig>("/api/market-research/runtime");
 }
 
 export function listMarketResearchJobs() {

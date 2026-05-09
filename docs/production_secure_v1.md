@@ -55,7 +55,7 @@ Browser auth uses HttpOnly `quantops_session` cookies. Mutating browser requests
 
 Artifact-style endpoints require authentication. Normal users cannot access admin routes, and production admin APIs require an MFA verification cookie.
 
-Market research LLM credentials are server-side only. Production startup rejects `mock` and `disabled` providers and fails closed when the selected provider secret cannot be resolved. Raw prompts, raw provider responses, API keys, and request-supplied credentials must not be returned to the frontend or persisted in report metadata.
+Market research LLM credentials are server-side only. Production startup rejects `mock`, `disabled`, and local `ollama` providers and fails closed when the selected hosted provider secret cannot be resolved. Raw prompts, raw provider responses, API keys, and request-supplied credentials must not be returned to the frontend or persisted in report metadata.
 
 ## Current migration boundary
 

@@ -28,7 +28,7 @@ from ..research.market_research_agents import (
 )
 from ..research.market_research_prompts import RESEARCH_DISCLAIMER
 from .financial_events import FinancialEventsService
-from .llm_config import build_structured_llm_provider
+from .llm_config import build_structured_llm_provider, market_research_runtime_diagnostics, preflight_market_research_llm
 from .config import BackendSettings
 from .job_queue import enqueue_quant_job
 from .schemas import MarketResearchRunRequest
@@ -371,6 +371,15 @@ class MarketResearchService:
     def validate_request(self, request: MarketResearchRunRequest) -> MarketResearchInput:
         return self._input(request)
 
+    def runtime_diagnostics(self) -> dict[str, object]:
+        return market_research_runtime_diagnostics(self.settings)
+
+    def preflight_runtime(self) -> None:
+        try:
+            preflight_market_research_llm(self.settings)
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
+
     def _input(self, request: MarketResearchRunRequest) -> MarketResearchInput:
         return MarketResearchInput(
             ticker=request.ticker,
@@ -470,13 +479,19 @@ class MarketResearchJobRunner:
         user_id: str | None = None,
         parent_report_id: str | None = None,
     ) -> dict[str, Any]:
-        MarketResearchService(self.settings).validate_request(request)
+        service = MarketResearchService(self.settings)
+        service.validate_request(request)
+        service.preflight_runtime()
         now = _utc_now_iso()
         job_id = uuid4().hex
         job = MarketResearchJob(
             id=job_id,
             status="queued",
-            request=json_ready(request.model_dump(mode="json")),
+            request={
+                **json_ready(request.model_dump(mode="json")),
+                "provider": self.settings.market_research_llm_provider,
+                "model": self.settings.market_research_llm_model,
+            },
             created_at_utc=now,
             updated_at_utc=now,
             organization_id=organization_id,
@@ -535,9 +550,9 @@ class MarketResearchJobRunner:
             job_id,
             "running",
             started_at_utc=_utc_now_iso(),
-            progress=0.12,
-            stage="collecting_data",
-            message="Collecting market research context and provenance.",
+            progress=0.08,
+            stage="checking_llm_provider",
+            message="Checking market research LLM provider configuration.",
         )
         with self.lock:
             job = self.jobs.get(job_id)
@@ -545,7 +560,16 @@ class MarketResearchJobRunner:
             raise ValueError(f"Market research job not found: {job_id}")
         self._persist_report_record(job, status="running")
         try:
-            report = MarketResearchService(self.settings).generate_report(
+            service = MarketResearchService(self.settings)
+            service.preflight_runtime()
+            self._set_status(
+                job_id,
+                "running",
+                progress=0.12,
+                stage="collecting_data",
+                message="Collecting market research context and provenance.",
+            )
+            report = service.generate_report(
                 request,
                 organization_id=organization_id,
                 user_id=job.user_id,

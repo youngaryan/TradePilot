@@ -193,6 +193,108 @@ class OpenAIStructuredLLMProvider:
         raise LLMProviderError(f"OpenAI structured output failed after retries: {last_error}") from last_error
 
 
+class OllamaStructuredLLMProvider:
+    """Local development provider for free/open-weight models served by Ollama."""
+
+    provider_name = "ollama"
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        timeout_seconds: float = 60.0,
+        max_retries: int = 1,
+        max_concurrency: int = 1,
+        base_url: str = "http://127.0.0.1:11434",
+    ) -> None:
+        if not model:
+            raise LLMProviderUnavailable("Ollama model is not configured.")
+        self.model_name = model
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_retries = max(0, int(max_retries))
+        self.base_url = base_url.rstrip("/")
+        self._semaphore = BoundedSemaphore(max(1, int(max_concurrency)))
+
+    def generate_structured(self, prompt: str, schema: type[T], options: dict[str, Any] | None = None) -> LLMCallResult[T]:
+        try:
+            import httpx
+        except Exception as exc:  # pragma: no cover - covered by packaging tests
+            raise LLMProviderUnavailable("Install backend dependencies with httpx to use Ollama structured output.") from exc
+
+        opts = options or {}
+        last_error: Exception | None = None
+        prompt_text = prompt
+        system = opts.get("system") or (
+            "Return only JSON that matches the requested schema. Do not include markdown, commentary, or extra keys."
+        )
+        for attempt in range(self.max_retries + 1):
+            started = time.perf_counter()
+            for format_payload in (_schema_payload(schema), "json"):
+                try:
+                    with self._semaphore:
+                        response = httpx.post(
+                            f"{self.base_url}/api/chat",
+                            json={
+                                "model": self.model_name,
+                                "stream": False,
+                                "messages": [
+                                    {"role": "system", "content": str(system)},
+                                    {"role": "user", "content": prompt_text},
+                                ],
+                                "format": format_payload,
+                                "options": {
+                                    "temperature": float(opts.get("temperature", 0.1)),
+                                    "num_predict": int(opts.get("max_output_tokens", 1800)),
+                                },
+                            },
+                            timeout=self.timeout_seconds,
+                        )
+                    if response.status_code >= 400:
+                        raise LLMProviderError(
+                            f"Ollama structured output failed with HTTP {response.status_code}. "
+                            f"Ensure Ollama is running and model '{self.model_name}' is pulled."
+                        )
+                    payload = response.json()
+                    content = self._extract_message_content(payload)
+                    value = _validate_payload(content, schema, provider=self.provider_name)
+                    metadata = {
+                        "attempt": attempt + 1,
+                        "format": "json_schema" if isinstance(format_payload, dict) else "json",
+                        "total_duration": payload.get("total_duration"),
+                        "load_duration": payload.get("load_duration"),
+                    }
+                    usage = {
+                        "prompt_eval_count": payload.get("prompt_eval_count"),
+                        "eval_count": payload.get("eval_count"),
+                    }
+                    warnings = [] if isinstance(format_payload, dict) else ["Ollama JSON-schema mode was unavailable; JSON mode fallback was used."]
+                    return LLMCallResult(
+                        value=value,
+                        provider=self.provider_name,
+                        model=self.model_name,
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        usage={key: value for key, value in usage.items() if value is not None},
+                        metadata={key: value for key, value in metadata.items() if value is not None},
+                        warnings=warnings,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    # Older Ollama builds accept format="json" but not a JSON schema object.
+                    if isinstance(format_payload, dict):
+                        continue
+                    prompt_text = f"{prompt}\n\nThe previous local model output failed validation: {exc}\nReturn valid JSON only."
+        raise LLMProviderError(f"Ollama structured output failed after retries: {last_error}") from last_error
+
+    @staticmethod
+    def _extract_message_content(payload: dict[str, Any]) -> str:
+        message = payload.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return str(message["content"])
+        if isinstance(payload.get("response"), str):
+            return str(payload["response"])
+        raise LLMSchemaValidationError("Ollama response did not include message.content.")
+
+
 class AnthropicStructuredLLMProvider:
     provider_name = "anthropic"
 

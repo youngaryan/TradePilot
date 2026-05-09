@@ -778,6 +778,25 @@ export interface MarketResearchRunRequest {
   options?: Record<string, unknown>;
 }
 
+export interface MarketResearchRuntimeConfig {
+  llm_provider: string;
+  llm_model: string;
+  data_provider: string;
+  agent_timeout_seconds: number;
+  llm_timeout_seconds: number;
+  llm_max_retries: number;
+  llm_max_concurrency: number;
+  warnings: string[];
+  ollama?: {
+    base_url: string;
+    reachable: boolean;
+    model_available: boolean;
+    configured_model: string;
+    models: string[];
+    error?: string | null;
+  };
+}
+
 export interface MarketResearchSignal {
   label: string;
   direction: "bullish" | "bearish" | "neutral" | "mixed" | string;

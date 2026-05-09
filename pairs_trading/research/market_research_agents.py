@@ -812,8 +812,11 @@ class MarketResearchOrchestrator:
             future.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
             status = AgentStatus.TIMEOUT
-            error = f"{agent.display_name} timed out after {self.per_agent_timeout_seconds:.1f}s."
-            output = self._failed_output(agent, error)
+            error = (
+                f"{agent.display_name} timed out after {self.per_agent_timeout_seconds:.1f}s while using "
+                f"{self._provider_label()}."
+            )
+            output = self._timeout_fallback_output(agent, context, previous_outputs, error)
         except Exception as exc:
             executor.shutdown(wait=False, cancel_futures=True)
             status = AgentStatus.FAILED
@@ -847,6 +850,11 @@ class MarketResearchOrchestrator:
     def _uses_hosted_llm(self) -> bool:
         provider_name = str(getattr(self.llm_provider, "provider_name", "mock")).lower()
         return provider_name not in {"mock", "disabled", "none"}
+
+    def _provider_label(self) -> str:
+        provider = getattr(self.llm_provider, "provider_name", "unknown")
+        model = getattr(self.llm_provider, "model_name", "unknown")
+        return f"{provider}/{model}"
 
     def _augment_with_llm(
         self,
@@ -898,8 +906,10 @@ class MarketResearchOrchestrator:
                 llm_output = llm_output.model_copy(update={"signals": deterministic.signals})
             return llm_output
         except Exception as exc:
+            provider_name = str(getattr(self.llm_provider, "provider_name", "unknown")).lower()
+            provider_label = "Ollama" if provider_name == "ollama" else "Hosted"
             warnings = list(deterministic.warnings)
-            warnings.append(f"Hosted LLM refinement failed for {agent.display_name}; deterministic fallback used: {exc}")
+            warnings.append(f"{provider_label} LLM refinement failed for {agent.display_name}; deterministic fallback used: {exc}")
             return deterministic.model_copy(
                 update={
                     "warnings": list(dict.fromkeys(warnings)),
@@ -908,6 +918,7 @@ class MarketResearchOrchestrator:
                         "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
                         "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
                         "llm_error": str(exc),
+                        "fallback_type": "deterministic_after_llm_error",
                     },
                 }
             )
@@ -962,7 +973,33 @@ class MarketResearchOrchestrator:
             summary=f"{agent.display_name} could not complete. The orchestrator continued with remaining agents.",
             confidence=0,
             warnings=[error],
-            details={"error": error},
+            details={"error": error, "fallback_type": "agent_failed"},
+        )
+
+    def _timeout_fallback_output(
+        self,
+        agent: ResearchAgent,
+        context: MarketResearchContext,
+        previous_outputs: Sequence[AgentOutput],
+        error: str,
+    ) -> AgentOutput:
+        try:
+            deterministic = agent.run(context, previous_outputs)
+        except Exception:
+            return self._failed_output(agent, error)
+        warnings = list(deterministic.warnings)
+        warnings.append(f"{error} Deterministic fallback was used where possible.")
+        return deterministic.model_copy(
+            update={
+                "warnings": list(dict.fromkeys(warnings)),
+                "details": {
+                    **deterministic.details,
+                    "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
+                    "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
+                    "llm_timeout": True,
+                    "fallback_type": "deterministic_after_agent_timeout",
+                },
+            }
         )
 
     def _build_report(
@@ -988,6 +1025,22 @@ class MarketResearchOrchestrator:
         for event in audit:
             if event.status != AgentStatus.COMPLETED and event.error:
                 warnings.append(event.error)
+        provider_name = str(getattr(self.llm_provider, "provider_name", "unknown")).lower()
+        if provider_name == "mock":
+            warnings.append("Mock LLM provider used; no local or hosted model was called.")
+        elif provider_name == "disabled":
+            warnings.append("Market research LLM provider is disabled; deterministic agent outputs were used.")
+        fallback_agents = [
+            output.agent_name
+            for output in outputs
+            if output.details.get("llm_error") or output.details.get("llm_timeout")
+        ]
+        if provider_name == "ollama" and fallback_agents:
+            warnings.append(
+                "Ollama provider failed or timed out for "
+                + ", ".join(fallback_agents)
+                + "; deterministic fallback was used where possible."
+            )
         data_quality_notes = list(dict.fromkeys([*context.data_quality_notes, *risk.warnings]))
         summary = (
             f"{context.ticker} committee report for {context.analysis_date}: {decision.value} "
@@ -1011,6 +1064,8 @@ class MarketResearchOrchestrator:
                 for output in outputs
                 if output.details.get("llm_usage")
             },
+            "llm_fallback_agents": fallback_agents,
+            "agent_statuses": {event.agent_name: str(event.status) for event in audit},
             "agent_versions": {output.agent_name: output.version for output in outputs},
             "provider_metadata": context.provider_metadata,
             "trade_execution": "disabled",

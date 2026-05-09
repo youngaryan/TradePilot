@@ -1690,6 +1690,36 @@ textarea:focus {
   gap: 12px;
 }
 
+.runtime-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.runtime-diagnostics > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.runtime-diagnostics strong {
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.runtime-diagnostics span {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-weight: 800;
+}
+
 .job-step-row {
   display: flex;
   flex-wrap: wrap;
@@ -2802,7 +2832,8 @@ textarea:focus {
   color: #fde68a;
 }
 
-:root[data-theme="dark"] .market-research-signal {
+:root[data-theme="dark"] .market-research-signal,
+:root[data-theme="dark"] .runtime-diagnostics {
   background: rgba(15, 23, 42, 0.54);
 }
 
@@ -3077,6 +3108,7 @@ textarea:focus {
   .sentiment-filter-grid,
   .financial-analysis-grid,
   .market-research-config-grid,
+  .runtime-diagnostics,
   .chart-stat-strip,
   .telemetry-chart-grid,
   .provider-check-grid,

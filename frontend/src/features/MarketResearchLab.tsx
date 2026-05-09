@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, BrainCircuit, FileText, Loader2, Play, RefreshCw, ShieldCheck } from "lucide-react";
 
-import { getMarketResearchJob, listMarketResearchJobs, startMarketResearchJob } from "../api/client";
-import type { MarketResearchJob, MarketResearchReport, MarketResearchSignal } from "../api/types";
+import { getMarketResearchJob, getMarketResearchRuntime, listMarketResearchJobs, startMarketResearchJob } from "../api/client";
+import type { MarketResearchJob, MarketResearchReport, MarketResearchRuntimeConfig, MarketResearchSignal } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel } from "../components/Cards";
 import { formatDateTime, formatNumber, statusTone } from "../utils/format";
@@ -25,6 +25,36 @@ function directionTone(direction: string) {
 
 function normalizeTicker(value: string) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9.^=_-]/g, "");
+}
+
+function asText(value: unknown, fallback: string) {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return fallback;
+}
+
+function uniqueWarnings(values: Array<string | null | undefined>) {
+  return Array.from(new Set(values.map((item) => String(item ?? "").trim()).filter(Boolean)));
+}
+
+function reportMetadata(report: MarketResearchReport) {
+  const metadata = report.metadata ?? {};
+  const providerMetadata = metadata.provider_metadata && typeof metadata.provider_metadata === "object"
+    ? (metadata.provider_metadata as Record<string, unknown>)
+    : {};
+  return {
+    llmProvider: asText(metadata.llm_provider, "unknown"),
+    llmModel: asText(metadata.llm_model, "unknown"),
+    dataProvider: asText(providerMetadata.backend_data_provider ?? providerMetadata.provider, "unknown"),
+    fallbackAgents: Array.isArray(metadata.llm_fallback_agents) ? metadata.llm_fallback_agents.map((item) => String(item)) : []
+  };
+}
+
+function runtimeTone(runtime: MarketResearchRuntimeConfig | null) {
+  if (!runtime) return "neutral" as const;
+  if (runtime.llm_provider === "ollama") return runtime.ollama?.reachable && runtime.ollama?.model_available ? "good" as const : "bad" as const;
+  if (runtime.llm_provider === "mock" || runtime.llm_provider === "disabled") return "warn" as const;
+  return "good" as const;
 }
 
 function SignalList({ signals, empty }: { signals: MarketResearchSignal[]; empty: string }) {
@@ -56,6 +86,8 @@ function SignalList({ signals, empty }: { signals: MarketResearchSignal[]; empty
 
 function ReportView({ report }: { report: MarketResearchReport }) {
   const auditCompleted = report.audit_trail.filter((item) => item.status === "completed").length;
+  const metadata = reportMetadata(report);
+  const warningItems = uniqueWarnings([...report.data_quality_notes, ...report.warnings]);
   return (
     <div className="market-research-report">
       <section className="research-disclaimer">
@@ -68,6 +100,8 @@ function ReportView({ report }: { report: MarketResearchReport }) {
         <MetricCard label="Confidence" value={`${formatNumber(report.confidence, 0)}/100`} detail={`Created ${formatDateTime(report.created_at_utc)}`} tone="info" />
         <MetricCard label="Ticker" value={report.ticker} detail={`Analysis date ${report.analysis_date}`} />
         <MetricCard label="Agents" value={`${auditCompleted}/${report.audit_trail.length}`} detail="Completed committee roles" tone={auditCompleted === report.audit_trail.length ? "good" : "warn"} />
+        <MetricCard label="LLM" value={metadata.llmProvider} detail={metadata.llmModel} tone={metadata.llmProvider === "mock" ? "warn" : "info"} />
+        <MetricCard label="Data" value={metadata.dataProvider} detail={metadata.fallbackAgents.length ? `${metadata.fallbackAgents.length} fallback agent(s)` : "research context"} tone={metadata.dataProvider === "demo" ? "warn" : "neutral"} />
       </div>
 
       <Panel title="Committee Summary" subtitle="Final simulated research decision">
@@ -104,7 +138,7 @@ function ReportView({ report }: { report: MarketResearchReport }) {
 
       <Panel title="Data Quality And Warnings" subtitle="Provider coverage, missing data, and audit caveats">
         <div className="warning-list warning-list--compact">
-          {[...report.data_quality_notes, ...report.warnings].filter(Boolean).map((warning, index) => (
+          {warningItems.map((warning, index) => (
             <span key={`${index}-${warning}`}>{warning}</span>
           ))}
         </div>
@@ -148,8 +182,19 @@ export function MarketResearchLab() {
   const [horizon, setHorizon] = useState("swing");
   const [jobs, setJobs] = useState<MarketResearchJob[]>([]);
   const [activeJob, setActiveJob] = useState<MarketResearchJob | null>(null);
+  const [runtime, setRuntime] = useState<MarketResearchRuntimeConfig | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+
+  async function refreshRuntime() {
+    try {
+      setRuntime(await getMarketResearchRuntime());
+      setRuntimeError(null);
+    } catch (caught) {
+      setRuntimeError(caught instanceof Error ? caught.message : "Unable to load market research runtime config.");
+    }
+  }
 
   async function refreshJobs() {
     setError(null);
@@ -176,8 +221,6 @@ export function MarketResearchLab() {
         ticker,
         analysis_date: analysisDate || null,
         horizon,
-        provider: "mock",
-        model: "mock-research-v1",
         options: {}
       });
       setActiveJob(job);
@@ -189,6 +232,7 @@ export function MarketResearchLab() {
   }
 
   useEffect(() => {
+    void refreshRuntime();
     void refreshJobs();
   }, []);
 
@@ -222,6 +266,7 @@ export function MarketResearchLab() {
     : "No research job selected";
   const jobStatus = activeJob?.status ?? "idle";
   const latestJobs = useMemo(() => jobs.slice(0, 8), [jobs]);
+  const runtimeWarnings = uniqueWarnings([...(runtime?.warnings ?? []), runtime?.ollama?.error ?? null]);
 
   return (
     <div className="market-research-lab">
@@ -231,7 +276,7 @@ export function MarketResearchLab() {
       </section>
 
       <div className="content-grid">
-        <Panel title="Research Committee" subtitle="Ticker, date, horizon, and model metadata">
+        <Panel title="Research Committee" subtitle="Ticker, date, horizon, and runtime configuration">
           <div className="market-research-config-grid">
             <label>
               Ticker
@@ -250,14 +295,40 @@ export function MarketResearchLab() {
               </select>
             </label>
           </div>
+          <div className="runtime-diagnostics">
+            <div>
+              <strong>Configured LLM</strong>
+              <span>{runtime ? `${runtime.llm_provider} / ${runtime.llm_model}` : "Loading runtime config"}</span>
+            </div>
+            <div>
+              <strong>Data provider</strong>
+              <span>{runtime?.data_provider ?? "unknown"}</span>
+            </div>
+            <div>
+              <strong>Timeouts</strong>
+              <span>{runtime ? `${formatNumber(runtime.agent_timeout_seconds, 0)}s agent / ${formatNumber(runtime.llm_timeout_seconds, 0)}s LLM` : "n/a"}</span>
+            </div>
+            <Badge label={runtime?.llm_provider === "ollama" ? (runtime.ollama?.model_available ? "ollama ready" : "ollama needs attention") : runtime?.llm_provider ?? "runtime"} tone={runtimeTone(runtime)} />
+          </div>
+          {runtimeError ? (
+            <div className="inline-error">
+              <AlertTriangle size={16} />
+              {runtimeError}
+            </div>
+          ) : null}
+          {runtimeWarnings.length ? (
+            <div className="warning-list warning-list--compact">
+              {runtimeWarnings.map((warning) => <span key={warning}>{warning}</span>)}
+            </div>
+          ) : null}
           <div className="button-row">
             <button type="button" className="primary-button" onClick={() => void runResearch()} disabled={isRunning}>
               {isRunning ? <Loader2 size={17} /> : <Play size={17} />}
               {isRunning ? "Running committee" : "Run research committee"}
             </button>
-            <button type="button" className="ghost-button" onClick={() => void refreshJobs()}>
+            <button type="button" className="ghost-button" onClick={() => { void refreshRuntime(); void refreshJobs(); }}>
               <RefreshCw size={17} />
-              Refresh jobs
+              Refresh
             </button>
           </div>
           {error ? (
