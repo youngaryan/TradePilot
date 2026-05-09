@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unittest
 
+from pairs_trading.backend.config import BackendSettings
+from pairs_trading.backend.llm_config import validate_market_research_llm_settings
+from pairs_trading.research.llm_providers import LLMCallResult
 from pairs_trading.research.market_research_agents import (
     BearResearcher,
     BullResearcher,
@@ -18,6 +21,34 @@ from pairs_trading.research.market_research_agents import (
     TraderSynthesizer,
 )
 from pairs_trading.research.market_research_prompts import RESEARCH_DISCLAIMER
+
+
+class FakeStructuredLLMProvider:
+    provider_name = "fake"
+    model_name = "fake-structured-v1"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_structured(self, prompt, schema, options=None):  # noqa: ANN001
+        del prompt, options
+        self.calls += 1
+        return LLMCallResult(
+            value=schema.model_validate(
+                {
+                    "agent_name": "placeholder",
+                    "display_name": "LLM Agent",
+                    "summary": "LLM-refined research output grounded in the provided context.",
+                    "signals": [],
+                    "confidence": 61,
+                    "warnings": [],
+                    "details": {"llm_refined": True},
+                }
+            ),
+            provider=self.provider_name,
+            model=self.model_name,
+            latency_ms=1,
+        )
 
 
 class FailingNewsAgent:
@@ -86,6 +117,42 @@ class MarketResearchAgentTests(unittest.TestCase):
 
         self.assertEqual(report.disclaimer, "For research and educational purposes only. Not financial advice.")
         self.assertIn("Not financial advice", report.summary)
+
+    def test_orchestrator_uses_hosted_structured_llm_provider_when_configured(self) -> None:
+        request = MarketResearchInput(ticker="AAPL", analysis_date="2026-05-08", horizon=ResearchHorizon.SWING)
+        provider = FakeStructuredLLMProvider()
+        report = MarketResearchOrchestrator(llm_provider=provider, per_agent_timeout_seconds=2.0).run(
+            DemoMarketResearchDataProvider().collect(request)
+        )
+
+        self.assertEqual(provider.calls, 8)
+        self.assertEqual(report.metadata["llm_provider"], "fake")
+        self.assertTrue(all(output.details.get("llm_refined") for output in report.raw_agent_outputs))
+        self.assertEqual(report.disclaimer, RESEARCH_DISCLAIMER)
+
+    def test_market_research_llm_config_fails_closed_in_production(self) -> None:
+        with self.assertRaises(RuntimeError):
+            validate_market_research_llm_settings(
+                BackendSettings(
+                    app_env="production",
+                    enable_demo_accounts=False,
+                    enable_in_process_jobs=False,
+                    session_secret="x" * 32,
+                    csrf_secret="y" * 32,
+                    cors_origins=("https://app.example.com",),
+                    database_url="postgresql://quantops:quantops@example.com:5432/quantops",
+                    redis_url="redis://example.com:6379/0",
+                    stripe_secret_key="sk_live_demo",
+                    stripe_webhook_secret="whsec_demo",
+                    stripe_price_pro_monthly="price_demo",
+                    smtp_host="smtp.example.com",
+                    email_from="ops@example.com",
+                    s3_bucket="quantops",
+                    s3_access_key_id="access",
+                    s3_secret_access_key="secret",
+                    market_research_llm_provider="mock",
+                )
+            )
 
 
 if __name__ == "__main__":

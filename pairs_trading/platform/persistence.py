@@ -54,6 +54,7 @@ class MetadataCounts:
     telemetry_events: int = 0
     refresh_runs: int = 0
     refresh_statuses: int = 0
+    market_research_reports: int = 0
 
 
 class MetadataStore(Protocol):
@@ -430,6 +431,49 @@ class SQLiteMetadataStore:
 
                 CREATE INDEX IF NOT EXISTS idx_user_strategies_admin
                     ON user_strategies(status, risk_level, created_at_utc DESC);
+
+                CREATE TABLE IF NOT EXISTS market_research_reports (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+                    user_id TEXT,
+                    job_id TEXT,
+                    parent_report_id TEXT,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    ticker TEXT NOT NULL,
+                    analysis_date TEXT NOT NULL,
+                    horizon TEXT NOT NULL,
+                    report_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    decision TEXT,
+                    confidence INTEGER,
+                    summary TEXT,
+                    disclaimer TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    source_references_json TEXT NOT NULL,
+                    provider_metadata_json TEXT NOT NULL,
+                    warnings_json TEXT NOT NULL,
+                    artifact_id TEXT,
+                    error TEXT,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    completed_at_utc TEXT,
+                    deleted_at_utc TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_market_research_reports_user_created
+                    ON market_research_reports(organization_id, user_id, created_at_utc DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_market_research_reports_ticker_created
+                    ON market_research_reports(organization_id, user_id, ticker, created_at_utc DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_market_research_reports_status_created
+                    ON market_research_reports(organization_id, user_id, status, created_at_utc DESC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_market_research_reports_job
+                    ON market_research_reports(job_id)
+                    WHERE job_id IS NOT NULL;
                 """
             )
         self._migrate_legacy_columns()
@@ -1953,6 +1997,215 @@ class SQLiteMetadataStore:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._artifact_row(row) for row in rows]
 
+    def _market_research_report_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        payload = dict(row)
+        payload["context"] = _json_load(payload.pop("context_json"), {})
+        payload["report"] = _json_load(payload.pop("report_json"), {})
+        payload["source_references"] = _json_load(payload.pop("source_references_json"), [])
+        payload["provider_metadata"] = _json_load(payload.pop("provider_metadata_json"), {})
+        payload["warnings"] = _json_load(payload.pop("warnings_json"), [])
+        payload["report_id"] = payload["id"]
+        return payload
+
+    def upsert_market_research_report(
+        self,
+        *,
+        organization_id: str,
+        user_id: str | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _utc_now_iso()
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        ticker = str(payload.get("ticker") or report.get("ticker") or "UNKNOWN").upper()
+        analysis_date = str(payload.get("analysis_date") or report.get("analysis_date") or now[:10])
+        horizon = str(payload.get("horizon") or report.get("time_horizon") or "swing")
+        job_id = payload.get("job_id")
+        report_id = str(
+            payload.get("id")
+            or payload.get("report_id")
+            or self.stable_id("mrr", f"{organization_id}:{user_id or 'machine'}:{job_id or uuid4().hex}")
+        )
+        status = str(payload.get("status") or "completed")
+        title = str(payload.get("title") or f"{ticker} {horizon} research - {analysis_date}")
+        disclaimer = str(payload.get("disclaimer") or report.get("disclaimer") or "For research and educational purposes only. Not financial advice.")
+        source_references = payload.get("source_references")
+        if source_references is None:
+            source_references = report.get("source_references", [])
+        provider_metadata = payload.get("provider_metadata")
+        if provider_metadata is None:
+            provider_metadata = report.get("metadata", {})
+        warnings = payload.get("warnings")
+        if warnings is None:
+            warnings = report.get("warnings", [])
+        summary = payload.get("summary")
+        if summary is None:
+            summary = report.get("summary")
+        decision = payload.get("decision")
+        if decision is None:
+            decision = report.get("decision")
+        confidence_value = payload.get("confidence")
+        if confidence_value is None:
+            confidence_value = report.get("confidence")
+        confidence = int(confidence_value) if confidence_value is not None else None
+        completed_at = payload.get("completed_at_utc")
+        if completed_at is None and status == "completed":
+            completed_at = str(report.get("created_at_utc") or now)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_research_reports (
+                    id, organization_id, user_id, job_id, parent_report_id, version,
+                    ticker, analysis_date, horizon, report_type, title, status,
+                    decision, confidence, summary, disclaimer, context_json, report_json,
+                    source_references_json, provider_metadata_json, warnings_json, artifact_id,
+                    error, created_at_utc, updated_at_utc, completed_at_utc, deleted_at_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    organization_id = excluded.organization_id,
+                    user_id = excluded.user_id,
+                    job_id = excluded.job_id,
+                    parent_report_id = excluded.parent_report_id,
+                    version = excluded.version,
+                    ticker = excluded.ticker,
+                    analysis_date = excluded.analysis_date,
+                    horizon = excluded.horizon,
+                    report_type = excluded.report_type,
+                    title = excluded.title,
+                    status = excluded.status,
+                    decision = excluded.decision,
+                    confidence = excluded.confidence,
+                    summary = excluded.summary,
+                    disclaimer = excluded.disclaimer,
+                    context_json = excluded.context_json,
+                    report_json = excluded.report_json,
+                    source_references_json = excluded.source_references_json,
+                    provider_metadata_json = excluded.provider_metadata_json,
+                    warnings_json = excluded.warnings_json,
+                    artifact_id = excluded.artifact_id,
+                    error = excluded.error,
+                    updated_at_utc = excluded.updated_at_utc,
+                    completed_at_utc = COALESCE(excluded.completed_at_utc, market_research_reports.completed_at_utc),
+                    deleted_at_utc = excluded.deleted_at_utc
+                """,
+                (
+                    report_id,
+                    organization_id,
+                    user_id,
+                    str(job_id) if job_id else None,
+                    payload.get("parent_report_id"),
+                    int(payload.get("version") or 1),
+                    ticker,
+                    analysis_date,
+                    horizon,
+                    str(payload.get("report_type") or "market_research_committee"),
+                    title,
+                    status,
+                    str(decision) if decision is not None else None,
+                    confidence,
+                    str(summary) if summary is not None else None,
+                    disclaimer,
+                    _json_dump(context),
+                    _json_dump(report),
+                    _json_dump(source_references or []),
+                    _json_dump(provider_metadata or {}),
+                    _json_dump(warnings or []),
+                    payload.get("artifact_id"),
+                    payload.get("error"),
+                    str(payload.get("created_at_utc") or now),
+                    str(payload.get("updated_at_utc") or now),
+                    completed_at,
+                    payload.get("deleted_at_utc"),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM market_research_reports WHERE organization_id = ? AND id = ?",
+                (organization_id, report_id),
+            ).fetchone()
+        return self._market_research_report_row(row)
+
+    def list_market_research_reports(
+        self,
+        *,
+        organization_id: str,
+        user_id: str,
+        search: str | None = None,
+        ticker: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
+        clauses = ["organization_id = ?", "user_id = ?"]
+        params: list[Any] = [organization_id, user_id]
+        if not include_deleted:
+            clauses.append("deleted_at_utc IS NULL")
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            clauses.append("(title LIKE ? OR ticker LIKE ? OR summary LIKE ?)")
+            params.extend([term, term.upper(), term])
+        if ticker and ticker.strip():
+            clauses.append("ticker = ?")
+            params.append(ticker.strip().upper())
+        if status and status.strip():
+            clauses.append("status = ?")
+            params.append(status.strip())
+        params.extend([max(1, min(int(limit), 200)), max(0, int(offset))])
+        query = f"""
+            SELECT * FROM market_research_reports
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at_utc DESC
+            LIMIT ? OFFSET ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [self._market_research_report_row(row) for row in rows]
+
+    def get_market_research_report(
+        self,
+        *,
+        organization_id: str,
+        report_id: str,
+        user_id: str,
+        include_deleted: bool = False,
+    ) -> dict[str, Any] | None:
+        query = """
+            SELECT * FROM market_research_reports
+            WHERE organization_id = ? AND user_id = ? AND id = ?
+        """
+        params: list[Any] = [organization_id, user_id, report_id]
+        if not include_deleted:
+            query += " AND deleted_at_utc IS NULL"
+        with self._connect() as connection:
+            row = connection.execute(query, tuple(params)).fetchone()
+        return None if row is None else self._market_research_report_row(row)
+
+    def soft_delete_market_research_report(
+        self,
+        *,
+        organization_id: str,
+        report_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        now = _utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE market_research_reports
+                SET deleted_at_utc = COALESCE(deleted_at_utc, ?),
+                    updated_at_utc = ?,
+                    status = CASE WHEN status = 'completed' THEN status ELSE 'deleted' END
+                WHERE organization_id = ? AND user_id = ? AND id = ?
+                """,
+                (now, now, organization_id, user_id, report_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM market_research_reports WHERE organization_id = ? AND user_id = ? AND id = ?",
+                (organization_id, user_id, report_id),
+            ).fetchone()
+        return None if row is None else self._market_research_report_row(row)
+
     def save_deployment_config(
         self,
         *,
@@ -2078,6 +2331,7 @@ class SQLiteMetadataStore:
             telemetry_events = int(connection.execute("SELECT COUNT(*) FROM telemetry_events").fetchone()[0])
             refresh_runs = int(connection.execute("SELECT COUNT(*) FROM refresh_runs").fetchone()[0])
             refresh_statuses = int(connection.execute("SELECT COUNT(*) FROM refresh_statuses").fetchone()[0])
+            market_research_reports = int(connection.execute("SELECT COUNT(*) FROM market_research_reports WHERE deleted_at_utc IS NULL").fetchone()[0])
         return MetadataCounts(
             jobs=jobs,
             deployment_configs=deployment_configs,
@@ -2094,6 +2348,7 @@ class SQLiteMetadataStore:
             telemetry_events=telemetry_events,
             refresh_runs=refresh_runs,
             refresh_statuses=refresh_statuses,
+            market_research_reports=market_research_reports,
         )
 
 

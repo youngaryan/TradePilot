@@ -103,6 +103,27 @@ class PlatformPersistenceTests(unittest.TestCase):
                 "warnings": ["review turnover"],
             },
         )
+        report = store.upsert_market_research_report(
+            organization_id=org_id,
+            user_id=context["user_id"],
+            payload={
+                "id": "mrr-1",
+                "job_id": "market-job-1",
+                "ticker": "AAPL",
+                "analysis_date": "2026-05-08",
+                "horizon": "swing",
+                "status": "completed",
+                "decision": "HOLD",
+                "confidence": 52,
+                "summary": "Research summary",
+                "disclaimer": "For research and educational purposes only. Not financial advice.",
+                "context": {"request": {"ticker": "AAPL"}},
+                "report": {"ticker": "AAPL", "decision": "HOLD"},
+                "source_references": [{"id": "source-1", "title": "Demo source"}],
+                "provider_metadata": {"llm_provider": "mock", "prompt_version": "v1"},
+                "warnings": ["demo"],
+            },
+        )
 
         reopened = SQLiteMetadataStore(workspace / "metadata.sqlite3")
         self.assertEqual(reopened.list_projects(organization_id=org_id)[-1]["name"], "Production readiness lab")
@@ -110,6 +131,14 @@ class PlatformPersistenceTests(unittest.TestCase):
         self.assertIn("...", api_key["masked_value"])
         self.assertEqual(reopened.get_experiment(organization_id=org_id, experiment_id="exp-1")["readiness"]["score"], 80)
         self.assertEqual(reopened.get_paper_agent(organization_id=org_id, agent_id="agent-1")["warnings"], ["review turnover"])
+        self.assertEqual(
+            reopened.get_market_research_report(organization_id=org_id, user_id=context["user_id"], report_id="mrr-1")["decision"],
+            "HOLD",
+        )
+        self.assertEqual(reopened.list_market_research_reports(organization_id=org_id, user_id=context["user_id"])[0]["ticker"], "AAPL")
+        self.assertEqual(report["source_references"][0]["id"], "source-1")
+        reopened.soft_delete_market_research_report(organization_id=org_id, user_id=context["user_id"], report_id="mrr-1")
+        self.assertEqual(reopened.list_market_research_reports(organization_id=org_id, user_id=context["user_id"]), [])
         self.assertEqual(experiment["pipeline"], "etf_trend")
         self.assertEqual(agent["latest_payload"]["equity"], 101000)
         self.assertGreaterEqual(reopened.counts().subscriptions, 1)

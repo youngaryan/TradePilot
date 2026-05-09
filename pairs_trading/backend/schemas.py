@@ -152,6 +152,10 @@ class MarketResearchRunRequest(BaseModel):
     horizon: ResearchHorizon = Field(default=ResearchHorizon.SWING, description="Research horizon: intraday, swing, or long-term.")
     provider: str = Field(default="mock", max_length=80, description="Optional LLM/provider label for audit metadata.")
     model: str = Field(default="mock-research-v1", max_length=120, description="Optional model label for audit metadata.")
+    sentiment_dataset_id: str | None = Field(default=None, max_length=160, description="Optional tenant-owned sentiment dataset id to include in the research context.")
+    include_sentiment: bool = Field(default=True, description="Include existing tenant sentiment dataset rows when available.")
+    include_financial_events: bool = Field(default=True, description="Include existing financial-events provider data when available.")
+    lookback_days: int | None = Field(default=None, ge=5, le=900, description="Optional data lookback window override.")
     options: dict[str, Any] = Field(default_factory=dict, description="Non-secret provider/model options for future providers.")
 
     @field_validator("ticker")
@@ -170,9 +174,22 @@ class MarketResearchRunRequest(BaseModel):
     @classmethod
     def reject_secret_options(cls, value: dict[str, Any]) -> dict[str, Any]:
         sensitive = {"api_key", "apikey", "token", "secret", "password", "credential", "credentials"}
+
+        def walk(payload: Any) -> None:
+            if isinstance(payload, dict):
+                for key, item in payload.items():
+                    lowered = str(key).strip().lower()
+                    if lowered in sensitive or any(part in lowered for part in sensitive):
+                        raise ValueError("options must not contain raw secrets. Use environment or vault references for real providers.")
+                    walk(item)
+            elif isinstance(payload, list):
+                for item in payload:
+                    walk(item)
+
         for key in value:
-            if str(key).strip().lower() in sensitive:
+            if any(part in str(key).strip().lower() for part in sensitive):
                 raise ValueError("options must not contain raw secrets. Use environment or vault references for real providers.")
+        walk(value)
         return value
 
 

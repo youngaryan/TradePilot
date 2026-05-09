@@ -175,6 +175,7 @@ export interface SystemCounts {
   telemetry_events?: number;
   refresh_runs?: number;
   refresh_statuses?: number;
+  market_research_reports?: number;
 }
 
 export interface SystemAdminCounts {
@@ -341,6 +342,7 @@ export interface WorkspacePayload {
   api_keys: ApiKeyRecord[];
   experiments: ExperimentRecord[];
   paper_agents: PaperAgentRecord[];
+  market_research_reports: MarketResearchReportSummary[];
   onboarding: {
     complete_count: number;
     total_count: number;
@@ -769,6 +771,10 @@ export interface MarketResearchRunRequest {
   horizon: MarketResearchHorizon;
   provider?: string;
   model?: string;
+  sentiment_dataset_id?: string | null;
+  include_sentiment?: boolean;
+  include_financial_events?: boolean;
+  lookback_days?: number | null;
   options?: Record<string, unknown>;
 }
 
@@ -813,6 +819,17 @@ export interface MarketResearchProvenance {
   url?: string | null;
 }
 
+export interface MarketResearchSourceReference {
+  id: string;
+  source: string;
+  provider: string;
+  title: string;
+  observed_at_utc: string;
+  url?: string | null;
+  confidence?: number | null;
+  verified: boolean;
+}
+
 export interface MarketResearchReport {
   ticker: string;
   analysis_date: string;
@@ -828,6 +845,14 @@ export interface MarketResearchReport {
   risk_assessment: MarketResearchAgentOutput;
   data_quality_notes: string[];
   disclaimer: string;
+  sentiment_matrix?: Array<Record<string, unknown>>;
+  sentiment_analysis?: Record<string, unknown>;
+  financial_events_matrix?: Array<Record<string, unknown>>;
+  financial_events_analysis?: Record<string, unknown>;
+  source_references?: MarketResearchSourceReference[];
+  data_freshness?: Record<string, string | null>;
+  confidence_levels?: Record<string, number>;
+  missing_data_indicators?: string[];
   raw_agent_outputs: MarketResearchAgentOutput[];
   audit_trail: MarketResearchAuditEvent[];
   provenance: MarketResearchProvenance[];
@@ -837,6 +862,49 @@ export interface MarketResearchReport {
   artifact?: Record<string, unknown>;
   artifact_id?: string;
   report_path?: string | null;
+  report_id?: string | null;
+}
+
+export interface MarketResearchReportSummary {
+  id: string;
+  report_id: string;
+  organization_id: string;
+  user_id?: string | null;
+  job_id?: string | null;
+  parent_report_id?: string | null;
+  version: number;
+  ticker: string;
+  analysis_date: string;
+  horizon: MarketResearchHorizon;
+  report_type: string;
+  title: string;
+  status: string;
+  decision?: MarketResearchDecision | null;
+  confidence?: number | null;
+  summary?: string | null;
+  disclaimer: string;
+  source_references: MarketResearchSourceReference[];
+  provider_metadata: Record<string, unknown>;
+  warnings: string[];
+  artifact_id?: string | null;
+  error?: string | null;
+  created_at_utc: string;
+  updated_at_utc: string;
+  completed_at_utc?: string | null;
+  deleted_at_utc?: string | null;
+}
+
+export interface MarketResearchReportDetail extends MarketResearchReportSummary {
+  context: Record<string, unknown>;
+  report: MarketResearchReport;
+}
+
+export interface MarketResearchReportListQuery {
+  search?: string;
+  ticker?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface MarketResearchJob {
@@ -847,6 +915,8 @@ export interface MarketResearchJob {
   updated_at_utc: string;
   organization_id?: string | null;
   user_id?: string | null;
+  report_id?: string | null;
+  parent_report_id?: string | null;
   progress: number;
   stage: string;
   message: string;

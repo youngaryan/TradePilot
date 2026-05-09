@@ -144,6 +144,8 @@ class BackendAppTests(unittest.TestCase):
                 paper_job_state_dir=workspace / "paper_jobs",
                 backtest_job_state_dir=workspace / "backtest_jobs",
                 sentiment_job_state_dir=workspace / "sentiment_jobs",
+                market_research_job_state_dir=workspace / "market_research_jobs",
+                market_research_artifact_root=workspace / "market_research_reports",
                 metadata_db_path=workspace / "metadata.sqlite3",
                 default_paper_config=workspace / "missing.json",
             )
@@ -1171,6 +1173,8 @@ class BackendAppTests(unittest.TestCase):
         self.assertIsNotNone(completed_payload)
         assert completed_payload is not None
         report = completed_payload["result"]
+        report_id = completed_payload.get("report_id") or report.get("report_id")
+        self.assertTrue(report_id)
         self.assertEqual(report["ticker"], "AAPL")
         self.assertIn(report["decision"], {"BUY", "HOLD", "SELL", "AVOID"})
         self.assertGreaterEqual(report["confidence"], 0)
@@ -1183,6 +1187,26 @@ class BackendAppTests(unittest.TestCase):
         jobs = client.get("/api/market-research/jobs", headers=headers)
         self.assertEqual(jobs.status_code, 200)
         self.assertIn(job_id, {job["id"] for job in jobs.json()})
+
+        reports = client.get("/api/workspaces/reports", headers=headers)
+        self.assertEqual(reports.status_code, 200, reports.text)
+        self.assertIn(report_id, {item["id"] for item in reports.json()})
+
+        detail = client.get(f"/api/workspaces/reports/{report_id}", headers=headers)
+        self.assertEqual(detail.status_code, 200, detail.text)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["report"]["disclaimer"], "For research and educational purposes only. Not financial advice.")
+        self.assertTrue(detail_payload["report"]["audit_trail"])
+        self.assertNotIn("api_key", " ".join(detail_payload["provider_metadata"].keys()).lower())
+
+        exported = client.get(f"/api/workspaces/reports/{report_id}/export?format=json", headers=headers)
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(exported.json()["report"]["ticker"], "AAPL")
+
+        deleted = client.delete(f"/api/workspaces/reports/{report_id}", headers=headers)
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        reports_after_delete = client.get("/api/workspaces/reports", headers=headers)
+        self.assertNotIn(report_id, {item["id"] for item in reports_after_delete.json()})
 
 
 if __name__ == "__main__":

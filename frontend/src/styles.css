@@ -1759,6 +1759,18 @@ textarea:focus {
   border: 1px solid #a8e4c7;
 }
 
+.alert-card--good {
+  color: #116149;
+  background: #e4f8ef;
+  border-color: #a8e4c7;
+}
+
+.alert-card--info {
+  color: #173d62;
+  background: #e9f4ff;
+  border-color: #b9dbff;
+}
+
 .alert-card {
   margin-bottom: 18px;
 }
@@ -2589,6 +2601,108 @@ textarea:focus {
   font-size: 0.82rem;
 }
 
+.reports-workspace {
+  display: grid;
+  gap: 16px;
+}
+
+.reports-disclaimer {
+  margin-bottom: 0;
+}
+
+.report-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(120px, 0.4fr) minmax(140px, 0.45fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.report-toolbar label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 850;
+  font-size: 0.83rem;
+}
+
+.reports-layout {
+  align-items: start;
+}
+
+.report-title-button {
+  max-width: 260px;
+  text-align: left;
+  white-space: normal;
+}
+
+.report-row-actions {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--line);
+}
+
+.icon-button:hover,
+.icon-button:focus-visible {
+  color: var(--accent);
+  border-color: rgba(18, 128, 92, 0.38);
+}
+
+.icon-button--danger:hover,
+.icon-button--danger:focus-visible {
+  color: #991b1b;
+  border-color: rgba(248, 113, 113, 0.48);
+  background: rgba(254, 226, 226, 0.78);
+}
+
+.pagination-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.report-detail h4 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.report-summary-box,
+.report-text-section {
+  display: grid;
+  gap: 8px;
+  padding-block: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.report-summary-box p,
+.report-text-section p {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.55;
+}
+
+.report-summary-box span {
+  color: var(--muted);
+  font-weight: 850;
+}
+
 .danger-button {
   color: #991b1b;
   border-color: rgba(248, 113, 113, 0.42);
@@ -2889,6 +3003,12 @@ textarea:focus {
   color: #bbf7d0;
   background: rgba(22, 101, 52, 0.28);
   border-color: rgba(74, 222, 128, 0.3);
+}
+
+:root[data-theme="dark"] .alert-card--info {
+  color: #bfdbfe;
+  background: rgba(30, 64, 175, 0.24);
+  border-color: rgba(96, 165, 250, 0.28);
 }
 
 :root[data-theme="dark"] .inline-warning,
@@ -3830,6 +3950,10 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .report-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .hero-product-card {
     max-width: none;
   }
@@ -3936,8 +4060,18 @@ textarea {
   .pricing-grid,
   .example-grid,
   .faq-grid,
-  .admin-toolbar {
+  .admin-toolbar,
+  .report-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .report-row-actions {
+    min-width: 120px;
+  }
+
+  .pagination-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .payment-wall-banner {

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from ..authz import require_csrf
+from ..authz import require_csrf, require_paid_context
 from ..config import BackendSettings
+from ..market_research_services import MarketResearchJobRunner
+from ..quotas import QuotaExceeded, QuotaService
 from ..saas import AuthService, BillingService, CSRF_COOKIE_NAME, MFA_COOKIE_NAME, RequestContext, SaaSService, SESSION_COOKIE_NAME
 from ..schemas import (
     ApiKeyCreateRequest,
@@ -16,6 +18,7 @@ from ..schemas import (
     EmailVerificationSendRequest,
     LoginRequest,
     MfaVerifyRequest,
+    MarketResearchRunRequest,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
     ProjectCreateRequest,
@@ -31,7 +34,9 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
     auth_service = AuthService(settings)
     saas_service = SaaSService(settings)
     billing_service = BillingService(settings)
+    quotas = QuotaService(settings)
     csrf_guard = require_csrf(settings)
+    market_research_paid_context = require_paid_context(settings, feature="Market research committee", machine_scope="market-research:run")
 
     def set_auth_cookies(response: Response, payload: dict[str, Any]) -> None:
         token = str(payload.get("session_token") or "")
@@ -250,7 +255,115 @@ def build_saas_router(settings: BackendSettings) -> APIRouter:
 
     @router.get("/workspaces")
     def workspace(ctx: RequestContext = Depends(context)) -> dict[str, Any]:
-        return saas_service.workspace_payload(organization_id=ctx.organization_id)
+        return saas_service.workspace_payload(organization_id=ctx.organization_id, user_id=str(ctx.user["id"]))
+
+    @router.get("/workspaces/reports")
+    def list_workspace_reports(
+        search: str | None = Query(default=None),
+        ticker: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        ctx: RequestContext = Depends(context),
+    ) -> list[dict[str, Any]]:
+        return saas_service.list_market_research_reports(
+            organization_id=ctx.organization_id,
+            user_id=str(ctx.user["id"]),
+            search=search,
+            ticker=ticker,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    @router.get("/workspaces/reports/{report_id}")
+    def get_workspace_report(report_id: str, ctx: RequestContext = Depends(context)) -> dict[str, Any]:
+        report = saas_service.get_market_research_report(
+            organization_id=ctx.organization_id,
+            user_id=str(ctx.user["id"]),
+            report_id=report_id,
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"Market research report not found: {report_id}")
+        return report
+
+    @router.delete("/workspaces/reports/{report_id}")
+    def delete_workspace_report(report_id: str, ctx: RequestContext = Depends(context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
+        report = saas_service.delete_market_research_report(
+            organization_id=ctx.organization_id,
+            user_id=str(ctx.user["id"]),
+            report_id=report_id,
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"Market research report not found: {report_id}")
+        return report
+
+    @router.post("/workspaces/reports/{report_id}/regenerate", status_code=202)
+    def regenerate_workspace_report(
+        report_id: str,
+        ctx: RequestContext = Depends(market_research_paid_context),
+        _: None = Depends(csrf_guard),
+    ) -> dict[str, Any]:
+        report = saas_service.get_market_research_report(
+            organization_id=ctx.organization_id,
+            user_id=str(ctx.user["id"]),
+            report_id=report_id,
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"Market research report not found: {report_id}")
+        request_payload = dict((report.get("context") or {}).get("request") or {})
+        request_payload.update(
+            {
+                "ticker": report.get("ticker") or request_payload.get("ticker"),
+                "analysis_date": report.get("analysis_date") or request_payload.get("analysis_date"),
+                "horizon": report.get("horizon") or request_payload.get("horizon") or "swing",
+            }
+        )
+        try:
+            request_model = MarketResearchRunRequest.model_validate(request_payload)
+            quotas.check_and_record(
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                feature="market_research_job",
+                properties={"ticker": request_model.ticker, "horizon": request_model.horizon, "regenerate_from": report_id},
+                role=ctx.user.get("role"),
+            )
+            job = MarketResearchJobRunner(settings).submit(
+                request_model,
+                organization_id=ctx.organization_id,
+                user_id=str(ctx.user.get("id") or ""),
+                parent_report_id=report_id,
+            )
+            saas_service.store.record_audit_log(
+                action="market_research_report.regenerated",
+                organization_id=ctx.organization_id,
+                actor_user_id=str(ctx.user["id"]),
+                target_type="market_research_report",
+                target_id=report_id,
+                metadata={"new_job_id": job.get("id"), "new_report_id": job.get("report_id"), "ticker": request_model.ticker},
+            )
+            return job
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/workspaces/reports/{report_id}/export")
+    def export_workspace_report(
+        report_id: str,
+        format: str = Query(default="json"),  # noqa: A002 - API query parameter name.
+        ctx: RequestContext = Depends(context),
+    ) -> dict[str, Any]:
+        if format.lower() != "json":
+            raise HTTPException(status_code=400, detail="Only JSON export is supported for market research reports.")
+        report = saas_service.get_market_research_report(
+            organization_id=ctx.organization_id,
+            user_id=str(ctx.user["id"]),
+            report_id=report_id,
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"Market research report not found: {report_id}")
+        return {"format": "json", "report": report}
 
     @router.get("/billing/pricing")
     def pricing() -> dict[str, Any]:

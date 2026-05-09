@@ -12,6 +12,9 @@ import type {
   ExperimentRecord,
   HealthResponse,
   MarketResearchJob,
+  MarketResearchReportDetail,
+  MarketResearchReportListQuery,
+  MarketResearchReportSummary,
   MarketResearchRunRequest,
   PaperDashboardPayload,
   PaperRunRequest,
@@ -425,6 +428,38 @@ export function listMarketResearchJobs() {
 
 export function getMarketResearchJob(jobId: string) {
   return requestJson<MarketResearchJob>(`/api/market-research/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function listWorkspaceReports(query?: MarketResearchReportListQuery) {
+  const search = new URLSearchParams();
+  Object.entries(query ?? {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value).trim()) search.set(key, String(value));
+  });
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<MarketResearchReportSummary[]>(`/api/workspaces/reports${suffix}`);
+}
+
+export function getWorkspaceReport(reportId: string) {
+  return requestJson<MarketResearchReportDetail>(`/api/workspaces/reports/${encodeURIComponent(reportId)}`);
+}
+
+export function deleteWorkspaceReport(reportId: string) {
+  return requestJson<MarketResearchReportSummary>(`/api/workspaces/reports/${encodeURIComponent(reportId)}`, {
+    method: "DELETE"
+  });
+}
+
+export function regenerateWorkspaceReport(reportId: string) {
+  return requestJson<MarketResearchJob>(`/api/workspaces/reports/${encodeURIComponent(reportId)}/regenerate`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function exportWorkspaceReport(reportId: string) {
+  return requestJson<{ format: "json" | string; report: MarketResearchReportDetail }>(
+    `/api/workspaces/reports/${encodeURIComponent(reportId)}/export?format=json`
+  );
 }
 
 export function getSentimentDataset(datasetId?: string | null) {

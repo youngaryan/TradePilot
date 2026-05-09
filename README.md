@@ -249,7 +249,7 @@ The repo now includes that frontend boundary:
 
 ## Market Research Agents
 
-The app includes a TradingAgents-inspired research committee that produces structured ticker reports with a simulated `BUY`, `HOLD`, `SELL`, or `AVOID` decision. It is research-only, uses a deterministic demo provider by default, records source provenance and agent audit output, and does not place trades or connect to brokers.
+The app includes a TradingAgents-inspired research committee that produces structured ticker reports with a simulated `BUY`, `HOLD`, `SELL`, or `AVOID` decision. It is research-only, uses a deterministic demo provider by default, can be configured for server-side OpenAI or Anthropic structured LLM generation, records source provenance and agent audit output, and does not place trades or connect to brokers.
 
 Every report includes: `For research and educational purposes only. Not financial advice.`
 
@@ -257,14 +257,19 @@ Configure the default offline mode with:
 
 ```powershell
 PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER=demo
+PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=mock
 ```
 
-Use the web app's `AI Research` view or the authenticated API routes:
+For real hosted generation, set `PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=openai` or `anthropic` plus the matching `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` environment/vault reference. Production rejects mock/disabled LLM configuration for this workflow.
+
+Use the web app's `AI Research` view, Workspace `Reports`, or the authenticated API routes:
 
 ```text
 POST /api/market-research/run-job
 GET /api/market-research/jobs
 GET /api/market-research/jobs/{job_id}
+GET /api/workspaces/reports
+GET /api/workspaces/reports/{report_id}
 ```
 
 More detail is in [docs/market_research_agents.md](docs/market_research_agents.md).

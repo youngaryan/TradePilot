@@ -345,11 +345,16 @@ class SaaSService:
         self.store = build_metadata_store(settings)
         self.artifact_storage = build_artifact_storage(settings)
 
-    def workspace_payload(self, *, organization_id: str) -> dict[str, Any]:
+    def workspace_payload(self, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
         self.sync_default_datasets(organization_id=organization_id)
         datasets = self.store.list_datasets(organization_id=organization_id)
         if self.settings.is_production:
             datasets = [{**dataset, "path": None} for dataset in datasets]
+        reports = (
+            self.store.list_market_research_reports(organization_id=organization_id, user_id=user_id, limit=10)
+            if user_id
+            else []
+        )
         return {
             "organization_id": organization_id,
             "projects": self.store.list_projects(organization_id=organization_id),
@@ -358,6 +363,7 @@ class SaaSService:
             "api_keys": self.store.list_api_keys(organization_id=organization_id),
             "experiments": self.store.list_experiments(organization_id=organization_id, limit=20),
             "paper_agents": self.store.list_paper_agents(organization_id=organization_id),
+            "market_research_reports": reports,
             "onboarding": self.onboarding_state(organization_id=organization_id),
         }
 
@@ -420,7 +426,7 @@ class SaaSService:
             "user": context.user,
             "organizations": organizations,
             "active_organization_id": context.organization_id,
-            "workspace": self.workspace_payload(organization_id=context.organization_id),
+            "workspace": self.workspace_payload(organization_id=context.organization_id, user_id=str(context.user["id"])),
             "audit_note": "Export includes metadata visible to this workspace. Heavy artifacts remain available through tenant artifact IDs.",
         }
 
@@ -502,6 +508,97 @@ class SaaSService:
         if artifact is not None and self.settings.is_production:
             artifact = {**artifact, "uri": None, "storage_key": None, "key": None}
         return artifact
+
+    def list_market_research_reports(
+        self,
+        *,
+        organization_id: str,
+        user_id: str,
+        search: str | None = None,
+        ticker: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        reports = self.store.list_market_research_reports(
+            organization_id=organization_id,
+            user_id=user_id,
+            search=search,
+            ticker=ticker,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        return [self._public_market_research_report(report, detail=False) for report in reports]
+
+    def get_market_research_report(self, *, organization_id: str, user_id: str, report_id: str) -> dict[str, Any] | None:
+        report = self.store.get_market_research_report(
+            organization_id=organization_id,
+            user_id=user_id,
+            report_id=report_id,
+        )
+        return None if report is None else self._public_market_research_report(report, detail=True)
+
+    def delete_market_research_report(self, *, organization_id: str, user_id: str, report_id: str) -> dict[str, Any] | None:
+        deleted = self.store.soft_delete_market_research_report(
+            organization_id=organization_id,
+            user_id=user_id,
+            report_id=report_id,
+        )
+        if deleted is None:
+            return None
+        self.store.record_audit_log(
+            action="market_research_report.deleted",
+            organization_id=organization_id,
+            actor_user_id=user_id,
+            target_type="market_research_report",
+            target_id=report_id,
+            metadata={"ticker": deleted.get("ticker"), "job_id": deleted.get("job_id")},
+        )
+        return self._public_market_research_report(deleted, detail=False)
+
+    @staticmethod
+    def _public_market_research_report(report: dict[str, Any], *, detail: bool) -> dict[str, Any]:
+        provider_metadata = dict(report.get("provider_metadata") or {})
+        for key in list(provider_metadata):
+            lowered = key.lower()
+            if any(fragment in lowered for fragment in ("prompt", "secret", "token", "api_key", "apikey", "password")) and key not in {
+                "prompt_version",
+                "agent_prompt_hashes",
+            }:
+                provider_metadata.pop(key, None)
+        public = {
+            "id": report.get("id"),
+            "report_id": report.get("id"),
+            "organization_id": report.get("organization_id"),
+            "user_id": report.get("user_id"),
+            "job_id": report.get("job_id"),
+            "parent_report_id": report.get("parent_report_id"),
+            "version": report.get("version"),
+            "ticker": report.get("ticker"),
+            "analysis_date": report.get("analysis_date"),
+            "horizon": report.get("horizon"),
+            "report_type": report.get("report_type"),
+            "title": report.get("title"),
+            "status": report.get("status"),
+            "decision": report.get("decision"),
+            "confidence": report.get("confidence"),
+            "summary": report.get("summary"),
+            "disclaimer": report.get("disclaimer"),
+            "source_references": report.get("source_references", []),
+            "provider_metadata": provider_metadata,
+            "warnings": report.get("warnings", []),
+            "artifact_id": report.get("artifact_id"),
+            "error": report.get("error"),
+            "created_at_utc": report.get("created_at_utc"),
+            "updated_at_utc": report.get("updated_at_utc"),
+            "completed_at_utc": report.get("completed_at_utc"),
+            "deleted_at_utc": report.get("deleted_at_utc"),
+        }
+        if detail:
+            public["context"] = report.get("context", {})
+            public["report"] = report.get("report", {})
+        return public
 
     def get_experiment(self, *, organization_id: str, experiment_id: str) -> dict[str, Any] | None:
         self.sync_experiment_runs(organization_id=organization_id)

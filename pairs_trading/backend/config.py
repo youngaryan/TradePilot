@@ -70,6 +70,14 @@ class BackendSettings:
     market_research_job_state_dir: Path = Path("artifacts/market_research/jobs")
     market_research_data_provider: str = "demo"
     market_research_agent_timeout_seconds: float = 8.0
+    secret_backend: str = "env"
+    market_research_llm_provider: str = "mock"
+    market_research_llm_model: str = "mock-research-v1"
+    market_research_llm_timeout_seconds: float = 30.0
+    market_research_llm_max_retries: int = 1
+    market_research_llm_max_concurrency: int = 2
+    market_research_openai_api_key_ref: str | None = None
+    market_research_anthropic_api_key_ref: str | None = None
     price_cache_dir: Path = Path("data/cache")
     sentiment_cache_dir: Path = Path("data/sentiment_cache")
     sentiment_job_state_dir: Path = Path("artifacts/sentiment/jobs")
@@ -151,6 +159,9 @@ class BackendSettings:
                 "Production startup blocked. Configure secure production settings for: "
                 + ", ".join(dict.fromkeys(missing))
             )
+        from .llm_config import validate_market_research_llm_settings
+
+        validate_market_research_llm_settings(self)
 
     @classmethod
     def from_env(cls) -> "BackendSettings":
@@ -198,6 +209,14 @@ class BackendSettings:
             market_research_job_state_dir=Path(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_JOB_STATE_DIR", "artifacts/market_research/jobs")),
             market_research_data_provider=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER", "demo").strip().lower() or "demo",
             market_research_agent_timeout_seconds=float(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS", "8.0")),
+            secret_backend=os.getenv("PAIRS_TRADING_SECRET_BACKEND", "env").strip().lower() or "env",
+            market_research_llm_provider=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER", "mock").strip().lower() or "mock",
+            market_research_llm_model=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL", "mock-research-v1").strip() or "mock-research-v1",
+            market_research_llm_timeout_seconds=float(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS", "30.0")),
+            market_research_llm_max_retries=int(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_RETRIES", "1")),
+            market_research_llm_max_concurrency=int(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY", "2")),
+            market_research_openai_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_OPENAI_API_KEY_REF") or None,
+            market_research_anthropic_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_ANTHROPIC_API_KEY_REF") or None,
             price_cache_dir=Path(os.getenv("PAIRS_TRADING_PRICE_CACHE_DIR", "data/cache")),
             sentiment_cache_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_CACHE_DIR", "data/sentiment_cache")),
             sentiment_job_state_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_JOB_STATE_DIR", "artifacts/sentiment/jobs")),

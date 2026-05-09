@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
+import json
 import math
 import re
 import time
@@ -12,6 +13,7 @@ from typing import Any, Protocol, Sequence, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .llm_providers import LLMCallResult, MockStructuredLLMProvider, StructuredLLMProvider
 from .market_research_prompts import AGENT_PROMPTS, PROMPT_VERSION, RESEARCH_DISCLAIMER
 
 
@@ -64,6 +66,10 @@ class MarketResearchInput(BaseModel):
     horizon: ResearchHorizon = ResearchHorizon.SWING
     provider: str = "mock"
     model: str = "mock-research-v1"
+    sentiment_dataset_id: str | None = None
+    include_sentiment: bool = True
+    include_financial_events: bool = True
+    lookback_days: int | None = Field(default=None, ge=5, le=900)
     options: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("ticker")
@@ -101,6 +107,17 @@ class NewsItem(BaseModel):
     sentiment_score: float | None = None
 
 
+class SourceReference(BaseModel):
+    id: str
+    source: str
+    provider: str
+    title: str
+    observed_at_utc: str = Field(default_factory=utc_now_iso)
+    url: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    verified: bool = False
+
+
 class MarketResearchContext(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
@@ -109,8 +126,16 @@ class MarketResearchContext(BaseModel):
     horizon: ResearchHorizon = ResearchHorizon.SWING
     price_history: list[PriceBar] = Field(default_factory=list)
     financial_events: list[dict[str, Any]] = Field(default_factory=list)
+    financial_events_analysis: dict[str, Any] = Field(default_factory=dict)
+    sentiment_matrix: list[dict[str, Any]] = Field(default_factory=list)
+    sentiment_analysis: dict[str, Any] = Field(default_factory=dict)
     news: list[NewsItem] = Field(default_factory=list)
     provenance: list[DataProvenance] = Field(default_factory=list)
+    source_references: list[SourceReference] = Field(default_factory=list)
+    company_metadata: dict[str, Any] = Field(default_factory=dict)
+    data_freshness: dict[str, str | None] = Field(default_factory=dict)
+    confidence_levels: dict[str, float] = Field(default_factory=dict)
+    missing_data_indicators: list[str] = Field(default_factory=list)
     data_quality_notes: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -175,6 +200,14 @@ class MarketResearchReport(BaseModel):
     risk_assessment: AgentOutput
     data_quality_notes: list[str]
     disclaimer: str = RESEARCH_DISCLAIMER
+    sentiment_matrix: list[dict[str, Any]] = Field(default_factory=list)
+    sentiment_analysis: dict[str, Any] = Field(default_factory=dict)
+    financial_events_matrix: list[dict[str, Any]] = Field(default_factory=list)
+    financial_events_analysis: dict[str, Any] = Field(default_factory=dict)
+    source_references: list[SourceReference] = Field(default_factory=list)
+    data_freshness: dict[str, str | None] = Field(default_factory=dict)
+    confidence_levels: dict[str, float] = Field(default_factory=dict)
+    missing_data_indicators: list[str] = Field(default_factory=list)
     raw_agent_outputs: list[AgentOutput]
     audit_trail: list[AgentAuditEvent]
     provenance: list[DataProvenance]
@@ -188,31 +221,8 @@ class MarketResearchReport(BaseModel):
         return normalize_ticker(value)
 
 
-class StructuredLLMProvider(Protocol):
-    def generate_structured(self, prompt: str, schema: type[T], options: dict[str, Any] | None = None) -> T:
-        ...
-
-
-class MockStructuredLLMProvider:
-    """Deterministic placeholder for future hosted LLM providers."""
-
-    provider_name = "mock"
-    model_name = "mock-research-v1"
-
-    def generate_structured(self, prompt: str, schema: type[T], options: dict[str, Any] | None = None) -> T:
-        del options
-        if schema is AgentOutput:
-            return schema(
-                agent_name="mock_llm",
-                display_name="Mock LLM",
-                summary=f"Mock structured output for prompt version {PROMPT_VERSION}.",
-                warnings=["Mock LLM provider used; no hosted model was called."],
-            )
-        raise ValueError(f"MockStructuredLLMProvider does not know how to build {schema.__name__}.")
-
-
 class MarketResearchDataProvider(Protocol):
-    def collect(self, request: MarketResearchInput) -> MarketResearchContext:
+    def collect(self, request: MarketResearchInput, **kwargs: Any) -> MarketResearchContext:
         ...
 
 
@@ -271,6 +281,18 @@ class DemoMarketResearchDataProvider:
                 detail="No real fundamental provider configured; analyst must state limitations.",
             ),
         ]
+        source_references = [
+            SourceReference(
+                id=f"demo-news-{ticker}-1",
+                source="news",
+                provider=self.provider_name,
+                title=item.headline,
+                url=item.url,
+                confidence=0.5 if item.sentiment_score is not None else None,
+                verified=False,
+            )
+            for item in news
+        ]
         warning = "Demo provider used; connect a real market/news/fundamental provider before relying on live research."
         return MarketResearchContext(
             ticker=ticker,
@@ -279,6 +301,11 @@ class DemoMarketResearchDataProvider:
             price_history=bars,
             news=news,
             provenance=provenance,
+            source_references=source_references,
+            company_metadata={"ticker": ticker, "data_mode": "demo"},
+            data_freshness={"price_history": request.analysis_date, "news": request.analysis_date, "financial_events": None},
+            confidence_levels={"price_history": 0.45, "news": 0.25, "financial_events": 0.0},
+            missing_data_indicators=["fundamentals", "real_news_sentiment", "live_market_data"],
             data_quality_notes=[warning, "No brokerage integration is present or used by this research workflow."],
             warnings=[warning],
             provider_metadata={
@@ -775,7 +802,7 @@ class MarketResearchOrchestrator:
         started = utc_now_iso()
         start_time = time.perf_counter()
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"market-research-{agent.agent_name}")
-        future: Future[AgentOutput] = executor.submit(agent.run, context, list(previous_outputs))
+        future: Future[AgentOutput] = executor.submit(self._run_agent_body, agent, context, list(previous_outputs))
         try:
             output = future.result(timeout=self.per_agent_timeout_seconds)
             status = AgentStatus.COMPLETED
@@ -805,6 +832,126 @@ class MarketResearchOrchestrator:
             error=error,
         )
         return output, audit
+
+    def _run_agent_body(
+        self,
+        agent: ResearchAgent,
+        context: MarketResearchContext,
+        previous_outputs: Sequence[AgentOutput],
+    ) -> AgentOutput:
+        deterministic = agent.run(context, previous_outputs)
+        if not self._uses_hosted_llm():
+            return deterministic
+        return self._augment_with_llm(agent, context, previous_outputs, deterministic)
+
+    def _uses_hosted_llm(self) -> bool:
+        provider_name = str(getattr(self.llm_provider, "provider_name", "mock")).lower()
+        return provider_name not in {"mock", "disabled", "none"}
+
+    def _augment_with_llm(
+        self,
+        agent: ResearchAgent,
+        context: MarketResearchContext,
+        previous_outputs: Sequence[AgentOutput],
+        deterministic: AgentOutput,
+    ) -> AgentOutput:
+        prompt = self._agent_prompt(agent, context, previous_outputs, deterministic)
+        try:
+            result = self.llm_provider.generate_structured(
+                prompt,
+                AgentOutput,
+                {
+                    "system": (
+                        "You are a research-only market analysis agent. Use only the verified context and "
+                        "explicitly label inference. Do not provide personalized financial advice."
+                    ),
+                    "temperature": 0.2,
+                    "max_output_tokens": 1600,
+                },
+            )
+            llm_output = self._coerce_llm_result(result)
+            llm_metadata = {}
+            if isinstance(result, LLMCallResult):
+                llm_metadata = {
+                    "llm_latency_ms": result.latency_ms,
+                    "llm_usage": result.usage,
+                    "llm_response_metadata": result.metadata,
+                    "llm_warnings": result.warnings,
+                }
+            llm_output = llm_output.model_copy(
+                update={
+                    "agent_name": agent.agent_name,
+                    "display_name": agent.display_name,
+                    "version": getattr(agent, "version", "v1"),
+                    "prompt_version": PROMPT_VERSION,
+                    "details": {
+                        **deterministic.details,
+                        **llm_output.details,
+                        "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
+                        "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
+                        "deterministic_baseline": deterministic.summary,
+                        **llm_metadata,
+                    },
+                }
+            )
+            if not llm_output.signals and deterministic.signals:
+                llm_output = llm_output.model_copy(update={"signals": deterministic.signals})
+            return llm_output
+        except Exception as exc:
+            warnings = list(deterministic.warnings)
+            warnings.append(f"Hosted LLM refinement failed for {agent.display_name}; deterministic fallback used: {exc}")
+            return deterministic.model_copy(
+                update={
+                    "warnings": list(dict.fromkeys(warnings)),
+                    "details": {
+                        **deterministic.details,
+                        "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
+                        "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
+                        "llm_error": str(exc),
+                    },
+                }
+            )
+
+    @staticmethod
+    def _coerce_llm_result(result: Any) -> AgentOutput:
+        if isinstance(result, LLMCallResult):
+            return result.value
+        if isinstance(result, AgentOutput):
+            return result
+        return AgentOutput.model_validate(result)
+
+    @staticmethod
+    def _bounded_context(context: MarketResearchContext) -> dict[str, Any]:
+        payload = context.model_dump(mode="json")
+        payload["price_history"] = payload.get("price_history", [])[-80:]
+        payload["news"] = payload.get("news", [])[:30]
+        payload["financial_events"] = payload.get("financial_events", [])[:30]
+        payload["sentiment_matrix"] = payload.get("sentiment_matrix", [])[-90:]
+        payload["source_references"] = payload.get("source_references", [])[:50]
+        return payload
+
+    def _agent_prompt(
+        self,
+        agent: ResearchAgent,
+        context: MarketResearchContext,
+        previous_outputs: Sequence[AgentOutput],
+        deterministic: AgentOutput,
+    ) -> str:
+        prompt = AGENT_PROMPTS.get(agent.agent_name, "Review the context and produce a schema-valid research output.")
+        payload = {
+            "agent": {"name": agent.agent_name, "display_name": agent.display_name},
+            "instructions": prompt,
+            "disclaimer": RESEARCH_DISCLAIMER,
+            "research_boundary": "Do not place trades, promise returns, or provide personalized investment advice.",
+            "context": self._bounded_context(context),
+            "previous_outputs": [output.model_dump(mode="json") for output in previous_outputs[-6:]],
+            "deterministic_baseline": deterministic.model_dump(mode="json"),
+            "output_contract": (
+                "Return an AgentOutput. Use evidence/provenance ids from context where possible. "
+                "If data is missing, add warnings instead of inventing facts."
+            ),
+        }
+        return json.dumps(payload, default=str, sort_keys=True)
 
     @staticmethod
     def _failed_output(agent: ResearchAgent, error: str) -> AgentOutput:
@@ -848,9 +995,22 @@ class MarketResearchOrchestrator:
         )
         metadata = {
             "prompt_version": PROMPT_VERSION,
-            "agent_prompts": AGENT_PROMPTS,
+            "agent_prompt_hashes": {
+                name: sha256(prompt.encode("utf-8")).hexdigest()
+                for name, prompt in AGENT_PROMPTS.items()
+            },
             "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
             "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
+            "llm_agent_latency_ms": {
+                output.agent_name: output.details.get("llm_latency_ms")
+                for output in outputs
+                if output.details.get("llm_latency_ms") is not None
+            },
+            "llm_agent_usage": {
+                output.agent_name: output.details.get("llm_usage")
+                for output in outputs
+                if output.details.get("llm_usage")
+            },
             "agent_versions": {output.agent_name: output.version for output in outputs},
             "provider_metadata": context.provider_metadata,
             "trade_execution": "disabled",
@@ -869,6 +1029,14 @@ class MarketResearchOrchestrator:
             news_sentiment_signals=news.signals,
             risk_assessment=risk,
             data_quality_notes=data_quality_notes or ["No data-quality warnings were recorded."],
+            sentiment_matrix=context.sentiment_matrix,
+            sentiment_analysis=context.sentiment_analysis,
+            financial_events_matrix=context.financial_events,
+            financial_events_analysis=context.financial_events_analysis,
+            source_references=context.source_references,
+            data_freshness=context.data_freshness,
+            confidence_levels=context.confidence_levels,
+            missing_data_indicators=context.missing_data_indicators,
             raw_agent_outputs=list(outputs),
             audit_trail=list(audit),
             provenance=context.provenance,

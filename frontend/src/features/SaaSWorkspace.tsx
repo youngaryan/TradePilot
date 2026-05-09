@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, CreditCard, DatabaseZap, KeyRound, Loader2, Rocket, ShieldCheck, Workflow } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CreditCard, DatabaseZap, FileText, KeyRound, Loader2, Rocket, ShieldCheck, Workflow } from "lucide-react";
 
 import {
   createApiKeyMetadata,
@@ -35,8 +35,9 @@ import {
 import { Explainer, MetricCard, Panel, SectionHeader } from "../components/Cards";
 import { DataTable } from "../components/Table";
 import { formatCurrency, formatDateTime, formatNumber, formatPercent, pipelineLabel, statusTone, toNumber } from "../utils/format";
+import { MarketResearchReports } from "./workspace/MarketResearchReports";
 
-type WorkspaceSection = "onboarding" | "experiments" | "agents" | "data" | "operations" | "billing";
+type WorkspaceSection = "onboarding" | "experiments" | "agents" | "reports" | "data" | "operations" | "billing";
 
 function safeString(value: unknown, fallback = "n/a") {
   return typeof value === "string" && value.trim() ? value : fallback;
@@ -313,6 +314,7 @@ export function SaaSWorkspace({
         <MetricCard label="Plan" value={subscription?.plan ?? "free"} detail={subscription?.status ?? "not configured"} tone="neutral" icon={<CreditCard size={18} />} />
         <MetricCard label="Experiments" value={formatNumber(workspace.experiments.length)} detail="Saved research records" tone="neutral" icon={<Workflow size={18} />} />
         <MetricCard label="Paper agents" value={formatNumber(workspace.paper_agents.length)} detail="Fake-money deployment records" tone="neutral" icon={<Rocket size={18} />} />
+        <MetricCard label="Reports" value={formatNumber(workspace.market_research_reports?.length ?? 0)} detail="AI committee history" tone="neutral" icon={<FileText size={18} />} />
       </div>
 
       {notice ? (
@@ -329,9 +331,9 @@ export function SaaSWorkspace({
       ) : null}
 
       <div className="section-tabs">
-        {(["onboarding", "experiments", "agents", "data", "operations", "billing"] as WorkspaceSection[]).map((item) => (
+        {(["onboarding", "experiments", "agents", "reports", "data", "operations", "billing"] as WorkspaceSection[]).map((item) => (
           <button key={item} type="button" className={section === item ? "chip chip--active" : "chip"} onClick={() => setSection(item)}>
-            {item === "onboarding" ? "Launch wizard" : item}
+            {item === "onboarding" ? "Launch wizard" : item === "reports" ? "Reports" : item}
           </button>
         ))}
       </div>
@@ -474,6 +476,10 @@ export function SaaSWorkspace({
             )}
           </Panel>
         </div>
+      ) : null}
+
+      {section === "reports" ? (
+        <MarketResearchReports initialReports={workspace.market_research_reports ?? []} onRefreshWorkspace={refreshWorkspace} />
       ) : null}
 
       {section === "data" ? (

@@ -35,6 +35,9 @@ Set `APP_ENV=production` only after configuring:
 - `SMTP_HOST`
 - `SMTP_PORT`
 - `EMAIL_FROM`
+- `PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=openai|anthropic`
+- Matching market-research LLM model and secret reference
+- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` when using `env:` secret references
 
 Production also requires:
 - `ENABLE_DEMO_ACCOUNTS=false`
@@ -51,6 +54,8 @@ Operational runbooks:
 Browser auth uses HttpOnly `quantops_session` cookies. Mutating browser requests must include `X-CSRF-Token`, sourced from the non-HttpOnly `quantops_csrf` cookie. `Authorization: Bearer` is reserved for scoped `qops_...` machine API keys; user session tokens are rejected when sent as bearer credentials.
 
 Artifact-style endpoints require authentication. Normal users cannot access admin routes, and production admin APIs require an MFA verification cookie.
+
+Market research LLM credentials are server-side only. Production startup rejects `mock` and `disabled` providers and fails closed when the selected provider secret cannot be resolved. Raw prompts, raw provider responses, API keys, and request-supplied credentials must not be returned to the frontend or persisted in report metadata.
 
 ## Current migration boundary
 
