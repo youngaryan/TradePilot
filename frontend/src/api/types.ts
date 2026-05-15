@@ -769,13 +769,29 @@ export interface MarketResearchRunRequest {
   ticker: string;
   analysis_date?: string | null;
   horizon: MarketResearchHorizon;
-  provider?: string;
-  model?: string;
+  provider?: string | null;
+  model?: string | null;
   sentiment_dataset_id?: string | null;
   include_sentiment?: boolean;
   include_financial_events?: boolean;
   lookback_days?: number | null;
   options?: Record<string, unknown>;
+}
+
+export interface NvidiaModelCatalogItem {
+  provider: "nvidia" | string;
+  model: string;
+  display_name: string;
+  model_provider: string;
+  category: string;
+  endpoint: string;
+  recommendation: string;
+  recommended_for: string[];
+  limitations: string[];
+  market_research_compatible: boolean;
+  preview: boolean;
+  production_ready: boolean;
+  notes: string[];
 }
 
 export interface MarketResearchRuntimeConfig {
@@ -786,6 +802,16 @@ export interface MarketResearchRuntimeConfig {
   llm_timeout_seconds: number;
   llm_max_retries: number;
   llm_max_concurrency: number;
+  free_endpoint_timeout_cap_seconds?: number;
+  llm_fail_fast_after_failures?: number;
+  model_override_enabled?: boolean;
+  nvidia?: {
+    models: NvidiaModelCatalogItem[];
+    market_research_models: NvidiaModelCatalogItem[];
+    utility_models: NvidiaModelCatalogItem[];
+    caveats: string[];
+    api_key_configured?: boolean;
+  };
   warnings: string[];
   ollama?: {
     base_url: string;
@@ -828,6 +854,29 @@ export interface MarketResearchAuditEvent {
   duration_ms: number;
   warnings: string[];
   error?: string | null;
+}
+
+export interface MarketResearchProgressEvent {
+  event_type: string;
+  timestamp_utc: string;
+  provider?: string;
+  model?: string;
+  agent_name?: string;
+  display_name?: string;
+  agent_version?: string;
+  agent_index?: number;
+  total_agents?: number;
+  status?: string;
+  duration_ms?: number;
+  latency_ms?: number;
+  confidence?: number;
+  signal_count?: number;
+  warning_count?: number;
+  price_bar_count?: number;
+  news_count?: number;
+  financial_event_count?: number;
+  usage?: Record<string, unknown>;
+  error?: string;
 }
 
 export interface MarketResearchProvenance {
@@ -940,6 +989,7 @@ export interface MarketResearchJob {
   stage: string;
   message: string;
   warnings: string[];
+  progress_events?: MarketResearchProgressEvent[];
   started_at_utc?: string | null;
   finished_at_utc?: string | null;
   result?: MarketResearchReport | null;

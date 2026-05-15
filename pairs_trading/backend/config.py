@@ -76,9 +76,14 @@ class BackendSettings:
     market_research_llm_timeout_seconds: float = 120.0
     market_research_llm_max_retries: int = 1
     market_research_llm_max_concurrency: int = 1
+    market_research_free_endpoint_timeout_cap_seconds: float = 45.0
+    market_research_llm_fail_fast_after_failures: int = 1
+    market_research_allow_request_model_override: bool = True
     market_research_ollama_base_url: str = "http://127.0.0.1:11434"
     market_research_openai_api_key_ref: str | None = None
     market_research_anthropic_api_key_ref: str | None = None
+    market_research_nvidia_api_key_ref: str | None = None
+    market_research_nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     price_cache_dir: Path = Path("data/cache")
     sentiment_cache_dir: Path = Path("data/sentiment_cache")
     sentiment_job_state_dir: Path = Path("artifacts/sentiment/jobs")
@@ -216,9 +221,21 @@ class BackendSettings:
             market_research_llm_timeout_seconds=float(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS", "120.0")),
             market_research_llm_max_retries=int(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_RETRIES", "1")),
             market_research_llm_max_concurrency=int(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY", "1")),
+            market_research_free_endpoint_timeout_cap_seconds=float(
+                os.getenv("PAIRS_TRADING_MARKET_RESEARCH_FREE_ENDPOINT_TIMEOUT_CAP_SECONDS", "45.0")
+            ),
+            market_research_llm_fail_fast_after_failures=int(
+                os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_FAIL_FAST_AFTER_FAILURES", "1")
+            ),
+            market_research_allow_request_model_override=_env_bool(
+                "PAIRS_TRADING_MARKET_RESEARCH_ALLOW_REQUEST_MODEL_OVERRIDE",
+                not production,
+            ),
             market_research_ollama_base_url=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434",
             market_research_openai_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_OPENAI_API_KEY_REF") or None,
             market_research_anthropic_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_ANTHROPIC_API_KEY_REF") or None,
+            market_research_nvidia_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_NVIDIA_API_KEY_REF") or None,
+            market_research_nvidia_base_url=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip() or "https://integrate.api.nvidia.com/v1",
             price_cache_dir=Path(os.getenv("PAIRS_TRADING_PRICE_CACHE_DIR", "data/cache")),
             sentiment_cache_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_CACHE_DIR", "data/sentiment_cache")),
             sentiment_job_state_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_JOB_STATE_DIR", "artifacts/sentiment/jobs")),

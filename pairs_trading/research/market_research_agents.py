@@ -9,7 +9,8 @@ import json
 import math
 import re
 import time
-from typing import Any, Protocol, Sequence, TypeVar
+from threading import Lock
+from typing import Any, Callable, Protocol, Sequence, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -779,30 +780,106 @@ class MarketResearchOrchestrator:
         *,
         llm_provider: StructuredLLMProvider | None = None,
         per_agent_timeout_seconds: float = 8.0,
+        max_llm_failures: int = 1,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.agents = tuple(agents or DEFAULT_AGENTS)
         self.llm_provider = llm_provider or MockStructuredLLMProvider()
         self.per_agent_timeout_seconds = max(0.1, float(per_agent_timeout_seconds))
+        self.max_llm_failures = int(max_llm_failures)
+        self.progress_callback = progress_callback
+        self._state_lock = Lock()
+        self._llm_failure_count = 0
+        self._cancelled_agent_run_ids: set[str] = set()
 
     def run(self, context: MarketResearchContext) -> MarketResearchReport:
         outputs: list[AgentOutput] = []
         audit: list[AgentAuditEvent] = []
-        for agent in self.agents:
-            output, event = self._run_agent(agent, context, outputs)
+        for index, agent in enumerate(self.agents):
+            output, event = self._run_agent(agent, context, outputs, agent_index=index, total_agents=len(self.agents))
             outputs.append(output)
             audit.append(event)
         return self._build_report(context, outputs, audit)
+
+    def _emit_progress(
+        self,
+        event_type: str,
+        agent: ResearchAgent | None = None,
+        *,
+        agent_index: int | None = None,
+        total_agents: int | None = None,
+        agent_run_id: str | None = None,
+        **details: Any,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        if agent_run_id is not None and self._is_agent_run_cancelled(agent_run_id):
+            return
+        payload: dict[str, Any] = {
+            "event_type": event_type,
+            "timestamp_utc": utc_now_iso(),
+            "provider": getattr(self.llm_provider, "provider_name", "unknown"),
+            "model": getattr(self.llm_provider, "model_name", "unknown"),
+        }
+        if agent is not None:
+            payload.update(
+                {
+                    "agent_name": agent.agent_name,
+                    "display_name": agent.display_name,
+                    "agent_version": getattr(agent, "version", "v1"),
+                }
+            )
+        if agent_index is not None:
+            payload["agent_index"] = int(agent_index)
+        if total_agents is not None:
+            payload["total_agents"] = int(total_agents)
+        payload.update(details)
+        self.progress_callback(payload)
+
+    def _is_agent_run_cancelled(self, agent_run_id: str) -> bool:
+        with self._state_lock:
+            return agent_run_id in self._cancelled_agent_run_ids
+
+    def _cancel_agent_run(self, agent_run_id: str) -> None:
+        with self._state_lock:
+            self._cancelled_agent_run_ids.add(agent_run_id)
+
+    def _record_llm_failure(self) -> int:
+        with self._state_lock:
+            self._llm_failure_count += 1
+            return self._llm_failure_count
+
+    def _llm_failure_limit_reached(self) -> tuple[bool, int]:
+        if self.max_llm_failures <= 0:
+            with self._state_lock:
+                return False, self._llm_failure_count
+        with self._state_lock:
+            count = self._llm_failure_count
+        return count >= self.max_llm_failures, count
 
     def _run_agent(
         self,
         agent: ResearchAgent,
         context: MarketResearchContext,
         previous_outputs: Sequence[AgentOutput],
+        *,
+        agent_index: int,
+        total_agents: int,
     ) -> tuple[AgentOutput, AgentAuditEvent]:
         started = utc_now_iso()
         start_time = time.perf_counter()
+        agent_run_id = f"{agent.agent_name}:{time.perf_counter_ns()}"
+        self._emit_progress("agent_started", agent, agent_index=agent_index, total_agents=total_agents)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"market-research-{agent.agent_name}")
-        future: Future[AgentOutput] = executor.submit(self._run_agent_body, agent, context, list(previous_outputs))
+        future: Future[AgentOutput] = executor.submit(
+            self._run_agent_body,
+            agent,
+            context,
+            list(previous_outputs),
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+        )
         try:
             output = future.result(timeout=self.per_agent_timeout_seconds)
             status = AgentStatus.COMPLETED
@@ -810,17 +887,34 @@ class MarketResearchOrchestrator:
             executor.shutdown(wait=True)
         except TimeoutError:
             future.cancel()
+            self._cancel_agent_run(agent_run_id)
             executor.shutdown(wait=False, cancel_futures=True)
             status = AgentStatus.TIMEOUT
             error = (
                 f"{agent.display_name} timed out after {self.per_agent_timeout_seconds:.1f}s while using "
                 f"{self._provider_label()}."
             )
+            if self._uses_hosted_llm():
+                self._record_llm_failure()
+            self._emit_progress(
+                "agent_timeout",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                error=error,
+            )
             output = self._timeout_fallback_output(agent, context, previous_outputs, error)
         except Exception as exc:
             executor.shutdown(wait=False, cancel_futures=True)
             status = AgentStatus.FAILED
             error = str(exc)
+            self._emit_progress(
+                "agent_failed",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                error=error,
+            )
             output = self._failed_output(agent, error)
         finished = utc_now_iso()
         duration_ms = int((time.perf_counter() - start_time) * 1000)
@@ -834,6 +928,17 @@ class MarketResearchOrchestrator:
             warnings=output.warnings,
             error=error,
         )
+        self._emit_progress(
+            "agent_completed",
+            agent,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            status=status,
+            duration_ms=duration_ms,
+            confidence=output.confidence,
+            signal_count=len(output.signals),
+            warning_count=len(output.warnings),
+        )
         return output, audit
 
     def _run_agent_body(
@@ -841,11 +946,67 @@ class MarketResearchOrchestrator:
         agent: ResearchAgent,
         context: MarketResearchContext,
         previous_outputs: Sequence[AgentOutput],
+        *,
+        agent_index: int,
+        total_agents: int,
+        agent_run_id: str,
     ) -> AgentOutput:
+        self._emit_progress(
+            "deterministic_baseline_started",
+            agent,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+        )
         deterministic = agent.run(context, previous_outputs)
+        self._emit_progress(
+            "deterministic_baseline_completed",
+            agent,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+            confidence=deterministic.confidence,
+            signal_count=len(deterministic.signals),
+            warning_count=len(deterministic.warnings),
+        )
         if not self._uses_hosted_llm():
             return deterministic
-        return self._augment_with_llm(agent, context, previous_outputs, deterministic)
+        limit_reached, failure_count = self._llm_failure_limit_reached()
+        if limit_reached:
+            warning = (
+                f"Hosted LLM refinement skipped for {agent.display_name} after "
+                f"{failure_count} prior provider failure(s); deterministic baseline used."
+            )
+            self._emit_progress(
+                "llm_refinement_skipped",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                agent_run_id=agent_run_id,
+                error=warning,
+                warning_count=len(deterministic.warnings) + 1,
+            )
+            return deterministic.model_copy(
+                update={
+                    "warnings": list(dict.fromkeys([*deterministic.warnings, warning])),
+                    "details": {
+                        **deterministic.details,
+                        "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
+                        "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
+                        "llm_skipped_after_failures": failure_count,
+                        "fallback_type": "deterministic_after_llm_fail_fast",
+                    },
+                }
+            )
+        return self._augment_with_llm(
+            agent,
+            context,
+            previous_outputs,
+            deterministic,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+        )
 
     def _uses_hosted_llm(self) -> bool:
         provider_name = str(getattr(self.llm_provider, "provider_name", "mock")).lower()
@@ -862,9 +1023,20 @@ class MarketResearchOrchestrator:
         context: MarketResearchContext,
         previous_outputs: Sequence[AgentOutput],
         deterministic: AgentOutput,
+        *,
+        agent_index: int,
+        total_agents: int,
+        agent_run_id: str,
     ) -> AgentOutput:
         prompt = self._agent_prompt(agent, context, previous_outputs, deterministic)
         try:
+            self._emit_progress(
+                "llm_refinement_started",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                agent_run_id=agent_run_id,
+            )
             result = self.llm_provider.generate_structured(
                 prompt,
                 AgentOutput,
@@ -886,6 +1058,25 @@ class MarketResearchOrchestrator:
                     "llm_response_metadata": result.metadata,
                     "llm_warnings": result.warnings,
                 }
+                self._emit_progress(
+                    "llm_refinement_completed",
+                    agent,
+                    agent_index=agent_index,
+                    total_agents=total_agents,
+                    agent_run_id=agent_run_id,
+                    latency_ms=result.latency_ms,
+                    usage=result.usage,
+                    warning_count=len(result.warnings),
+                )
+            else:
+                self._emit_progress(
+                    "llm_refinement_completed",
+                    agent,
+                    agent_index=agent_index,
+                    total_agents=total_agents,
+                    agent_run_id=agent_run_id,
+                    warning_count=0,
+                )
             llm_output = llm_output.model_copy(
                 update={
                     "agent_name": agent.agent_name,
@@ -906,10 +1097,26 @@ class MarketResearchOrchestrator:
                 llm_output = llm_output.model_copy(update={"signals": deterministic.signals})
             return llm_output
         except Exception as exc:
+            if self._is_agent_run_cancelled(agent_run_id):
+                return deterministic
             provider_name = str(getattr(self.llm_provider, "provider_name", "unknown")).lower()
             provider_label = "Ollama" if provider_name == "ollama" else "Hosted"
+            failure_count = self._record_llm_failure()
+            self._emit_progress(
+                "llm_refinement_failed",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                agent_run_id=agent_run_id,
+                error=str(exc),
+            )
             warnings = list(deterministic.warnings)
             warnings.append(f"{provider_label} LLM refinement failed for {agent.display_name}; deterministic fallback used: {exc}")
+            limit_reached, _ = self._llm_failure_limit_reached()
+            if limit_reached:
+                warnings.append(
+                    f"Hosted LLM refinement disabled for remaining agents after {failure_count} provider failure(s)."
+                )
             return deterministic.model_copy(
                 update={
                     "warnings": list(dict.fromkeys(warnings)),

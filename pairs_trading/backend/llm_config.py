@@ -7,10 +7,12 @@ from ..research.llm_providers import (
     AnthropicStructuredLLMProvider,
     LLMProviderUnavailable,
     MockStructuredLLMProvider,
+    NvidiaStructuredLLMProvider,
     OllamaStructuredLLMProvider,
     OpenAIStructuredLLMProvider,
     StructuredLLMProvider,
 )
+from ..research.nvidia_model_catalog import nvidia_model_catalog_payload, resolve_nvidia_model
 from .config import BackendSettings
 from .secrets import SecretProvider
 
@@ -34,6 +36,8 @@ def _configured_secret(settings: BackendSettings, *, provider: str, resolver: Se
         ref = settings.market_research_openai_api_key_ref or "env:OPENAI_API_KEY"
     elif provider == "anthropic":
         ref = settings.market_research_anthropic_api_key_ref or "env:ANTHROPIC_API_KEY"
+    elif provider == "nvidia":
+        ref = settings.market_research_nvidia_api_key_ref or "env:NVIDIA_API_KEY"
     else:
         return None
     return resolver.resolve(ref)
@@ -43,7 +47,7 @@ def validate_market_research_llm_settings(settings: BackendSettings) -> None:
     provider = settings.market_research_llm_provider.strip().lower()
     if not settings.is_production:
         return
-    if provider in {"mock", "disabled", "ollama", ""}:
+    if provider in {"mock", "disabled", "ollama", "nvidia", ""}:
         raise RuntimeError("Production startup blocked. Configure PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=openai or anthropic.")
     if provider not in {"openai", "anthropic"}:
         raise RuntimeError(f"Production startup blocked. Unsupported market research LLM provider: {provider}.")
@@ -116,6 +120,18 @@ def market_research_runtime_diagnostics(settings: BackendSettings) -> dict[str, 
         settings.market_research_agent_timeout_seconds < 120 or settings.market_research_llm_timeout_seconds < 120
     ):
         warnings.append("Ollama local models can be slow; use at least 120s for agent and LLM timeouts.")
+    if provider == "nvidia":
+        warnings.append("NVIDIA Build free endpoints are enabled for research only; production startup rejects this provider.")
+        warnings.append(
+            "NVIDIA free-endpoint calls are capped and fail-fast in this application; use production providers for SLA-backed runs."
+        )
+        if resolve_nvidia_model(settings.market_research_llm_model) is None:
+            warnings.append("Configured NVIDIA model is not in the vetted free-endpoint research catalog.")
+    nvidia_payload = nvidia_model_catalog_payload()
+    try:
+        nvidia_payload["api_key_configured"] = bool(_configured_secret(settings, provider="nvidia", resolver=EnvSecretResolver(settings)))
+    except Exception:
+        nvidia_payload["api_key_configured"] = False
 
     diagnostics: dict[str, object] = {
         "llm_provider": provider,
@@ -125,6 +141,10 @@ def market_research_runtime_diagnostics(settings: BackendSettings) -> dict[str, 
         "llm_timeout_seconds": settings.market_research_llm_timeout_seconds,
         "llm_max_retries": settings.market_research_llm_max_retries,
         "llm_max_concurrency": settings.market_research_llm_max_concurrency,
+        "free_endpoint_timeout_cap_seconds": settings.market_research_free_endpoint_timeout_cap_seconds,
+        "llm_fail_fast_after_failures": settings.market_research_llm_fail_fast_after_failures,
+        "model_override_enabled": settings.market_research_allow_request_model_override and not settings.is_production,
+        "nvidia": nvidia_payload,
         "warnings": warnings,
     }
     if provider == "ollama":
@@ -134,6 +154,25 @@ def market_research_runtime_diagnostics(settings: BackendSettings) -> dict[str, 
 
 def preflight_market_research_llm(settings: BackendSettings) -> None:
     provider = settings.market_research_llm_provider.strip().lower() or "mock"
+    if provider == "nvidia":
+        spec = resolve_nvidia_model(settings.market_research_llm_model)
+        if spec is None:
+            raise LLMProviderUnavailable(
+                f"NVIDIA model '{settings.market_research_llm_model}' is not in the vetted research catalog."
+            )
+        if not spec.market_research_compatible:
+            raise LLMProviderUnavailable(
+                f"NVIDIA model '{spec.id}' is a {spec.category} endpoint and cannot be used as a market-research chat LLM."
+            )
+        resolver = EnvSecretResolver(settings)
+        ref = settings.market_research_nvidia_api_key_ref or "env:NVIDIA_API_KEY"
+        try:
+            secret = resolver.resolve(ref)
+        except Exception as exc:
+            raise LLMProviderUnavailable("NVIDIA market research secret could not be resolved.") from exc
+        if not secret:
+            raise LLMProviderUnavailable("Configure NVIDIA_API_KEY or PAIRS_TRADING_MARKET_RESEARCH_NVIDIA_API_KEY_REF.")
+        return
     if provider != "ollama":
         return
     diagnostics = probe_ollama_runtime(settings)
@@ -182,4 +221,9 @@ def build_structured_llm_provider(settings: BackendSettings, *, resolver: Secret
         return OpenAIStructuredLLMProvider(**common)
     if provider == "anthropic":
         return AnthropicStructuredLLMProvider(**common)
+    if provider == "nvidia":
+        return NvidiaStructuredLLMProvider(
+            **common,
+            base_url=settings.market_research_nvidia_base_url,
+        )
     raise LLMProviderUnavailable(f"Unsupported market research LLM provider: {provider}.")

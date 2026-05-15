@@ -1686,13 +1686,13 @@ textarea:focus {
 
 .market-research-config-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
 .runtime-diagnostics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   align-items: center;
   gap: 10px;
   padding: 12px;
@@ -1753,6 +1753,55 @@ textarea:focus {
   color: #991b1b;
   border-color: rgba(239, 68, 68, 0.36);
   background: rgba(254, 226, 226, 0.92);
+}
+
+.trace-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.trace-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand);
+}
+
+.progress-trace-list {
+  display: grid;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.progress-trace-row {
+  display: grid;
+  grid-template-columns: minmax(118px, 0.32fr) minmax(150px, 0.7fr) minmax(0, 1.2fr);
+  gap: 10px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  align-items: start;
+}
+
+.progress-trace-row:last-child {
+  border-bottom: 0;
+}
+
+.progress-trace-row span,
+.progress-trace-row small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.progress-trace-row strong {
+  color: var(--ink);
+  font-size: 0.82rem;
 }
 
 .inline-error,
@@ -3123,6 +3172,10 @@ textarea:focus {
 
   .strategy-spec-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .progress-trace-row {
+    grid-template-columns: 1fr;
   }
 }
 

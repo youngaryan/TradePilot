@@ -37,6 +37,36 @@ function uniqueWarnings(values: Array<string | null | undefined>) {
   return Array.from(new Set(values.map((item) => String(item ?? "").trim()).filter(Boolean)));
 }
 
+function progressEventTitle(event: NonNullable<MarketResearchJob["progress_events"]>[number]) {
+  const agent = event.display_name ?? event.agent_name ?? "Research worker";
+  if (event.event_type === "data_collection_started") return "Collecting context";
+  if (event.event_type === "data_collection_completed") return "Context collected";
+  if (event.event_type === "agent_started") return `${agent} started`;
+  if (event.event_type === "deterministic_baseline_started") return `${agent} baseline started`;
+  if (event.event_type === "deterministic_baseline_completed") return `${agent} baseline ready`;
+  if (event.event_type === "llm_refinement_started") return `${agent} calling LLM`;
+  if (event.event_type === "llm_refinement_completed") return `${agent} LLM completed`;
+  if (event.event_type === "llm_refinement_failed") return `${agent} LLM fallback`;
+  if (event.event_type === "llm_refinement_skipped") return `${agent} LLM skipped`;
+  if (event.event_type === "agent_completed") return `${agent} completed`;
+  if (event.event_type === "agent_timeout") return `${agent} timed out`;
+  if (event.event_type === "agent_failed") return `${agent} failed`;
+  return event.event_type.replaceAll("_", " ");
+}
+
+function progressEventDetail(event: NonNullable<MarketResearchJob["progress_events"]>[number]) {
+  const parts: string[] = [];
+  if (event.provider && event.model) parts.push(`${event.provider} / ${event.model}`);
+  if (typeof event.latency_ms === "number") parts.push(`${event.latency_ms} ms`);
+  if (typeof event.confidence === "number") parts.push(`confidence ${event.confidence}`);
+  if (typeof event.signal_count === "number") parts.push(`${event.signal_count} signal(s)`);
+  if (typeof event.warning_count === "number" && event.warning_count > 0) parts.push(`${event.warning_count} warning(s)`);
+  if (typeof event.price_bar_count === "number") parts.push(`${event.price_bar_count} price bars`);
+  if (typeof event.news_count === "number") parts.push(`${event.news_count} news rows`);
+  if (event.error) parts.push(event.error);
+  return parts.join(" | ");
+}
+
 function reportMetadata(report: MarketResearchReport) {
   const metadata = report.metadata ?? {};
   const providerMetadata = metadata.provider_metadata && typeof metadata.provider_metadata === "object"
@@ -180,6 +210,8 @@ export function MarketResearchLab() {
   const [tickerText, setTickerText] = useState("AAPL");
   const [analysisDate, setAnalysisDate] = useState("");
   const [horizon, setHorizon] = useState("swing");
+  const [selectedModel, setSelectedModel] = useState("");
+  const [showProgressTrace, setShowProgressTrace] = useState(false);
   const [jobs, setJobs] = useState<MarketResearchJob[]>([]);
   const [activeJob, setActiveJob] = useState<MarketResearchJob | null>(null);
   const [runtime, setRuntime] = useState<MarketResearchRuntimeConfig | null>(null);
@@ -216,11 +248,14 @@ export function MarketResearchLab() {
     setTickerText(ticker);
     setError(null);
     setIsRunning(true);
+    const [providerOverride, modelOverride] = selectedModel ? selectedModel.split("|", 2) : [null, null];
     try {
       const job = await startMarketResearchJob({
         ticker,
         analysis_date: analysisDate || null,
         horizon,
+        provider: providerOverride || null,
+        model: modelOverride || null,
         options: {}
       });
       setActiveJob(job);
@@ -265,8 +300,20 @@ export function MarketResearchLab() {
     ? `${String(activeRequest?.ticker ?? "Ticker")} | ${String(activeRequest?.horizon ?? "swing")}`
     : "No research job selected";
   const jobStatus = activeJob?.status ?? "idle";
+  const progressEvents = activeJob?.progress_events ?? [];
   const latestJobs = useMemo(() => jobs.slice(0, 8), [jobs]);
-  const runtimeWarnings = uniqueWarnings([...(runtime?.warnings ?? []), runtime?.ollama?.error ?? null]);
+  const nvidiaModelOptions = useMemo(
+    () => (runtime?.nvidia?.market_research_models ?? []).filter((model) => model.market_research_compatible),
+    [runtime?.nvidia?.market_research_models]
+  );
+  const selectedModelDetail = selectedModel
+    ? nvidiaModelOptions.find((model) => selectedModel === `${model.provider}|${model.model}`)
+    : null;
+  const nvidiaCaveats = runtime?.llm_provider === "nvidia" || selectedModel ? runtime?.nvidia?.caveats ?? [] : [];
+  const nvidiaKeyWarning = selectedModel && runtime?.nvidia?.api_key_configured === false
+    ? "NVIDIA_API_KEY is not visible to the backend; NVIDIA model overrides will fail preflight."
+    : null;
+  const runtimeWarnings = uniqueWarnings([...(runtime?.warnings ?? []), ...nvidiaCaveats, nvidiaKeyWarning, runtime?.ollama?.error ?? null]);
 
   return (
     <div className="market-research-lab">
@@ -294,6 +341,17 @@ export function MarketResearchLab() {
                 <option value="long-term">Long-term</option>
               </select>
             </label>
+            <label>
+              LLM model
+              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtime?.model_override_enabled}>
+                <option value="">Server default</option>
+                {nvidiaModelOptions.map((model) => (
+                  <option key={model.model} value={`${model.provider}|${model.model}`}>
+                    {model.display_name}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="runtime-diagnostics">
             <div>
@@ -307,6 +365,18 @@ export function MarketResearchLab() {
             <div>
               <strong>Timeouts</strong>
               <span>{runtime ? `${formatNumber(runtime.agent_timeout_seconds, 0)}s agent / ${formatNumber(runtime.llm_timeout_seconds, 0)}s LLM` : "n/a"}</span>
+            </div>
+            <div>
+              <strong>Selected model</strong>
+              <span>{selectedModelDetail?.display_name ?? "Server default"}</span>
+            </div>
+            <div>
+              <strong>Hosted guardrail</strong>
+              <span>
+                {runtime
+                  ? `${formatNumber(runtime.free_endpoint_timeout_cap_seconds ?? runtime.llm_timeout_seconds, 0)}s cap / fail-fast ${runtime.llm_fail_fast_after_failures ?? 1}`
+                  : "n/a"}
+              </span>
             </div>
             <Badge label={runtime?.llm_provider === "ollama" ? (runtime.ollama?.model_available ? "ollama ready" : "ollama needs attention") : runtime?.llm_provider ?? "runtime"} tone={runtimeTone(runtime)} />
           </div>
@@ -353,6 +423,21 @@ export function MarketResearchLab() {
             </div>
             <small>{formatNumber(jobProgress, 0)}% complete</small>
           </div>
+          <label className="trace-toggle">
+            <input type="checkbox" checked={showProgressTrace} onChange={(event) => setShowProgressTrace(event.target.checked)} />
+            Show progress trace
+          </label>
+          {showProgressTrace ? (
+            <div className="progress-trace-list">
+              {progressEvents.length ? progressEvents.slice(-24).map((event, index) => (
+                <div key={`${event.timestamp_utc}-${event.event_type}-${index}`} className="progress-trace-row">
+                  <span>{formatDateTime(event.timestamp_utc)}</span>
+                  <strong>{progressEventTitle(event)}</strong>
+                  <small>{progressEventDetail(event)}</small>
+                </div>
+              )) : <div className="empty-state">No progress trace events have been emitted yet.</div>}
+            </div>
+          ) : null}
           {latestJobs.length ? (
             <div className="market-research-job-list">
               {latestJobs.map((job) => (

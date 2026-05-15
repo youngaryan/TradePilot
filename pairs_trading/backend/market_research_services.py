@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 import json
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import pandas as pd
@@ -27,6 +27,7 @@ from ..research.market_research_agents import (
     SourceReference,
 )
 from ..research.market_research_prompts import RESEARCH_DISCLAIMER
+from ..research.nvidia_model_catalog import resolve_nvidia_model
 from .financial_events import FinancialEventsService
 from .llm_config import build_structured_llm_provider, market_research_runtime_diagnostics, preflight_market_research_llm
 from .config import BackendSettings
@@ -374,19 +375,57 @@ class MarketResearchService:
     def runtime_diagnostics(self) -> dict[str, object]:
         return market_research_runtime_diagnostics(self.settings)
 
-    def preflight_runtime(self) -> None:
+    def preflight_runtime(self, request: MarketResearchRunRequest | None = None) -> None:
         try:
-            preflight_market_research_llm(self.settings)
+            preflight_market_research_llm(self._effective_settings(request))
         except Exception as exc:
             raise ValueError(str(exc)) from exc
 
-    def _input(self, request: MarketResearchRunRequest) -> MarketResearchInput:
+    def _with_provider_runtime_limits(self, settings: BackendSettings) -> BackendSettings:
+        provider = settings.market_research_llm_provider.strip().lower()
+        if provider != "nvidia":
+            return settings
+        timeout_cap = max(5.0, float(settings.market_research_free_endpoint_timeout_cap_seconds))
+        llm_timeout = min(settings.market_research_llm_timeout_seconds, timeout_cap)
+        agent_timeout = min(settings.market_research_agent_timeout_seconds, llm_timeout + 5.0, timeout_cap + 5.0)
+        return replace(
+            settings,
+            market_research_agent_timeout_seconds=agent_timeout,
+            market_research_llm_timeout_seconds=llm_timeout,
+        )
+
+    def _effective_settings(self, request: MarketResearchRunRequest | None = None) -> BackendSettings:
+        if request is None or self.settings.is_production or not self.settings.market_research_allow_request_model_override:
+            return self._with_provider_runtime_limits(self.settings)
+        provider = str(request.provider or "").strip().lower()
+        model = str(request.model or "").strip()
+        if not provider and not model:
+            return self._with_provider_runtime_limits(self.settings)
+        provider = provider or self.settings.market_research_llm_provider
+        model = model or self.settings.market_research_llm_model
+        if provider == "nvidia":
+            spec = resolve_nvidia_model(model)
+            if spec is None:
+                raise ValueError(f"NVIDIA model '{model}' is not in the vetted research catalog.")
+            if not spec.market_research_compatible:
+                raise ValueError(f"NVIDIA model '{spec.id}' is a {spec.category} endpoint and cannot run the market research committee.")
+            model = spec.id
+        return self._with_provider_runtime_limits(
+            replace(
+                self.settings,
+                market_research_llm_provider=provider,
+                market_research_llm_model=model,
+            )
+        )
+
+    def _input(self, request: MarketResearchRunRequest, effective_settings: BackendSettings | None = None) -> MarketResearchInput:
+        runtime_settings = effective_settings or self._effective_settings(request)
         return MarketResearchInput(
             ticker=request.ticker,
             analysis_date=request.analysis_date or date.today().isoformat(),
             horizon=ResearchHorizon(str(request.horizon)),
-            provider=self.settings.market_research_llm_provider,
-            model=self.settings.market_research_llm_model,
+            provider=runtime_settings.market_research_llm_provider,
+            model=runtime_settings.market_research_llm_model,
             sentiment_dataset_id=request.sentiment_dataset_id,
             include_sentiment=request.include_sentiment,
             include_financial_events=request.include_financial_events,
@@ -401,14 +440,38 @@ class MarketResearchService:
         organization_id: str | None = None,
         user_id: str | None = None,
         job_id: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> MarketResearchReport:
-        research_input = self._input(request)
+        runtime_settings = self._effective_settings(request)
+        research_input = self._input(request, runtime_settings)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "data_collection_started",
+                    "provider": runtime_settings.market_research_llm_provider,
+                    "model": runtime_settings.market_research_llm_model,
+                }
+            )
         context = self.data_provider.collect(research_input, organization_id=organization_id, user_id=user_id)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "data_collection_completed",
+                    "provider": runtime_settings.market_research_llm_provider,
+                    "model": runtime_settings.market_research_llm_model,
+                    "price_bar_count": len(context.price_history),
+                    "news_count": len(context.news),
+                    "financial_event_count": len(context.financial_events),
+                    "warning_count": len(context.warnings),
+                }
+            )
         context.provider_metadata["job_id"] = job_id
         context.provider_metadata["user_scoped"] = bool(user_id)
         orchestrator = MarketResearchOrchestrator(
-            llm_provider=build_structured_llm_provider(self.settings),
-            per_agent_timeout_seconds=self.settings.market_research_agent_timeout_seconds,
+            llm_provider=build_structured_llm_provider(runtime_settings),
+            per_agent_timeout_seconds=runtime_settings.market_research_agent_timeout_seconds,
+            max_llm_failures=runtime_settings.market_research_llm_fail_fast_after_failures,
+            progress_callback=progress_callback,
         )
         return orchestrator.run(context)
 
@@ -428,6 +491,7 @@ class MarketResearchJob:
     stage: str = "queued"
     message: str = "Waiting for a market research worker."
     warnings: list[str] = field(default_factory=list)
+    progress_events: list[dict[str, Any]] = field(default_factory=list)
     started_at_utc: str | None = None
     finished_at_utc: str | None = None
     result: dict[str, Any] | None = None
@@ -448,6 +512,7 @@ class MarketResearchJob:
             "stage": self.stage,
             "message": self.message,
             "warnings": self.warnings,
+            "progress_events": self.progress_events,
             "started_at_utc": self.started_at_utc,
             "finished_at_utc": self.finished_at_utc,
             "result": self.result,
@@ -481,7 +546,8 @@ class MarketResearchJobRunner:
     ) -> dict[str, Any]:
         service = MarketResearchService(self.settings)
         service.validate_request(request)
-        service.preflight_runtime()
+        service.preflight_runtime(request)
+        runtime_settings = service._effective_settings(request)
         now = _utc_now_iso()
         job_id = uuid4().hex
         job = MarketResearchJob(
@@ -489,8 +555,8 @@ class MarketResearchJobRunner:
             status="queued",
             request={
                 **json_ready(request.model_dump(mode="json")),
-                "provider": self.settings.market_research_llm_provider,
-                "model": self.settings.market_research_llm_model,
+                "provider": runtime_settings.market_research_llm_provider,
+                "model": runtime_settings.market_research_llm_model,
             },
             created_at_utc=now,
             updated_at_utc=now,
@@ -545,6 +611,105 @@ class MarketResearchJobRunner:
                 setattr(job, key, value)
             self._save_locked(job)
 
+    @staticmethod
+    def _safe_progress_event(event: dict[str, Any]) -> dict[str, Any]:
+        allowed_keys = {
+            "event_type",
+            "timestamp_utc",
+            "provider",
+            "model",
+            "agent_name",
+            "display_name",
+            "agent_version",
+            "agent_index",
+            "total_agents",
+            "status",
+            "duration_ms",
+            "latency_ms",
+            "confidence",
+            "signal_count",
+            "warning_count",
+            "price_bar_count",
+            "news_count",
+            "financial_event_count",
+            "usage",
+            "error",
+        }
+        safe = {key: value for key, value in event.items() if key in allowed_keys}
+        safe.setdefault("timestamp_utc", _utc_now_iso())
+        safe["event_type"] = str(safe.get("event_type") or "progress")
+        if "error" in safe:
+            safe["error"] = str(safe["error"])[:500]
+        if "usage" in safe and not isinstance(safe["usage"], dict):
+            safe.pop("usage", None)
+        return json_ready(safe)
+
+    @staticmethod
+    def _progress_status_from_event(event: dict[str, Any]) -> tuple[float, str, str]:
+        event_type = str(event.get("event_type") or "progress")
+        display_name = str(event.get("display_name") or event.get("agent_name") or "research agent")
+        provider = str(event.get("provider") or "unknown")
+        model = str(event.get("model") or "unknown")
+        index = int(event.get("agent_index") or 0)
+        total = max(1, int(event.get("total_agents") or 8))
+        ordinal = min(total, max(1, index + 1))
+        offset_by_event = {
+            "agent_started": 0.02,
+            "deterministic_baseline_started": 0.10,
+            "deterministic_baseline_completed": 0.24,
+            "llm_refinement_started": 0.42,
+            "llm_refinement_completed": 0.78,
+            "llm_refinement_failed": 0.78,
+            "llm_refinement_skipped": 0.78,
+            "agent_completed": 0.96,
+            "agent_timeout": 0.96,
+            "agent_failed": 0.96,
+        }
+        if event_type == "data_collection_started":
+            return 0.12, "collecting_data", "Collecting market research context and provenance."
+        if event_type == "data_collection_completed":
+            return 0.16, "preparing_agents", "Data context collected. Starting the research committee."
+        if event_type == "llm_refinement_started":
+            return 0.16 + 0.68 * ((index + offset_by_event[event_type]) / total), "calling_llm", (
+                f"Calling {provider}/{model} for {display_name} ({ordinal}/{total})."
+            )
+        if event_type == "llm_refinement_completed":
+            latency = event.get("latency_ms")
+            detail = f" in {latency} ms" if latency is not None else ""
+            return 0.16 + 0.68 * ((index + offset_by_event[event_type]) / total), "llm_completed", (
+                f"{display_name} LLM refinement completed{detail} ({ordinal}/{total})."
+            )
+        if event_type == "llm_refinement_failed":
+            return 0.16 + 0.68 * ((index + offset_by_event[event_type]) / total), "llm_fallback", (
+                f"{display_name} LLM refinement failed; deterministic fallback is being used ({ordinal}/{total})."
+            )
+        if event_type == "llm_refinement_skipped":
+            return 0.16 + 0.68 * ((index + offset_by_event[event_type]) / total), "llm_skipped", (
+                f"{display_name} skipped hosted LLM after prior provider failure; deterministic baseline is being used ({ordinal}/{total})."
+            )
+        if event_type in offset_by_event:
+            readable = event_type.replace("_", " ")
+            return 0.16 + 0.68 * ((index + offset_by_event[event_type]) / total), "running_agent", (
+                f"{display_name}: {readable} ({ordinal}/{total})."
+            )
+        return 0.16, "running_agent", "Market research committee is running."
+
+    def _record_progress_event(self, job_id: str, event: dict[str, Any]) -> None:
+        safe_event = self._safe_progress_event(event)
+        progress, stage, message = self._progress_status_from_event(safe_event)
+        now = _utc_now_iso()
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return
+            job.status = "running"
+            job.updated_at_utc = now
+            job.progress = max(float(job.progress or 0.0), min(float(progress), 0.84))
+            job.stage = stage
+            job.message = message
+            job.progress_events = [*job.progress_events, safe_event][-200:]
+            self._save_locked(job)
+
     def _run_job(self, job_id: str, request: MarketResearchRunRequest, organization_id: str) -> None:
         self._set_status(
             job_id,
@@ -561,7 +726,7 @@ class MarketResearchJobRunner:
         self._persist_report_record(job, status="running")
         try:
             service = MarketResearchService(self.settings)
-            service.preflight_runtime()
+            service.preflight_runtime(request)
             self._set_status(
                 job_id,
                 "running",
@@ -574,6 +739,7 @@ class MarketResearchJobRunner:
                 organization_id=organization_id,
                 user_id=job.user_id,
                 job_id=job_id,
+                progress_callback=lambda event: self._record_progress_event(job_id, event),
             )
             result = report.model_dump(mode="json")
             result["report_id"] = job.report_id
@@ -671,8 +837,8 @@ class MarketResearchJobRunner:
             "financial_events_analysis": (result or {}).get("financial_events_analysis", {}),
         }
         provider_metadata = dict((result or {}).get("metadata") or {})
-        provider_metadata.setdefault("llm_provider", self.settings.market_research_llm_provider)
-        provider_metadata.setdefault("llm_model", self.settings.market_research_llm_model)
+        provider_metadata.setdefault("llm_provider", request.get("provider") or self.settings.market_research_llm_provider)
+        provider_metadata.setdefault("llm_model", request.get("model") or self.settings.market_research_llm_model)
         provider_metadata.setdefault("prompt_version", (result or {}).get("metadata", {}).get("prompt_version"))
         provider_metadata["job_id"] = job.id
         provider_metadata["user_scoped"] = bool(job.user_id)
