@@ -96,7 +96,8 @@ class BackendMarketResearchDataProvider:
 
     def _collect_cached_yahoo(self, request: MarketResearchInput) -> MarketResearchContext:
         asof = date.fromisoformat(request.analysis_date)
-        start = asof - timedelta(days=self._lookback_days(request.horizon, request.lookback_days))
+        lookback = self._lookback_days(request.horizon, request.lookback_days)
+        start = asof - timedelta(days=lookback)
         end = asof + timedelta(days=1)
         prices = self._provider().get_close_prices(
             [request.ticker],
@@ -109,13 +110,32 @@ class BackendMarketResearchDataProvider:
         series = pd.to_numeric(prices[request.ticker], errors="coerce").dropna().sort_index()
         if series.empty:
             raise ValueError(f"Close-price rows for {request.ticker} were empty after cleaning.")
+        effective_start = start
+        extension_warning: str | None = None
+        used_extended_window = False
+        if len(series) < 20 and lookback < 365:
+            extended_start = asof - timedelta(days=365)
+            try:
+                extended_prices = self._provider().get_close_prices(
+                    [request.ticker],
+                    start=extended_start.isoformat(),
+                    end=end.isoformat(),
+                    interval="1d",
+                )
+            except Exception as exc:
+                extension_warning = f"Price history had fewer than 20 rows and 365-day extension was unavailable: {exc}"
+            else:
+                if request.ticker in extended_prices.columns:
+                    extended_series = pd.to_numeric(extended_prices[request.ticker], errors="coerce").dropna().sort_index()
+                    if len(extended_series) > len(series):
+                        series = extended_series
+                        effective_start = extended_start
+                        used_extended_window = True
         bars = [
             PriceBar(date=pd.Timestamp(index).strftime("%Y-%m-%d"), close=round(float(value), 6))
             for index, value in series.items()
         ]
-        warnings = [
-            "News/sentiment and fundamental providers are not configured for this market-research run.",
-        ]
+        warnings = [extension_warning] if extension_warning else []
         return MarketResearchContext(
             ticker=request.ticker,
             analysis_date=request.analysis_date,
@@ -133,7 +153,7 @@ class BackendMarketResearchDataProvider:
                 DataProvenance(
                     source="price_history",
                     provider="CachedParquetProvider/YahooFinanceProvider",
-                    detail=f"Daily close prices from {start.isoformat()} through {request.analysis_date}.",
+                    detail=f"Daily close prices from {effective_start.isoformat()} through {request.analysis_date}.",
                 ),
                 DataProvenance(
                     source="news",
@@ -151,6 +171,7 @@ class BackendMarketResearchDataProvider:
             provider_metadata={
                 "backend_data_provider": "cached_yahoo",
                 "price_rows": len(bars),
+                "price_extended_window": used_extended_window,
                 "model": request.model,
             },
         )

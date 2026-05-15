@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, BrainCircuit, FileText, Loader2, Play, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, BrainCircuit, ChevronDown, FileText, Loader2, Play, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
 
 import { getMarketResearchJob, getMarketResearchRuntime, listMarketResearchJobs, startMarketResearchJob } from "../api/client";
-import type { MarketResearchJob, MarketResearchReport, MarketResearchRuntimeConfig, MarketResearchSignal } from "../api/types";
+import type { MarketResearchAgentOutput, MarketResearchJob, MarketResearchReport, MarketResearchRuntimeConfig, MarketResearchSignal } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel } from "../components/Cards";
 import { formatDateTime, formatNumber, statusTone } from "../utils/format";
@@ -54,17 +54,105 @@ function progressEventTitle(event: NonNullable<MarketResearchJob["progress_event
   return event.event_type.replaceAll("_", " ");
 }
 
-function progressEventDetail(event: NonNullable<MarketResearchJob["progress_events"]>[number]) {
-  const parts: string[] = [];
-  if (event.provider && event.model) parts.push(`${event.provider} / ${event.model}`);
-  if (typeof event.latency_ms === "number") parts.push(`${event.latency_ms} ms`);
-  if (typeof event.confidence === "number") parts.push(`confidence ${event.confidence}`);
-  if (typeof event.signal_count === "number") parts.push(`${event.signal_count} signal(s)`);
-  if (typeof event.warning_count === "number" && event.warning_count > 0) parts.push(`${event.warning_count} warning(s)`);
-  if (typeof event.price_bar_count === "number") parts.push(`${event.price_bar_count} price bars`);
-  if (typeof event.news_count === "number") parts.push(`${event.news_count} news rows`);
-  if (event.error) parts.push(event.error);
-  return parts.join(" | ");
+function ProgressTraceRow({ event, agentData }: { event: NonNullable<MarketResearchJob["progress_events"]>[number]; agentData?: Record<string, MarketResearchAgentOutput> }) {
+  const [expandedBadge, setExpandedBadge] = useState<string | null>(null);
+  const isError = event.event_type?.includes("fail") || event.event_type?.includes("error") || event.event_type === "agent_timeout";
+  const isWarning = event.event_type?.includes("skip") || (typeof event.warning_count === "number" && event.warning_count > 0 && !isError);
+  const showEventIcon = (isError || event.event_type === "llm_refinement_skipped") && event.error;
+  const matchedAgent = event.agent_name ? agentData?.[event.agent_name] : null;
+
+  function BadgePill({ id, className, children, detail }: { id: string; className: string; children: React.ReactNode; detail: React.ReactNode }) {
+    const active = expandedBadge === id;
+    return (
+      <div className={`badge-pill-wrapper ${active ? "badge-pill-wrapper--active" : ""}`}>
+        <button type="button" className={`badge ${className}`} onClick={() => setExpandedBadge(active ? null : id)}>
+          {children}
+        </button>
+        {active ? (
+          <div className="badge-pill-detail">{detail}</div>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="progress-trace-row">
+      <div className="progress-trace__header">
+        <span className="progress-trace__time">{formatDateTime(event.timestamp_utc)}</span>
+        <strong className="progress-trace__title">{progressEventTitle(event)}</strong>
+      </div>
+      <div className="progress-trace__meta">
+        {event.provider && event.model ? (
+          <BadgePill id="provider" className="badge--neutral" detail={<span>{event.provider} / {event.model}</span>}>
+            {event.provider}/{event.model}
+          </BadgePill>
+        ) : null}
+        {typeof event.latency_ms === "number" ? (
+          <BadgePill id="latency" className="badge--neutral" detail={<span>{event.latency_ms} ms</span>}>
+            {event.latency_ms} ms
+          </BadgePill>
+        ) : null}
+        {typeof event.confidence === "number" ? (
+          <BadgePill id="confidence" className="badge--good" detail={<span>{event.confidence}/100 - {progressEventTitle(event)}</span>}>
+            confidence {event.confidence}
+          </BadgePill>
+        ) : null}
+        {typeof event.signal_count === "number" ? (
+          <BadgePill id="signals" className="badge--info" detail={
+            <div>
+              {matchedAgent?.signals?.length ? (
+                <div className="badge-detail-tags">
+                  {matchedAgent.signals.map((s) => (
+                    <span key={s.label} className="badge-detail-tag badge-detail-tag--signal">{s.label.replaceAll("_", " ")}</span>
+                  ))}
+                </div>
+              ) : <span>{event.signal_count} signal(s)</span>}
+            </div>
+          }>
+            {event.signal_count} signal(s)
+          </BadgePill>
+        ) : null}
+        {typeof event.warning_count === "number" && event.warning_count > 0 ? (
+          <BadgePill id="warnings" className="badge--warn" detail={
+            <div>
+              {matchedAgent?.warnings?.length ? (
+                <div className="badge-detail-tags">
+                  {matchedAgent.warnings.map((w, i) => (
+                    <span key={i} className="badge-detail-tag badge-detail-tag--warning">{w}</span>
+                  ))}
+                </div>
+              ) : event.error ? (
+                <span>{event.error}</span>
+              ) : <span>{event.warning_count} warning(s)</span>}
+            </div>
+          }>
+            {event.warning_count} warning(s)
+          </BadgePill>
+        ) : null}
+        {typeof event.price_bar_count === "number" ? (
+          <BadgePill id="bars" className="badge--neutral" detail={<span>{event.price_bar_count} price bars</span>}>
+            {event.price_bar_count} price bars
+          </BadgePill>
+        ) : null}
+        {typeof event.news_count === "number" ? (
+          <BadgePill id="news" className="badge--neutral" detail={<span>{event.news_count} news rows</span>}>
+            {event.news_count} news rows
+          </BadgePill>
+        ) : null}
+        {typeof event.financial_event_count === "number" ? (
+          <BadgePill id="finance" className="badge--neutral" detail={<span>{event.financial_event_count} financial events</span>}>
+            {event.financial_event_count} financial event(s)
+          </BadgePill>
+        ) : null}
+      </div>
+      {showEventIcon && event.error ? (
+        <div className={isError ? "inline-error" : "inline-warning"}>
+          {isError ? <XCircle size={16} /> : <AlertTriangle size={16} />}
+          <span>{event.error}</span>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function reportMetadata(report: MarketResearchReport) {
@@ -92,26 +180,121 @@ function SignalList({ signals, empty }: { signals: MarketResearchSignal[]; empty
   return (
     <div className="market-research-signal-list">
       {signals.map((signal) => (
-        <article key={`${signal.label}-${signal.rationale}`} className="market-research-signal">
-          <div>
-            <strong>{signal.label.replaceAll("_", " ")}</strong>
-            <span>{signal.rationale}</span>
-          </div>
+        <ExpandableSignal key={`${signal.label}-${signal.rationale}`} signal={signal} />
+      ))}
+    </div>
+  );
+}
+
+function ExpandableSignal({ signal }: { signal: MarketResearchSignal }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <article className={`market-research-signal ${expanded ? "market-research-signal--expanded" : ""}`}>
+      <button type="button" className="signal-header" onClick={() => setExpanded((prev) => !prev)}>
+        <div>
+          <strong>{signal.label.replaceAll("_", " ")}</strong>
+          <span>{signal.rationale}</span>
+        </div>
+        <div className="signal-header-right">
           <div className="signal-score">
             <Badge label={signal.direction} tone={directionTone(signal.direction)} />
             <strong>{formatNumber(signal.strength, 0)}</strong>
           </div>
+          <ChevronDown size={16} className={`signal-chevron ${expanded ? "signal-chevron--open" : ""}`} />
+        </div>
+      </button>
+      {expanded ? (
+        <div className="signal-details">
           {signal.evidence.length ? (
-            <ul>
-              {signal.evidence.slice(0, 3).map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+            <div className="signal-detail-section">
+              <h4>Evidence</h4>
+              <ul>
+                {signal.evidence.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
           ) : null}
-        </article>
+          {signal.provenance.length ? (
+            <div className="signal-detail-section">
+              <h4>Sources</h4>
+              <ul>
+                {signal.provenance.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function WarningList({ warnings }: { warnings: string[] }) {
+  if (!warnings.length) return null;
+  return (
+    <div className="warning-list warning-list--compact">
+      {warnings.map((warning, index) => (
+        <ExpandableWarning key={`${index}-${warning}`} warning={warning} />
       ))}
     </div>
   );
+}
+
+function ExpandableWarning({ warning }: { warning: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={`warning-item ${expanded ? "warning-item--expanded" : ""}`}>
+      <button type="button" className="warning-item-header" onClick={() => setExpanded((prev) => !prev)}>
+        <AlertTriangle size={14} />
+        <span>{warning}</span>
+        <ChevronDown size={14} className={`warning-chevron ${expanded ? "warning-chevron--open" : ""}`} />
+      </button>
+      {expanded ? (
+        <div className="warning-item-detail">
+          <p>{warning}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ConfidenceCard({ report }: { report: MarketResearchReport }) {
+  const [expanded, setExpanded] = useState(false);
+  const mainTone = report.confidence >= 70 ? "good" as const : report.confidence >= 40 ? "info" as const : "bad" as const;
+  return (
+    <div className={`confidence-card ${expanded ? "confidence-card--expanded" : ""}`}>
+      <button type="button" className={`confidence-card-header metric-card metric-card--${mainTone}`} onClick={() => setExpanded((prev) => !prev)}>
+        <span className="metric-card__top">
+          <span>Confidence</span>
+        </span>
+        <strong>{formatNumber(report.confidence, 0)}/100</strong>
+        <small>Click for breakdown</small>
+      </button>
+      {expanded ? (
+        <div className="confidence-breakdown">
+          {report.raw_agent_outputs.length ? (
+            <>
+              <h4>Agent Confidence Breakdown</h4>
+              <div className="confidence-agent-list">
+                {report.raw_agent_outputs.map((agent) => (
+                  <div key={agent.agent_name} className="confidence-agent-row">
+                    <span className="confidence-agent-name">{agent.display_name}</span>
+                    <div className="confidence-agent-bar-track">
+                      <div className="confidence-agent-bar" style={{ width: `${clampPercent(agent.confidence)}%` }} />
+                    </div>
+                    <span className="confidence-agent-value">{agent.confidence}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
 }
 
 function ReportView({ report }: { report: MarketResearchReport }) {
@@ -127,7 +310,7 @@ function ReportView({ report }: { report: MarketResearchReport }) {
 
       <div className="metric-grid">
         <MetricCard label="Decision" value={report.decision} detail={report.time_horizon} tone={decisionTone(report.decision)} icon={<BrainCircuit size={18} />} />
-        <MetricCard label="Confidence" value={`${formatNumber(report.confidence, 0)}/100`} detail={`Created ${formatDateTime(report.created_at_utc)}`} tone="info" />
+        <ConfidenceCard report={report} />
         <MetricCard label="Ticker" value={report.ticker} detail={`Analysis date ${report.analysis_date}`} />
         <MetricCard label="Agents" value={`${auditCompleted}/${report.audit_trail.length}`} detail="Completed committee roles" tone={auditCompleted === report.audit_trail.length ? "good" : "warn"} />
         <MetricCard label="LLM" value={metadata.llmProvider} detail={metadata.llmModel} tone={metadata.llmProvider === "mock" ? "warn" : "info"} />
@@ -167,11 +350,7 @@ function ReportView({ report }: { report: MarketResearchReport }) {
       </div>
 
       <Panel title="Data Quality And Warnings" subtitle="Provider coverage, missing data, and audit caveats">
-        <div className="warning-list warning-list--compact">
-          {warningItems.map((warning, index) => (
-            <span key={`${index}-${warning}`}>{warning}</span>
-          ))}
-        </div>
+        <WarningList warnings={warningItems} />
       </Panel>
 
       <div className="content-grid">
@@ -293,7 +472,16 @@ export function MarketResearchLab() {
     return () => window.clearInterval(timer);
   }, [activeJob?.id, activeJob?.status]);
 
-  const report = activeJob?.result ?? jobs.find((job) => job.result)?.result ?? null;
+  const activeReport = activeJob?.result ?? null;
+  const report = activeReport ?? jobs.find((job) => job.result)?.result ?? null;
+  const agentData = useMemo(() => {
+    if (!activeReport?.raw_agent_outputs) return {};
+    const map: Record<string, MarketResearchAgentOutput> = {};
+    for (const agent of activeReport.raw_agent_outputs) {
+      map[agent.agent_name] = agent;
+    }
+    return map;
+  }, [activeReport]);
   const jobProgress = Math.round((activeJob?.progress ?? (isRunning ? 0.04 : 0)) * 100);
   const activeRequest = activeJob?.request as { ticker?: unknown; horizon?: unknown; analysis_date?: unknown } | undefined;
   const jobTitle = activeJob
@@ -430,11 +618,7 @@ export function MarketResearchLab() {
           {showProgressTrace ? (
             <div className="progress-trace-list">
               {progressEvents.length ? progressEvents.slice(-24).map((event, index) => (
-                <div key={`${event.timestamp_utc}-${event.event_type}-${index}`} className="progress-trace-row">
-                  <span>{formatDateTime(event.timestamp_utc)}</span>
-                  <strong>{progressEventTitle(event)}</strong>
-                  <small>{progressEventDetail(event)}</small>
-                </div>
+                <ProgressTraceRow key={`${event.timestamp_utc}-${event.event_type}-${index}`} event={event} agentData={agentData} />
               )) : <div className="empty-state">No progress trace events have been emitted yet.</div>}
             </div>
           ) : null}

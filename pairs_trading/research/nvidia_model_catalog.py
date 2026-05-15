@@ -59,6 +59,26 @@ NVIDIA_FREE_ENDPOINT_MODELS: tuple[NvidiaFreeEndpointModel, ...] = (
         market_research_compatible=True,
     ),
     NvidiaFreeEndpointModel(
+        id="meta/llama-4-maverick-17b-128e-instruct",
+        display_name="Llama 4 Maverick 17B 128E Instruct",
+        provider="Meta",
+        category="multimodal_llm",
+        endpoint="chat_completions",
+        recommendation="conditionally_recommended",
+        recommended_for=(
+            "financial_news_analysis",
+            "summarisation",
+            "structured_extraction",
+            "agentic_research",
+            "vision_language_analysis",
+        ),
+        limitations=(
+            "NVIDIA free endpoint is for evaluation/prototyping, not production.",
+            "Not finance-specialized; validate every extracted ticker, entity, and risk signal.",
+        ),
+        market_research_compatible=True,
+    ),
+    NvidiaFreeEndpointModel(
         id="mistralai/mistral-nemotron",
         display_name="Mistral-Nemotron",
         provider="Mistral AI / NVIDIA",
