@@ -9,8 +9,11 @@ import json
 import math
 import re
 import time
-from typing import Any, Protocol, Sequence, TypeVar
+from threading import Lock
+from typing import Any, Callable, Protocol, Sequence, TypeVar
 
+import numpy as np
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .llm_providers import LLMCallResult, MockStructuredLLMProvider, StructuredLLMProvider
@@ -353,6 +356,32 @@ def _all_signals(outputs: Sequence[AgentOutput]) -> list[ResearchSignal]:
     return signals
 
 
+def _compute_rsi(prices: pd.Series, window: int = 14) -> pd.Series:
+    delta = prices.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain = gains.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
+    avg_loss = losses.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.mask((avg_loss == 0.0) & (avg_gain > 0.0), 100.0)
+    rsi = rsi.mask((avg_gain == 0.0) & (avg_loss > 0.0), 0.0)
+    rsi = rsi.mask((avg_gain == 0.0) & (avg_loss == 0.0), 50.0)
+    return rsi.fillna(50.0)
+
+
+def _ema(prices: pd.Series, span: int) -> pd.Series:
+    return prices.ewm(span=span, adjust=False, min_periods=span).mean()
+
+
+def _score_label(value: int) -> str:
+    if value > 0:
+        return "bullish"
+    if value < 0:
+        return "bearish"
+    return "neutral"
+
+
 @dataclass(frozen=True)
 class TechnicalAnalyst:
     agent_name: str = "technical_analyst"
@@ -362,7 +391,9 @@ class TechnicalAnalyst:
     def run(self, context: MarketResearchContext, previous_outputs: Sequence[AgentOutput]) -> AgentOutput:
         del previous_outputs
         closes = [bar.close for bar in context.price_history if bar.close > 0]
-        if len(closes) < 5:
+        n = len(closes)
+
+        if n < 5:
             return AgentOutput(
                 agent_name=self.agent_name,
                 display_name=self.display_name,
@@ -380,59 +411,289 @@ class TechnicalAnalyst:
                 ],
             )
 
-        lookback_20 = closes[-20:] if len(closes) >= 20 else closes
-        lookback_50 = closes[-50:] if len(closes) >= 50 else closes
-        return_20 = _pct_change(lookback_20[0], lookback_20[-1])
-        return_50 = _pct_change(lookback_50[0], lookback_50[-1])
-        sma_20 = _mean(lookback_20)
-        sma_50 = _mean(lookback_50)
-        daily_returns = [_pct_change(closes[index - 1], closes[index]) for index in range(1, len(closes))]
-        recent_returns = daily_returns[-20:] if len(daily_returns) >= 20 else daily_returns
-        volatility = math.sqrt(sum((item - _mean(recent_returns)) ** 2 for item in recent_returns) / max(len(recent_returns), 1))
-        annualized_vol = volatility * math.sqrt(252)
-        if return_20 > 0.03 and closes[-1] >= sma_20:
-            direction = SignalDirection.BULLISH
-            strength = min(85, 52 + int(return_20 * 450))
-        elif return_20 < -0.03 and closes[-1] <= sma_20:
-            direction = SignalDirection.BEARISH
-            strength = min(85, 52 + int(abs(return_20) * 450))
+        prices = pd.Series(closes, dtype=float)
+        latest = float(prices.iloc[-1])
+        daily_returns = prices.pct_change().fillna(0.0)
+
+        # ------------------------------------------------------------------
+        # 1. Trend - SMA & EMA crossovers, regression slope
+        # ------------------------------------------------------------------
+        has_20 = n >= 20
+        has_50 = n >= 50
+        has_200 = n >= 200
+
+        sma_20 = prices.rolling(20).mean() if has_20 else pd.Series(index=prices.index, dtype=float)
+        sma_50 = prices.rolling(50).mean() if has_50 else None
+        sma_200 = prices.rolling(200).mean() if has_200 else None
+
+        ema_8 = _ema(prices, 8)
+        ema_21 = _ema(prices, 21)
+
+        ema_cross = 1 if n >= 21 and ema_8.iloc[-1] > ema_21.iloc[-1] else -1 if n >= 21 and ema_8.iloc[-1] < ema_21.iloc[-1] else 0
+        price_vs_sma20 = 1 if has_20 and latest > sma_20.iloc[-1] else -1 if has_20 and latest < sma_20.iloc[-1] else 0
+        sma50_vs_sma200 = (
+            1
+            if has_50 and has_200 and sma_50.iloc[-1] > sma_200.iloc[-1]
+            else -1
+            if has_50 and has_200 and sma_50.iloc[-1] < sma_200.iloc[-1]
+            else 0
+        )
+
+        # Linear regression slope over last 20 bars (as % per bar)
+        if n >= 20:
+            x = np.arange(20, dtype=float)
+            y = prices.iloc[-20:].values
+            slope, _ = np.polyfit(x, y, 1)
+            slope_pct = slope / float(np.mean(y)) * 100
         else:
-            direction = SignalDirection.NEUTRAL
-            strength = 42
-        signals = [
-            ResearchSignal(
-                label="price_trend",
-                direction=direction,
-                strength=strength,
-                rationale=f"20-bar return is {return_20:+.2%}; 50-bar return is {return_50:+.2%}.",
-                evidence=[f"last_close={closes[-1]:.2f}", f"sma20={sma_20:.2f}", f"sma50={sma_50:.2f}"],
-                provenance=["price_history"],
+            slope_pct = 0.0
+
+        trend_score = ema_cross * 25 + price_vs_sma20 * 20 + sma50_vs_sma200 * 20
+        slope_signal = min(15, max(-15, int(slope_pct * 30)))
+        trend_score += slope_signal
+
+        if trend_score >= 30:
+            trend_dir = SignalDirection.BULLISH
+            trend_str = min(90, int(30 + abs(trend_score) * 0.6))
+        elif trend_score <= -30:
+            trend_dir = SignalDirection.BEARISH
+            trend_str = min(90, int(30 + abs(trend_score) * 0.6))
+        else:
+            trend_dir = SignalDirection.NEUTRAL
+            trend_str = 40
+
+        # ------------------------------------------------------------------
+        # 2. Momentum - MACD, RSI, ROC
+        # ------------------------------------------------------------------
+        if n >= 35:
+            macd_line = _ema(prices, 12) - _ema(prices, 26)
+            macd_signal = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
+            macd_hist_v = float(macd_line.iloc[-1] - macd_signal.iloc[-1])
+            macd_hist = 0.0 if math.isnan(macd_hist_v) else macd_hist_v
+            macd_dir = SignalDirection.BULLISH if macd_hist > 0 else SignalDirection.BEARISH if macd_hist < 0 else SignalDirection.NEUTRAL
+        else:
+            macd_hist = 0.0
+            macd_dir = SignalDirection.NEUTRAL
+
+        rsi_series = _compute_rsi(prices, 14) if n >= 14 else pd.Series(50.0, index=prices.index)
+        rsi_val = float(rsi_series.iloc[-1])
+
+        if rsi_val >= 70:
+            rsi_dir = SignalDirection.BEARISH
+        elif rsi_val <= 30:
+            rsi_dir = SignalDirection.BULLISH
+        else:
+            rsi_dir = SignalDirection.NEUTRAL
+
+        roc_10 = float(prices.pct_change(10).iloc[-1]) if n >= 11 else 0.0
+        roc_21 = float(prices.pct_change(21).iloc[-1]) if n >= 22 else 0.0
+
+        momentum_bull = (
+            int(macd_dir == SignalDirection.BULLISH) * 20
+            + int(rsi_dir == SignalDirection.BULLISH) * 10
+            + int(roc_10 > 0.02) * 15
+            + int(roc_21 > 0.03) * 15
+        )
+        momentum_bear = (
+            int(macd_dir == SignalDirection.BEARISH) * 20
+            + int(rsi_dir == SignalDirection.BEARISH) * 10
+            + int(roc_10 < -0.02) * 15
+            + int(roc_21 < -0.03) * 15
+        )
+        if momentum_bull > momentum_bear:
+            mom_dir = SignalDirection.BULLISH
+            mom_str = min(85, int(40 + (momentum_bull - momentum_bear) * 0.8))
+        elif momentum_bear > momentum_bull:
+            mom_dir = SignalDirection.BEARISH
+            mom_str = min(85, int(40 + (momentum_bear - momentum_bull) * 0.8))
+        else:
+            mom_dir = SignalDirection.NEUTRAL
+            mom_str = 30
+
+        # ------------------------------------------------------------------
+        # 3. Volatility - ATR proxy, Bollinger width, annualized vol
+        # ------------------------------------------------------------------
+        atr_14 = float(daily_returns.abs().rolling(14).mean().iloc[-1]) if n >= 14 else 0.0
+        annualized_vol = float(daily_returns.std() * math.sqrt(252)) if n > 1 else 0.0
+
+        bb_width = 0.0
+        bb_position = 0.5
+        if has_20:
+            bb_mid = sma_20
+            bb_std = prices.rolling(20).std(ddof=0)
+            bb_upper = bb_mid + 2.0 * bb_std
+            bb_lower = bb_mid - 2.0 * bb_std
+            bb_width = float(((bb_upper - bb_lower) / bb_mid).iloc[-1])
+            bb_pos_val = (latest - float(bb_lower.iloc[-1])) / max(float(bb_upper.iloc[-1] - bb_lower.iloc[-1]), 1e-10)
+            bb_position = max(0.0, min(1.0, bb_pos_val))
+
+        vol_high = annualized_vol > 0.40
+        vol_dir = SignalDirection.BEARISH if vol_high else SignalDirection.NEUTRAL
+        vol_str = min(85, int(annualized_vol * 150)) if vol_high else min(40, int(annualized_vol * 80))
+
+        # ------------------------------------------------------------------
+        # 4. Mean-reversion / exhaustion - z-score, Bollinger position
+        # ------------------------------------------------------------------
+        if has_20:
+            zscore = float(((latest - float(sma_20.iloc[-1])) / max(float(prices.rolling(20).std(ddof=0).iloc[-1]), 1e-10)))
+        else:
+            zscore = 0.0
+
+        if zscore >= 2.0:
+            mr_dir = SignalDirection.BEARISH
+            mr_str = min(70, int((zscore - 2.0) * 25 + 30))
+        elif zscore <= -2.0:
+            mr_dir = SignalDirection.BULLISH
+            mr_str = min(70, int((abs(zscore) - 2.0) * 25 + 30))
+        else:
+            mr_dir = SignalDirection.NEUTRAL
+            mr_str = int(abs(zscore) * 12)
+
+        # ------------------------------------------------------------------
+        # 5. Build signals
+        # ------------------------------------------------------------------
+        signals = []
+
+        signals.append(ResearchSignal(
+            label="trend",
+            direction=trend_dir,
+            strength=trend_str,
+            rationale=(
+                f"EMA8/21 cross={_score_label(ema_cross)}, price/SMA20={_score_label(price_vs_sma20)}, "
+                f"SMA50/200={_score_label(sma50_vs_sma200)}, "
+                f"regression slope={slope_pct:+.3f}%/bar."
             ),
-            ResearchSignal(
-                label="volatility",
-                direction=SignalDirection.BEARISH if annualized_vol > 0.35 else SignalDirection.NEUTRAL,
-                strength=min(90, int(annualized_vol * 180)),
-                rationale=f"Estimated annualized volatility is {annualized_vol:.2%}.",
-                evidence=[f"support={min(lookback_20):.2f}", f"resistance={max(lookback_20):.2f}"],
-                provenance=["price_history"],
+            evidence=[f"last_close={latest:.2f}", f"sma20={float(sma_20.iloc[-1]):.2f}" if has_20 else "sma20=na",
+                      f"slope_pct={slope_pct:+.4f}", f"trend_score={trend_score}"],
+            provenance=["price_history"],
+        ))
+
+        signals.append(ResearchSignal(
+            label="momentum",
+            direction=mom_dir,
+            strength=mom_str,
+            rationale=(
+                f"MACD hist={macd_hist:+.4f}, RSI={rsi_val:.0f}, "
+                f"ROC10={roc_10:+.2%}, ROC21={roc_21:+.2%}."
             ),
-        ]
+            evidence=[f"macd_histogram={macd_hist:+.4f}", f"rsi_14={rsi_val:.1f}",
+                      f"roc_10d={roc_10:+.4f}", f"roc_21d={roc_21:+.4f}"],
+            provenance=["price_history"],
+        ))
+
+        signals.append(ResearchSignal(
+            label="volatility",
+            direction=vol_dir,
+            strength=vol_str,
+            rationale=(
+                f"Annualized vol={annualized_vol:.1%}, ATR(14)={atr_14:.4f}, "
+                f"Bollinger width={bb_width:.2%}."
+            ),
+            evidence=[f"annualized_vol={annualized_vol:.4f}", f"atr_14={atr_14:.6f}",
+                      f"bb_width={bb_width:.4f}", f"bb_position={bb_position:.2f}"],
+            provenance=["price_history"],
+        ))
+
+        signals.append(ResearchSignal(
+            label="mean_reversion",
+            direction=mr_dir,
+            strength=mr_str,
+            rationale=(
+                f"20-bar z-score={zscore:+.2f}, Bollinger position={bb_position:.2%}, "
+                f"RSI={rsi_val:.0f}."
+            ),
+            evidence=[f"zscore_20={zscore:+.4f}", f"bb_position={bb_position:.4f}"],
+            provenance=["price_history"],
+        ))
+
+        # ------------------------------------------------------------------
+        # 6. Composite - weighted consensus
+        # ------------------------------------------------------------------
+        composite = 0
+        composite += trend_str * (1 if trend_dir == SignalDirection.BULLISH else -1 if trend_dir == SignalDirection.BEARISH else 0)
+        composite += mom_str * (1 if mom_dir == SignalDirection.BULLISH else -1 if mom_dir == SignalDirection.BEARISH else 0)
+        composite += mr_str * (1 if mr_dir == SignalDirection.BULLISH else -1 if mr_dir == SignalDirection.BEARISH else 0)
+        composite -= vol_str * (1 if vol_dir == SignalDirection.BEARISH else 0)
+        n_components = 4
+        avg = composite / max(n_components, 1)
+
+        if avg >= 15:
+            composite_dir = SignalDirection.BULLISH
+            composite_str = min(90, int(35 + abs(avg) * 1.2))
+        elif avg <= -15:
+            composite_dir = SignalDirection.BEARISH
+            composite_str = min(90, int(35 + abs(avg) * 1.2))
+        else:
+            composite_dir = SignalDirection.NEUTRAL
+            composite_str = int(35 + abs(avg))
+
+        signals.append(ResearchSignal(
+            label="technical_composite",
+            direction=composite_dir,
+            strength=composite_str,
+            rationale=(
+                f"Weighted consensus score={avg:+.1f}. Trend={trend_dir.value}({trend_str}), "
+                f"Momentum={mom_dir.value}({mom_str}), Volatility={vol_dir.value}({vol_str}), "
+                f"MeanRev={mr_dir.value}({mr_str})."
+            ),
+            evidence=[f"composite_score={avg:+.2f}", f"bar_count={n}",
+                      f"annualized_vol={annualized_vol:.4f}"],
+            provenance=["price_history"],
+        ))
+
+        # ------------------------------------------------------------------
+        # 7. Confidence & warnings
+        # ------------------------------------------------------------------
+        data_quality = 0
+        warnings: list[str] = []
+        if n < 50:
+            data_quality -= 10
+            warnings.append("Price history has fewer than 50 bars; long-term indicators are unavailable.")
+        if n < 20:
+            data_quality -= 15
+            warnings.append("Price history has fewer than 20 bars; most indicators are unreliable.")
+        if annualized_vol > 0.50:
+            data_quality -= 8
+            warnings.append("Annualized volatility exceeds 50%; signals may be unreliable.")
+        if n < 14:
+            data_quality -= 5
+            warnings.append("RSI computation may be incomplete due to short history.")
+
+        bull_confirmations = sum(1 for s in signals if s.direction == SignalDirection.BULLISH)
+        bear_confirmations = sum(1 for s in signals if s.direction == SignalDirection.BEARISH)
+        confidence = min(90, max(25, 50 + int(abs(avg) * 1.5) + data_quality))
+
+        summary = (
+            f"Technical composite is {composite_dir.value} ({composite_str}); "
+            f"{bull_confirmations} bullish / {bear_confirmations} bearish signals. "
+            f"Price={latest:.2f}, RSI={rsi_val:.0f}, ATR(14)={atr_14:.4f}."
+        )
+
         return AgentOutput(
             agent_name=self.agent_name,
             display_name=self.display_name,
             version=self.version,
-            summary=f"Technical read is {direction.value}; price is {closes[-1]:.2f} versus SMA20 {sma_20:.2f}.",
+            summary=summary,
             signals=signals,
-            confidence=68 if len(closes) >= 50 else 52,
+            confidence=confidence,
+            warnings=warnings,
             details={
-                "last_close": round(closes[-1], 4),
-                "return_20": round(return_20, 6),
-                "return_50": round(return_50, 6),
-                "sma_20": round(sma_20, 4),
-                "sma_50": round(sma_50, 4),
+                "last_close": round(latest, 4),
+                "bar_count": n,
                 "annualized_volatility": round(annualized_vol, 6),
-                "support_20": round(min(lookback_20), 4),
-                "resistance_20": round(max(lookback_20), 4),
+                "rsi_14": round(rsi_val, 2),
+                "macd_histogram": round(macd_hist, 6),
+                "trend_score": trend_score,
+                "composite_score": round(float(avg), 4),
+                "sma_20": round(float(sma_20.iloc[-1]), 4) if has_20 else None,
+                "ema_8": round(float(ema_8.iloc[-1]), 4) if n >= 8 else None,
+                "ema_21": round(float(ema_21.iloc[-1]), 4) if n >= 21 else None,
+                "atr_14": round(atr_14, 6),
+                "bb_width": round(bb_width, 6),
+                "bb_position": round(bb_position, 4),
+                "zscore_20": round(zscore, 4),
+                "roc_10d": round(roc_10, 6),
+                "roc_21d": round(roc_21, 6),
             },
         )
 
@@ -779,30 +1040,106 @@ class MarketResearchOrchestrator:
         *,
         llm_provider: StructuredLLMProvider | None = None,
         per_agent_timeout_seconds: float = 8.0,
+        max_llm_failures: int = 1,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.agents = tuple(agents or DEFAULT_AGENTS)
         self.llm_provider = llm_provider or MockStructuredLLMProvider()
         self.per_agent_timeout_seconds = max(0.1, float(per_agent_timeout_seconds))
+        self.max_llm_failures = int(max_llm_failures)
+        self.progress_callback = progress_callback
+        self._state_lock = Lock()
+        self._llm_failure_count = 0
+        self._cancelled_agent_run_ids: set[str] = set()
 
     def run(self, context: MarketResearchContext) -> MarketResearchReport:
         outputs: list[AgentOutput] = []
         audit: list[AgentAuditEvent] = []
-        for agent in self.agents:
-            output, event = self._run_agent(agent, context, outputs)
+        for index, agent in enumerate(self.agents):
+            output, event = self._run_agent(agent, context, outputs, agent_index=index, total_agents=len(self.agents))
             outputs.append(output)
             audit.append(event)
         return self._build_report(context, outputs, audit)
+
+    def _emit_progress(
+        self,
+        event_type: str,
+        agent: ResearchAgent | None = None,
+        *,
+        agent_index: int | None = None,
+        total_agents: int | None = None,
+        agent_run_id: str | None = None,
+        **details: Any,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        if agent_run_id is not None and self._is_agent_run_cancelled(agent_run_id):
+            return
+        payload: dict[str, Any] = {
+            "event_type": event_type,
+            "timestamp_utc": utc_now_iso(),
+            "provider": getattr(self.llm_provider, "provider_name", "unknown"),
+            "model": getattr(self.llm_provider, "model_name", "unknown"),
+        }
+        if agent is not None:
+            payload.update(
+                {
+                    "agent_name": agent.agent_name,
+                    "display_name": agent.display_name,
+                    "agent_version": getattr(agent, "version", "v1"),
+                }
+            )
+        if agent_index is not None:
+            payload["agent_index"] = int(agent_index)
+        if total_agents is not None:
+            payload["total_agents"] = int(total_agents)
+        payload.update(details)
+        self.progress_callback(payload)
+
+    def _is_agent_run_cancelled(self, agent_run_id: str) -> bool:
+        with self._state_lock:
+            return agent_run_id in self._cancelled_agent_run_ids
+
+    def _cancel_agent_run(self, agent_run_id: str) -> None:
+        with self._state_lock:
+            self._cancelled_agent_run_ids.add(agent_run_id)
+
+    def _record_llm_failure(self) -> int:
+        with self._state_lock:
+            self._llm_failure_count += 1
+            return self._llm_failure_count
+
+    def _llm_failure_limit_reached(self) -> tuple[bool, int]:
+        if self.max_llm_failures <= 0:
+            with self._state_lock:
+                return False, self._llm_failure_count
+        with self._state_lock:
+            count = self._llm_failure_count
+        return count >= self.max_llm_failures, count
 
     def _run_agent(
         self,
         agent: ResearchAgent,
         context: MarketResearchContext,
         previous_outputs: Sequence[AgentOutput],
+        *,
+        agent_index: int,
+        total_agents: int,
     ) -> tuple[AgentOutput, AgentAuditEvent]:
         started = utc_now_iso()
         start_time = time.perf_counter()
+        agent_run_id = f"{agent.agent_name}:{time.perf_counter_ns()}"
+        self._emit_progress("agent_started", agent, agent_index=agent_index, total_agents=total_agents)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"market-research-{agent.agent_name}")
-        future: Future[AgentOutput] = executor.submit(self._run_agent_body, agent, context, list(previous_outputs))
+        future: Future[AgentOutput] = executor.submit(
+            self._run_agent_body,
+            agent,
+            context,
+            list(previous_outputs),
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+        )
         try:
             output = future.result(timeout=self.per_agent_timeout_seconds)
             status = AgentStatus.COMPLETED
@@ -810,17 +1147,34 @@ class MarketResearchOrchestrator:
             executor.shutdown(wait=True)
         except TimeoutError:
             future.cancel()
+            self._cancel_agent_run(agent_run_id)
             executor.shutdown(wait=False, cancel_futures=True)
             status = AgentStatus.TIMEOUT
             error = (
                 f"{agent.display_name} timed out after {self.per_agent_timeout_seconds:.1f}s while using "
                 f"{self._provider_label()}."
             )
+            if self._uses_hosted_llm():
+                self._record_llm_failure()
+            self._emit_progress(
+                "agent_timeout",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                error=error,
+            )
             output = self._timeout_fallback_output(agent, context, previous_outputs, error)
         except Exception as exc:
             executor.shutdown(wait=False, cancel_futures=True)
             status = AgentStatus.FAILED
             error = str(exc)
+            self._emit_progress(
+                "agent_failed",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                error=error,
+            )
             output = self._failed_output(agent, error)
         finished = utc_now_iso()
         duration_ms = int((time.perf_counter() - start_time) * 1000)
@@ -834,6 +1188,17 @@ class MarketResearchOrchestrator:
             warnings=output.warnings,
             error=error,
         )
+        self._emit_progress(
+            "agent_completed",
+            agent,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            status=status,
+            duration_ms=duration_ms,
+            confidence=output.confidence,
+            signal_count=len(output.signals),
+            warning_count=len(output.warnings),
+        )
         return output, audit
 
     def _run_agent_body(
@@ -841,11 +1206,67 @@ class MarketResearchOrchestrator:
         agent: ResearchAgent,
         context: MarketResearchContext,
         previous_outputs: Sequence[AgentOutput],
+        *,
+        agent_index: int,
+        total_agents: int,
+        agent_run_id: str,
     ) -> AgentOutput:
+        self._emit_progress(
+            "deterministic_baseline_started",
+            agent,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+        )
         deterministic = agent.run(context, previous_outputs)
+        self._emit_progress(
+            "deterministic_baseline_completed",
+            agent,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+            confidence=deterministic.confidence,
+            signal_count=len(deterministic.signals),
+            warning_count=len(deterministic.warnings),
+        )
         if not self._uses_hosted_llm():
             return deterministic
-        return self._augment_with_llm(agent, context, previous_outputs, deterministic)
+        limit_reached, failure_count = self._llm_failure_limit_reached()
+        if limit_reached:
+            warning = (
+                f"Hosted LLM refinement skipped for {agent.display_name} after "
+                f"{failure_count} prior provider failure(s); deterministic baseline used."
+            )
+            self._emit_progress(
+                "llm_refinement_skipped",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                agent_run_id=agent_run_id,
+                error=warning,
+                warning_count=len(deterministic.warnings) + 1,
+            )
+            return deterministic.model_copy(
+                update={
+                    "warnings": list(dict.fromkeys([*deterministic.warnings, warning])),
+                    "details": {
+                        **deterministic.details,
+                        "llm_provider": getattr(self.llm_provider, "provider_name", "unknown"),
+                        "llm_model": getattr(self.llm_provider, "model_name", "unknown"),
+                        "llm_skipped_after_failures": failure_count,
+                        "fallback_type": "deterministic_after_llm_fail_fast",
+                    },
+                }
+            )
+        return self._augment_with_llm(
+            agent,
+            context,
+            previous_outputs,
+            deterministic,
+            agent_index=agent_index,
+            total_agents=total_agents,
+            agent_run_id=agent_run_id,
+        )
 
     def _uses_hosted_llm(self) -> bool:
         provider_name = str(getattr(self.llm_provider, "provider_name", "mock")).lower()
@@ -862,9 +1283,20 @@ class MarketResearchOrchestrator:
         context: MarketResearchContext,
         previous_outputs: Sequence[AgentOutput],
         deterministic: AgentOutput,
+        *,
+        agent_index: int,
+        total_agents: int,
+        agent_run_id: str,
     ) -> AgentOutput:
         prompt = self._agent_prompt(agent, context, previous_outputs, deterministic)
         try:
+            self._emit_progress(
+                "llm_refinement_started",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                agent_run_id=agent_run_id,
+            )
             result = self.llm_provider.generate_structured(
                 prompt,
                 AgentOutput,
@@ -886,6 +1318,25 @@ class MarketResearchOrchestrator:
                     "llm_response_metadata": result.metadata,
                     "llm_warnings": result.warnings,
                 }
+                self._emit_progress(
+                    "llm_refinement_completed",
+                    agent,
+                    agent_index=agent_index,
+                    total_agents=total_agents,
+                    agent_run_id=agent_run_id,
+                    latency_ms=result.latency_ms,
+                    usage=result.usage,
+                    warning_count=len(result.warnings),
+                )
+            else:
+                self._emit_progress(
+                    "llm_refinement_completed",
+                    agent,
+                    agent_index=agent_index,
+                    total_agents=total_agents,
+                    agent_run_id=agent_run_id,
+                    warning_count=0,
+                )
             llm_output = llm_output.model_copy(
                 update={
                     "agent_name": agent.agent_name,
@@ -906,10 +1357,26 @@ class MarketResearchOrchestrator:
                 llm_output = llm_output.model_copy(update={"signals": deterministic.signals})
             return llm_output
         except Exception as exc:
+            if self._is_agent_run_cancelled(agent_run_id):
+                return deterministic
             provider_name = str(getattr(self.llm_provider, "provider_name", "unknown")).lower()
             provider_label = "Ollama" if provider_name == "ollama" else "Hosted"
+            failure_count = self._record_llm_failure()
+            self._emit_progress(
+                "llm_refinement_failed",
+                agent,
+                agent_index=agent_index,
+                total_agents=total_agents,
+                agent_run_id=agent_run_id,
+                error=str(exc),
+            )
             warnings = list(deterministic.warnings)
             warnings.append(f"{provider_label} LLM refinement failed for {agent.display_name}; deterministic fallback used: {exc}")
+            limit_reached, _ = self._llm_failure_limit_reached()
+            if limit_reached:
+                warnings.append(
+                    f"Hosted LLM refinement disabled for remaining agents after {failure_count} provider failure(s)."
+                )
             return deterministic.model_copy(
                 update={
                     "warnings": list(dict.fromkeys(warnings)),

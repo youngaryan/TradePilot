@@ -260,7 +260,22 @@ PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER=demo
 PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=mock
 ```
 
-For real hosted generation, set `PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=openai` or `anthropic` plus the matching `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` environment/vault reference. Production rejects mock/disabled LLM configuration for this workflow.
+For real hosted generation, set `PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=openai` or `anthropic` plus the matching `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` environment/vault reference. Production rejects mock/disabled/free NVIDIA research-endpoint configuration for this workflow.
+
+For research-stage NVIDIA Build free endpoints, configure a server-side key and select `nvidia`. The web app's `AI Research` view can override the model per job in development, using only the vetted catalog exposed by `GET /api/market-research/runtime`.
+
+```powershell
+PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER=nvidia
+PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL=mistralai/mistral-large-3-675b-instruct-2512
+PAIRS_TRADING_MARKET_RESEARCH_NVIDIA_API_KEY_REF=env:NVIDIA_API_KEY
+NVIDIA_API_KEY=...
+```
+
+NVIDIA Build endpoints are treated as fail-fast research endpoints in this app: the backend caps free-endpoint calls with `PAIRS_TRADING_MARKET_RESEARCH_FREE_ENDPOINT_TIMEOUT_CAP_SECONDS` and stops hosted refinement after `PAIRS_TRADING_MARKET_RESEARCH_LLM_FAIL_FAST_AFTER_FAILURES` provider failure(s), then continues the remaining agents with deterministic fallbacks.
+
+Secret refs such as `env:NVIDIA_API_KEY` can resolve from the backend process environment or, for local development, from the repo `.env` file.
+
+Useful free NVIDIA model ids currently wired for market-research experiments include `mistralai/mistral-large-3-675b-instruct-2512`, `mistralai/mistral-nemotron`, `qwen/qwen3-coder-480b-a35b-instruct`, `stepfun-ai/step-3.5-flash`, `minimaxai/minimax-m2.7`, `meta/llama-4-maverick-17b-128e-instruct`, `microsoft/phi-4-multimodal-instruct`, `google/gemma-3n-e4b-it`, `google/gemma-3n-e2b-it`, `bytedance/seed-oss-36b-instruct`, `abacusai/dracarys-llama-3.1-70b-instruct`, and `nvidia/nemotron-mini-4b-instruct`.
 
 For a free local development LLM, run Ollama and set:
 

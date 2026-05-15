@@ -38,6 +38,10 @@ services:
       - minio_data:/data
 
   api:
+    env_file:
+      - .env
+      - path: .env.local
+        required: false
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -83,6 +87,10 @@ services:
       - ./data:/app/data
 
   worker:
+    env_file:
+      - .env
+      - path: .env.local
+        required: false
     build:
       context: .
       dockerfile: Dockerfile.api

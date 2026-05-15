@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from .config import BackendSettings
+from .dotenv import dotenv_value
 
 
 class SecretProvider:
@@ -15,7 +16,8 @@ class SecretProvider:
         if self.settings.is_production and not secret_ref.startswith(("env:", "secret-manager:")):
             raise ValueError("Production secret references must use env: or secret-manager: references.")
         if secret_ref.startswith("env:"):
-            return os.getenv(secret_ref.removeprefix("env:"))
+            name = secret_ref.removeprefix("env:")
+            return os.getenv(name) or dotenv_value(name)
         if secret_ref.startswith("secret-manager:"):
             raise NotImplementedError("Deploy a concrete secret-manager adapter before using this reference.")
-        return os.getenv(secret_ref)
+        return os.getenv(secret_ref) or dotenv_value(secret_ref)

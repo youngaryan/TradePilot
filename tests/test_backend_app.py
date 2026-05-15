@@ -1183,6 +1183,11 @@ class BackendAppTests(unittest.TestCase):
         self.assertTrue(report["audit_trail"])
         self.assertTrue(report["artifact_id"])
         self.assertEqual(report["metadata"]["trade_execution"], "disabled")
+        self.assertTrue(completed_payload["progress_events"])
+        event_types = {event["event_type"] for event in completed_payload["progress_events"]}
+        self.assertIn("data_collection_completed", event_types)
+        self.assertIn("agent_completed", event_types)
+        self.assertNotIn("prompt", " ".join(completed_payload["progress_events"][0].keys()).lower())
 
         jobs = client.get("/api/market-research/jobs", headers=headers)
         self.assertEqual(jobs.status_code, 200)
@@ -1295,6 +1300,9 @@ class BackendAppTests(unittest.TestCase):
         self.assertEqual(metadata["llm_provider"], "ollama")
         self.assertEqual(metadata["llm_model"], "llama3.2:1b")
         self.assertTrue(completed_payload["result"]["raw_agent_outputs"])
+        event_types = {event["event_type"] for event in completed_payload["progress_events"]}
+        self.assertIn("llm_refinement_started", event_types)
+        self.assertIn("llm_refinement_completed", event_types)
 
 
 if __name__ == "__main__":

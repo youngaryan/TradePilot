@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from .dotenv import dotenv_value
+
 
 def _split_env(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     if not value:
@@ -13,6 +15,25 @@ def _split_env(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_or_dotenv(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value:
+        return value.strip()
+    dotenv = dotenv_value(name)
+    if dotenv:
+        return dotenv
+    return default
+
+
+def _env_bool_or_dotenv(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        value = dotenv_value(name)
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
@@ -76,9 +97,14 @@ class BackendSettings:
     market_research_llm_timeout_seconds: float = 120.0
     market_research_llm_max_retries: int = 1
     market_research_llm_max_concurrency: int = 1
+    market_research_free_endpoint_timeout_cap_seconds: float = 45.0
+    market_research_llm_fail_fast_after_failures: int = 1
+    market_research_allow_request_model_override: bool = True
     market_research_ollama_base_url: str = "http://127.0.0.1:11434"
     market_research_openai_api_key_ref: str | None = None
     market_research_anthropic_api_key_ref: str | None = None
+    market_research_nvidia_api_key_ref: str | None = None
+    market_research_nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     price_cache_dir: Path = Path("data/cache")
     sentiment_cache_dir: Path = Path("data/sentiment_cache")
     sentiment_job_state_dir: Path = Path("artifacts/sentiment/jobs")
@@ -191,7 +217,7 @@ class BackendSettings:
             smtp_password=os.getenv("SMTP_PASSWORD"),
             smtp_starttls=_env_bool("SMTP_STARTTLS", True),
             email_from=os.getenv("EMAIL_FROM", "no-reply@quantops.local"),
-            edgar_user_agent=os.getenv("SEC_EDGAR_USER_AGENT") or os.getenv("EDGAR_USER_AGENT"),
+            edgar_user_agent=_env_or_dotenv("SEC_EDGAR_USER_AGENT", "") or _env_or_dotenv("EDGAR_USER_AGENT", "") or None,
             sentry_dsn=os.getenv("SENTRY_DSN"),
             otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
             max_request_bytes=int(os.getenv("MAX_REQUEST_BYTES", "2000000")),
@@ -208,17 +234,29 @@ class BackendSettings:
             backtest_job_state_dir=Path(os.getenv("PAIRS_TRADING_BACKTEST_JOB_STATE_DIR", "artifacts/backtests/jobs")),
             market_research_artifact_root=Path(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_ARTIFACT_ROOT", "artifacts/market_research/reports")),
             market_research_job_state_dir=Path(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_JOB_STATE_DIR", "artifacts/market_research/jobs")),
-            market_research_data_provider=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER", "demo").strip().lower() or "demo",
-            market_research_agent_timeout_seconds=float(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS", "120.0")),
+            market_research_data_provider=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_DATA_PROVIDER", "demo").strip().lower() or "demo",
+            market_research_agent_timeout_seconds=float(_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_AGENT_TIMEOUT_SECONDS", "120.0")),
             secret_backend=os.getenv("PAIRS_TRADING_SECRET_BACKEND", "env").strip().lower() or "env",
-            market_research_llm_provider=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER", "mock").strip().lower() or "mock",
-            market_research_llm_model=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL", "mock-research-v1").strip() or "mock-research-v1",
-            market_research_llm_timeout_seconds=float(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS", "120.0")),
-            market_research_llm_max_retries=int(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_RETRIES", "1")),
-            market_research_llm_max_concurrency=int(os.getenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY", "1")),
-            market_research_ollama_base_url=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434",
-            market_research_openai_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_OPENAI_API_KEY_REF") or None,
-            market_research_anthropic_api_key_ref=os.getenv("PAIRS_TRADING_MARKET_RESEARCH_ANTHROPIC_API_KEY_REF") or None,
+            market_research_llm_provider=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_PROVIDER", "mock").strip().lower() or "mock",
+            market_research_llm_model=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MODEL", "mock-research-v1").strip() or "mock-research-v1",
+            market_research_llm_timeout_seconds=float(_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_TIMEOUT_SECONDS", "120.0")),
+            market_research_llm_max_retries=int(_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_RETRIES", "1")),
+            market_research_llm_max_concurrency=int(_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_MAX_CONCURRENCY", "1")),
+            market_research_free_endpoint_timeout_cap_seconds=float(
+                _env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_FREE_ENDPOINT_TIMEOUT_CAP_SECONDS", "45.0")
+            ),
+            market_research_llm_fail_fast_after_failures=int(
+                _env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_LLM_FAIL_FAST_AFTER_FAILURES", "1")
+            ),
+            market_research_allow_request_model_override=_env_bool_or_dotenv(
+                "PAIRS_TRADING_MARKET_RESEARCH_ALLOW_REQUEST_MODEL_OVERRIDE",
+                not production,
+            ),
+            market_research_ollama_base_url=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434",
+            market_research_openai_api_key_ref=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_OPENAI_API_KEY_REF", "") or None,
+            market_research_anthropic_api_key_ref=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_ANTHROPIC_API_KEY_REF", "") or None,
+            market_research_nvidia_api_key_ref=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_NVIDIA_API_KEY_REF", "") or None,
+            market_research_nvidia_base_url=_env_or_dotenv("PAIRS_TRADING_MARKET_RESEARCH_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip() or "https://integrate.api.nvidia.com/v1",
             price_cache_dir=Path(os.getenv("PAIRS_TRADING_PRICE_CACHE_DIR", "data/cache")),
             sentiment_cache_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_CACHE_DIR", "data/sentiment_cache")),
             sentiment_job_state_dir=Path(os.getenv("PAIRS_TRADING_SENTIMENT_JOB_STATE_DIR", "artifacts/sentiment/jobs")),

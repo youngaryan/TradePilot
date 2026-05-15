@@ -81,6 +81,24 @@ def _extract_json_text(value: Any) -> str:
     raise LLMSchemaValidationError("Provider response did not contain structured output text.")
 
 
+def _extract_json_document(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if text.startswith("{") and text.endswith("}"):
+        return text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
+
+
 class MockStructuredLLMProvider:
     """Deterministic provider used for tests and local demo mode."""
 
@@ -191,6 +209,149 @@ class OpenAIStructuredLLMProvider:
                 last_error = exc
                 prompt_text = f"{prompt}\n\nThe previous structured output failed validation: {exc}\nReturn valid JSON only."
         raise LLMProviderError(f"OpenAI structured output failed after retries: {last_error}") from last_error
+
+
+class NvidiaStructuredLLMProvider:
+    """NVIDIA Build / NIM OpenAI-compatible chat provider for research-stage use."""
+
+    provider_name = "nvidia"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        timeout_seconds: float = 120.0,
+        max_retries: int = 1,
+        max_concurrency: int = 1,
+        base_url: str = "https://integrate.api.nvidia.com/v1",
+    ) -> None:
+        if not api_key:
+            raise LLMProviderUnavailable("NVIDIA API key is not configured.")
+        from .nvidia_model_catalog import resolve_nvidia_model
+
+        spec = resolve_nvidia_model(model)
+        if spec is None:
+            raise LLMProviderUnavailable(
+                f"NVIDIA model '{model}' is not in the vetted research catalog. "
+                "Use one of the configured NVIDIA free endpoint model ids."
+            )
+        if not spec.market_research_compatible:
+            raise LLMProviderUnavailable(
+                f"NVIDIA model '{spec.id}' is a {spec.category} endpoint and cannot be used as a market-research chat LLM."
+            )
+        self.api_key = api_key
+        self.model_name = spec.id
+        self.model_spec = spec
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_retries = max(0, int(max_retries))
+        self.base_url = base_url.rstrip("/")
+        self._semaphore = BoundedSemaphore(max(1, int(max_concurrency)))
+
+    def generate_structured(self, prompt: str, schema: type[T], options: dict[str, Any] | None = None) -> LLMCallResult[T]:
+        try:
+            import httpx
+        except Exception as exc:  # pragma: no cover - covered by packaging tests
+            raise LLMProviderUnavailable("Install backend dependencies with httpx to use NVIDIA structured output.") from exc
+
+        opts = options or {}
+        last_error: Exception | None = None
+        prompt_text = prompt
+        system = str(
+            opts.get("system")
+            or "Return only JSON that matches the requested schema. Do not include markdown, commentary, or extra keys."
+        )
+        schema_hint = json.dumps(_schema_payload(schema), separators=(",", ":"), sort_keys=True)
+        for attempt in range(self.max_retries + 1):
+            started = time.perf_counter()
+            for include_response_format in (True, False):
+                try:
+                    request_body: dict[str, Any] = {
+                        "model": self.model_name,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"{prompt_text}\n\nReturn a JSON object matching this JSON Schema exactly:\n"
+                                    f"{schema_hint}"
+                                ),
+                            },
+                        ],
+                        "temperature": float(opts.get("temperature", 0.1)),
+                        "max_tokens": int(opts.get("max_output_tokens", 1800)),
+                    }
+                    if include_response_format:
+                        request_body["response_format"] = {"type": "json_object"}
+                    with self._semaphore:
+                        response = httpx.post(
+                            f"{self.base_url}/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {self.api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=request_body,
+                            timeout=self.timeout_seconds,
+                        )
+                    if response.status_code >= 400:
+                        if include_response_format and response.status_code in {400, 422}:
+                            continue
+                        raise LLMProviderError(f"NVIDIA structured output failed with HTTP {response.status_code}.")
+                    payload = response.json()
+                    content = self._extract_message_content(payload)
+                    value = _validate_payload(_extract_json_document(content), schema, provider=self.provider_name)
+                    warnings = [
+                        "NVIDIA Build free endpoint used for research only; do not treat this as production-grade inference."
+                    ]
+                    if not include_response_format:
+                        warnings.append("NVIDIA response_format=json_object was unavailable; prompt-only JSON fallback was used.")
+                    return LLMCallResult(
+                        value=value,
+                        provider=self.provider_name,
+                        model=self.model_name,
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        usage=dict(payload.get("usage") or {}),
+                        metadata={
+                            "response_id": payload.get("id"),
+                            "attempt": attempt + 1,
+                            "response_format": "json_object" if include_response_format else "prompt_only_json",
+                            "model_recommendation": self.model_spec.recommendation,
+                        },
+                        warnings=warnings,
+                    )
+                except httpx.TimeoutException as exc:
+                    raise LLMProviderError(
+                        f"NVIDIA structured output timed out after {self.timeout_seconds:.1f}s."
+                    ) from exc
+                except Exception as exc:
+                    last_error = exc
+                    if include_response_format:
+                        continue
+                    prompt_text = f"{prompt}\n\nThe previous NVIDIA model output failed validation: {exc}\nReturn valid JSON only."
+        raise LLMProviderError(f"NVIDIA structured output failed after retries: {last_error}") from last_error
+
+    @staticmethod
+    def _extract_message_content(payload: dict[str, Any]) -> str:
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                message = first.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        return content
+                    if isinstance(content, list):
+                        pieces = [
+                            str(item.get("text"))
+                            for item in content
+                            if isinstance(item, dict) and isinstance(item.get("text"), str)
+                        ]
+                        if pieces:
+                            return "".join(pieces)
+                if isinstance(first.get("text"), str):
+                    return str(first["text"])
+        raise LLMSchemaValidationError("NVIDIA response did not include choices[0].message.content.")
 
 
 class OllamaStructuredLLMProvider:

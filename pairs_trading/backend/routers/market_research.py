@@ -30,7 +30,8 @@ def build_market_research_router(settings: BackendSettings) -> APIRouter:
     ) -> dict[str, Any]:
         try:
             service.validate_request(request)
-            service.preflight_runtime()
+            service.preflight_runtime(request)
+            runtime_settings = service._effective_settings(request)
             quotas.check_and_record(
                 organization_id=ctx.organization_id,
                 user_id=str(ctx.user.get("id") or ""),
@@ -38,8 +39,8 @@ def build_market_research_router(settings: BackendSettings) -> APIRouter:
                 properties={
                     "ticker": request.ticker,
                     "horizon": request.horizon,
-                    "provider": settings.market_research_llm_provider,
-                    "model": settings.market_research_llm_model,
+                    "provider": runtime_settings.market_research_llm_provider,
+                    "model": runtime_settings.market_research_llm_model,
                 },
                 role=ctx.user.get("role"),
             )
