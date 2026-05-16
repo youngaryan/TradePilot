@@ -5,12 +5,31 @@ from pathlib import Path
 import unittest
 
 from pairs_trading.backend.config import BackendSettings
-from pairs_trading.backend.services import PaperService
+from pairs_trading.backend.schemas import BacktestRunRequest
+from pairs_trading.backend.services import BacktestService, PaperService
 from pairs_trading.platform import SQLiteMetadataStore
 from tests.common import fresh_test_dir
 
 
 class BackendServiceTests(unittest.TestCase):
+    def test_backtest_validation_rejects_directional_train_bars_below_warmup(self) -> None:
+        workspace = fresh_test_dir("artifacts/test_backend_backtest_validation")
+        service = BacktestService(
+            BackendSettings(
+                backtest_artifact_root=workspace / "backtests",
+                metadata_db_path=workspace / "metadata.sqlite3",
+                default_paper_config=workspace / "missing.json",
+            )
+        )
+        request = BacktestRunRequest(
+            pipeline="time_series_momentum",
+            symbols=["SPY"],
+            train_bars=252,
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires at least 300 train_bars"):
+            service.validate_request(request)
+
     def test_paper_service_builds_frontend_payload_and_latest_summary(self) -> None:
         workspace = fresh_test_dir("artifacts/test_backend_services")
         state_dir = workspace / "state"

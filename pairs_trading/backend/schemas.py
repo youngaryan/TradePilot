@@ -110,7 +110,7 @@ class BacktestRunRequest(BaseModel):
         description="Official SEC filing forms to include when include_sec_filings is enabled.",
     )
     edgar_user_agent: str | None = Field(default=None, description="SEC EDGAR user-agent when SEC data is enabled.")
-    train_bars: int = Field(default=252, ge=20)
+    train_bars: int = Field(default=300, ge=1)
     test_bars: int = Field(default=63, ge=5)
     step_bars: int = Field(default=63, ge=1)
     bars_per_year: int = Field(default=252, ge=1)

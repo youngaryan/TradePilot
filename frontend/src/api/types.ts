@@ -594,6 +594,12 @@ export interface BacktestTemplate {
   symbols: string[];
   start: string;
   end: string;
+  train_bars?: number;
+  test_bars?: number;
+  step_bars?: number;
+  purge_bars?: number;
+  embargo_bars?: number;
+  pbo_partitions?: number;
   sector_map_path?: string | null;
   event_file?: string | null;
   parameters: Record<string, unknown>;

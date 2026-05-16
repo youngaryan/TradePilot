@@ -24,7 +24,7 @@ const defaultRequest: BacktestRunRequest = {
   include_sec_filings: false,
   sec_filing_forms: ["8-K", "10-Q", "10-K"],
   edgar_user_agent: null,
-  train_bars: 252,
+  train_bars: 300,
   test_bars: 63,
   step_bars: 63,
   bars_per_year: 252,
@@ -40,6 +40,7 @@ const defaultRequest: BacktestRunRequest = {
 const SECTOR_MAP_PIPELINES = new Set(["stat_arb", "graph_stat_arb"]);
 const EVENT_PIPELINES = new Set(["edgar_event", "pead_sentiment"]);
 const SENTIMENT_PIPELINES = new Set(["stat_arb", "pead_sentiment"]);
+const COMMITTEE_SIGNAL_PIPELINE = "committee_signal_follower";
 const DEFAULT_SENTIMENT_PARAMETERS = {
   news_provider_names: ["rss", "local_web", "local"],
   news_files: ["examples/news_headlines.sample.csv"],
@@ -85,6 +86,7 @@ function optionalNumber(value: unknown, digits = 2) {
 function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
   const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(template.pipeline);
   const isEventPipeline = EVENT_PIPELINES.has(template.pipeline);
+  const isCommitteeSignalPipeline = template.pipeline === COMMITTEE_SIGNAL_PIPELINE;
   const parameters = SENTIMENT_PIPELINES.has(template.pipeline)
     ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...template.parameters }
     : template.parameters;
@@ -95,6 +97,12 @@ function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
     start: template.start,
     end: template.end,
     experiment_name: template.id,
+    train_bars: isCommitteeSignalPipeline ? 1 : template.train_bars ?? defaultRequest.train_bars,
+    test_bars: template.test_bars ?? defaultRequest.test_bars,
+    step_bars: template.step_bars ?? defaultRequest.step_bars,
+    purge_bars: isCommitteeSignalPipeline ? 0 : template.purge_bars ?? defaultRequest.purge_bars,
+    embargo_bars: template.embargo_bars ?? defaultRequest.embargo_bars,
+    pbo_partitions: template.pbo_partitions ?? defaultRequest.pbo_partitions,
     sector_map_path: isSectorMapPipeline ? template.sector_map_path ?? "examples/sector_map.sample.json" : null,
     event_file: isEventPipeline ? template.event_file ?? "examples/events.sample.csv" : null,
     use_sec_companyfacts: false,
@@ -137,6 +145,7 @@ export function BacktestLab({
   const usesSectorMap = SECTOR_MAP_PIPELINES.has(request.pipeline);
   const usesEventInputs = EVENT_PIPELINES.has(request.pipeline);
   const usesSentimentInputs = SENTIMENT_PIPELINES.has(request.pipeline);
+  const usesCommitteeSignals = request.pipeline === COMMITTEE_SIGNAL_PIPELINE;
   const parsedParameters = useMemo(() => {
     try {
       return parseJsonObject(parametersText, "Backtest parameters");
@@ -158,6 +167,7 @@ export function BacktestLab({
     const example = (item?.paper_config_example ?? {}) as PipelineExample;
     const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(pipeline);
     const isEventPipeline = EVENT_PIPELINES.has(pipeline);
+    const isCommitteeSignalPipeline = pipeline === COMMITTEE_SIGNAL_PIPELINE;
     const rawParams = asParameterObject(example.params) ?? {};
     const params = SENTIMENT_PIPELINES.has(pipeline) ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...rawParams } : rawParams;
     const next: BacktestRunRequest = {
@@ -170,6 +180,8 @@ export function BacktestLab({
       include_sec_filings: false,
       edgar_user_agent: isEventPipeline ? request.edgar_user_agent : null,
       experiment_name: asOptionalString(example.name) ?? `${pipeline}_ui`,
+      train_bars: isCommitteeSignalPipeline ? 1 : request.train_bars,
+      purge_bars: isCommitteeSignalPipeline ? 0 : request.purge_bars,
       parameters: params
     };
     setRequest(next);
@@ -566,24 +578,26 @@ export function BacktestLab({
             </div>
           ) : null}
 
-          <div className="form-grid form-grid--tight">
-            <label>
-              Train bars
-              <input type="number" value={request.train_bars} onChange={(event) => setRequest({ ...request, train_bars: Number(event.target.value) })} />
-            </label>
-            <label>
-              Test bars
-              <input type="number" value={request.test_bars} onChange={(event) => setRequest({ ...request, test_bars: Number(event.target.value) })} />
-            </label>
-            <label>
-              Purge bars
-              <input type="number" value={request.purge_bars} onChange={(event) => setRequest({ ...request, purge_bars: Number(event.target.value) })} />
-            </label>
-            <label>
-              PBO partitions
-              <input type="number" value={request.pbo_partitions} onChange={(event) => setRequest({ ...request, pbo_partitions: Number(event.target.value) })} />
-            </label>
-          </div>
+          {!usesCommitteeSignals ? (
+            <div className="form-grid form-grid--tight">
+              <label>
+                Train bars
+                <input type="number" value={request.train_bars} onChange={(event) => setRequest({ ...request, train_bars: Number(event.target.value) })} />
+              </label>
+              <label>
+                Test bars
+                <input type="number" value={request.test_bars} onChange={(event) => setRequest({ ...request, test_bars: Number(event.target.value) })} />
+              </label>
+              <label>
+                Purge bars
+                <input type="number" value={request.purge_bars} onChange={(event) => setRequest({ ...request, purge_bars: Number(event.target.value) })} />
+              </label>
+              <label>
+                PBO partitions
+                <input type="number" value={request.pbo_partitions} onChange={(event) => setRequest({ ...request, pbo_partitions: Number(event.target.value) })} />
+              </label>
+            </div>
+          ) : null}
 
           <label>
             Parameters JSON

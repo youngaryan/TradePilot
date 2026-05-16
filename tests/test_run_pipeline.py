@@ -180,6 +180,22 @@ class RunPipelineHelperTests(unittest.TestCase):
         self.assertTrue(output["result"].artifact_dir.exists())
         self.assertIn("report", output["visuals"])
 
+    def test_directional_pipeline_rejects_insufficient_train_history(self) -> None:
+        prices = synthetic_directional_prices()
+        data_dir = fresh_test_dir("artifacts/test_runner/directional_short_history")
+
+        with patch("pairs_trading.apps.cli.CachedParquetProvider.get_close_prices", return_value=prices):
+            with self.assertRaisesRegex(ValueError, "requires at least 300 train_bars"):
+                run_directional_pipeline(
+                    strategy_name="time_series_momentum",
+                    symbols=["TREND"],
+                    start="2020-01-01",
+                    end="2023-12-31",
+                    experiment_name="directional_short_history",
+                    artifact_root=str(data_dir / "experiments"),
+                    train_bars=252,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -339,5 +339,31 @@ def build_strategy_catalog() -> list[dict[str, Any]]:
                 "params": {"holding_period_bars": 5, "entry_threshold": 0.15},
             },
         ),
+        StrategyCatalogItem(
+            id="committee_signal_follower",
+            name="Committee Signal Follower",
+            family="Evaluation",
+            difficulty="Intermediate",
+            pipeline="committee_signal_follower",
+            summary="Simulates trading every historical committee research decision — BUY goes long, SELL goes short, AVOID flattens — to measure the real P&L of following the AI research agents.",
+            how_it_works="Loads past committee decisions from the DecisionHistoryStore, then on each decision date sets a target weight proportional to the committee's confidence. Repeated BUY signals can scale in if confidence increases. The walk-forward backtester handles entry delays, costs, and benchmarks against buy-and-hold.",
+            best_for="Validating whether the market research committee's past advice would have been profitable. Not for live trading without human review.",
+            watch_out="Decisions are based on LLM analysis of historical data — they are not forward-looking. The backtest assumes you trade every signal; skipping trades changes the outcome. Past performance does not guarantee future results.",
+            key_parameters=("max_position_pct", "confidence_threshold", "scale_in_confidence_delta", "scale_out_on_opposite"),
+            example_cli=".\\.venv\\Scripts\\python.exe -m pairs_trading.apps.cli --pipeline committee_signal_follower --symbols AAPL MSFT --start 2024-01-01 --end 2025-01-01",
+            paper_config_example={
+                "name": "committee_signal_follower_shadow",
+                "pipeline": "committee_signal_follower",
+                "symbols": ["AAPL", "MSFT"],
+                "lookback_bars": 520,
+                "params": {
+                    "max_position_pct": 0.25,
+                    "confidence_threshold": 30,
+                    "scale_in_confidence_delta": 10,
+                    "scale_out_on_opposite": True,
+                    "flat_on_avoid": True,
+                },
+            },
+        ),
     ]
     return [asdict(item) for item in items]

@@ -6,6 +6,7 @@ import pandas as pd
 
 from pairs_trading.engines.backtesting import CostModel, WalkForwardBacktester, WalkForwardConfig
 from pairs_trading.engines.ledger import LedgerBacktestSimulator, LedgerConfig
+from pairs_trading.engines.risk import RiskConfig, RiskManager
 from pairs_trading.strategies.directional import BuyAndHoldStrategy
 
 
@@ -181,6 +182,28 @@ class LedgerEngineTests(unittest.TestCase):
         self.assertGreater(float(snapshots["funding_cost"].sum()), 0.0)
         self.assertGreater(float(snapshots["latency_cost"].sum()), 0.0)
         self.assertGreater(float(snapshots["strategy_cost"].sum()), 0.0)
+
+    def test_risk_manager_scales_explicit_target_weights(self) -> None:
+        index = pd.date_range("2024-01-01", periods=2, freq="D")
+        frame = pd.DataFrame(
+            {
+                "signal": [1.0, 1.0],
+                "forecast": [1.0, 1.0],
+                "position": [2.0, 2.0],
+                "gross_return": [0.0, 0.0],
+                "turnover": [2.0, 0.0],
+                "cost_estimate": [0.0, 0.0],
+                "target_weight_AAA": [1.0, 1.0],
+                "target_weight_BBB": [1.0, 1.0],
+            },
+            index=index,
+        )
+
+        adjusted = RiskManager(RiskConfig(max_gross_leverage=1.0, max_net_leverage=1.0)).apply(frame)
+
+        self.assertAlmostEqual(float(adjusted["target_weight_AAA"].iloc[0]), 0.5, places=6)
+        self.assertAlmostEqual(float(adjusted["target_weight_BBB"].iloc[0]), 0.5, places=6)
+        self.assertAlmostEqual(float(adjusted["risk_gross_exposure"].iloc[0]), 1.0, places=6)
 
 
 if __name__ == "__main__":
