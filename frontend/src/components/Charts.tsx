@@ -629,7 +629,7 @@ export function TelemetryTimelineChart({ events }: { events: TelemetryEventRecor
   const errors = buckets.reduce((sum, bucket) => sum + bucket.error, 0);
 
   return (
-    <div>
+    <div role="img" aria-label="Telemetry events over time">
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
         <div>
           <div className="chart-label">Telemetry event volume</div>
