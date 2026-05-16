@@ -74,11 +74,25 @@ class MarketResearchInput(BaseModel):
     include_financial_events: bool = True
     lookback_days: int | None = Field(default=None, ge=5, le=900)
     options: dict[str, Any] = Field(default_factory=dict)
+    pair: str | None = Field(default=None, max_length=65, description="Optional second ticker for pair research.")
+    universe_filter: dict[str, Any] | None = Field(default=None, description="Filter dict to select stocks from universe.")
 
     @field_validator("ticker")
     @classmethod
     def normalize_symbol(cls, value: str) -> str:
         return normalize_ticker(value)
+
+    @field_validator("pair")
+    @classmethod
+    def normalize_pair(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = [normalize_ticker(p.strip()) for p in value.split(",") if p.strip()]
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        return ",".join(parts[:2])
 
     @field_validator("analysis_date")
     @classmethod
@@ -1575,3 +1589,129 @@ class MarketResearchOrchestrator:
             confidence=0,
             warnings=[f"{display_name} output missing from audit trail."],
         )
+
+
+class MultiStockReport(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    tickers: list[str]
+    pair: str | None = None
+    analysis_date: str
+    horizon: ResearchHorizon = ResearchHorizon.SWING
+    reports: list[MarketResearchReport] = Field(default_factory=list)
+    cross_stock_analysis: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    created_at_utc: str = Field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def run_multi_stock_research(
+    tickers: list[str],
+    analysis_date: str | None = None,
+    horizon: ResearchHorizon = ResearchHorizon.SWING,
+    llm_provider: Any = None,
+    data_provider: Any = None,
+    data_provider_kwargs: dict[str, Any] | None = None,
+    per_agent_timeout_seconds: float = 8.0,
+    max_llm_failures: int = 1,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    pair: tuple[str, str] | None = None,
+) -> MultiStockReport:
+    from datetime import date
+    asof = analysis_date or date.today().isoformat()
+    results: list[MarketResearchReport] = []
+    contexts: dict[str, MarketResearchContext] = {}
+    all_tickers = list(tickers)
+
+    if pair:
+        for t in pair:
+            if t not in all_tickers:
+                all_tickers.append(t)
+
+    orchestrator = MarketResearchOrchestrator(
+        llm_provider=llm_provider,
+        per_agent_timeout_seconds=per_agent_timeout_seconds,
+        max_llm_failures=max_llm_failures,
+        progress_callback=progress_callback,
+    )
+
+    for t in all_tickers:
+        inp = MarketResearchInput(
+            ticker=t,
+            analysis_date=asof,
+            horizon=horizon,
+            provider=getattr(llm_provider, "provider_name", "mock") if llm_provider else "mock",
+            model=getattr(llm_provider, "model_name", "mock-research-v1") if llm_provider else "mock-research-v1",
+        )
+        provider = data_provider or DemoMarketResearchDataProvider()
+        if progress_callback is not None:
+            progress_callback({"event_type": "data_collection_started", "ticker": t})
+        try:
+            context = provider.collect(inp, **(data_provider_kwargs or {}))
+        except TypeError:
+            context = provider.collect(inp)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event_type": "data_collection_completed",
+                    "ticker": t,
+                    "price_bar_count": len(context.price_history),
+                    "news_count": len(context.news),
+                    "financial_event_count": len(context.financial_events),
+                    "warning_count": len(context.warnings),
+                }
+            )
+        contexts[t.upper()] = context
+        report = orchestrator.run(context)
+        results.append(report)
+
+    cross = {}
+    if pair and len(results) >= 2:
+        r1 = next((r for r in results if r.ticker.upper() == pair[0].upper()), None)
+        r2 = next((r for r in results if r.ticker.upper() == pair[1].upper()), None)
+        if r1 and r2:
+            cross["pair"] = f"{pair[0]}-{pair[1]}"
+            cross["decision_1"] = r1.decision
+            cross["decision_2"] = r2.decision
+            cross["confidence_1"] = r1.confidence
+            cross["confidence_2"] = r2.confidence
+            cross["divergence"] = "yes" if r1.decision != r2.decision else "no"
+            context_1 = contexts.get(pair[0].upper())
+            context_2 = contexts.get(pair[1].upper())
+            if context_1 and context_2 and context_1.price_history and context_2.price_history:
+                df_1 = pd.DataFrame([{"date": p.date, "close_1": p.close} for p in context_1.price_history])
+                df_2 = pd.DataFrame([{"date": p.date, "close_2": p.close} for p in context_2.price_history])
+                merged = pd.merge(df_1, df_2, on="date").sort_values("date")
+                if len(merged) >= 20:
+                    returns_1 = pd.to_numeric(merged["close_1"], errors="coerce").pct_change()
+                    returns_2 = pd.to_numeric(merged["close_2"], errors="coerce").pct_change()
+                    correlation = returns_1.corr(returns_2)
+                    variance_2 = float(np.var(merged["close_2"]))
+                    hedge_ratio = float(np.cov(merged["close_1"], merged["close_2"])[0, 1] / variance_2) if variance_2 > 0 else 1.0
+                    spread = merged["close_1"] - hedge_ratio * merged["close_2"]
+                    spread_std = float(spread.std()) if np.isfinite(spread.std()) else 0.0
+                    latest_zscore = float((spread.iloc[-1] - spread.mean()) / spread_std) if spread_std > 0 else 0.0
+                    cross["pair_metrics"] = {
+                        "observation_count": int(len(merged)),
+                        "return_correlation": round(float(correlation), 4) if np.isfinite(correlation) else 0.0,
+                        "hedge_ratio": round(hedge_ratio, 4),
+                        "latest_spread_zscore": round(latest_zscore, 4),
+                    }
+
+    summary_parts = [
+        f"Researched {len(all_tickers)} ticker(s): {', '.join(all_tickers)}",
+    ]
+    for r in results:
+        summary_parts.append(f"{r.ticker}: {r.decision} ({r.confidence}/100)")
+    if cross:
+        summary_parts.append(f"Pair {cross.get('pair', '')}: divergence={cross.get('divergence', 'n/a')}")
+
+    return MultiStockReport(
+        tickers=all_tickers,
+        pair=f"{pair[0]},{pair[1]}" if pair else None,
+        analysis_date=asof,
+        horizon=horizon,
+        reports=results,
+        cross_stock_analysis=cross,
+        summary=" | ".join(summary_parts),
+    )

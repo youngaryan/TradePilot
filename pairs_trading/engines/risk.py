@@ -30,9 +30,11 @@ class RiskManager:
         ).fillna(0.0)
 
         weight_columns = [column for column in adjusted.columns if column.startswith("weight_")]
-        if weight_columns:
-            gross_proxy = adjusted[weight_columns].abs().sum(axis=1)
-            net_proxy = adjusted[weight_columns].sum(axis=1).abs()
+        target_weight_columns = [column for column in adjusted.columns if column.startswith("target_weight_")]
+        exposure_columns = target_weight_columns if target_weight_columns else weight_columns
+        if exposure_columns:
+            gross_proxy = adjusted[exposure_columns].abs().sum(axis=1)
+            net_proxy = adjusted[exposure_columns].sum(axis=1).abs()
         else:
             signed_proxy = adjusted["target_position_raw"]
             if "signal" in adjusted.columns:
@@ -82,7 +84,7 @@ class RiskManager:
             adjusted["cost_estimate"] = pd.to_numeric(adjusted["cost_estimate"], errors="coerce").fillna(0.0) * scale
         if "gross_return" in adjusted.columns:
             adjusted["gross_return"] = pd.to_numeric(adjusted["gross_return"], errors="coerce").fillna(0.0) * lagged_scale
-        for column in weight_columns:
+        for column in [*weight_columns, *target_weight_columns]:
             adjusted[column] = pd.to_numeric(adjusted[column], errors="coerce").fillna(0.0) * scale
 
         adjusted["risk_flag"] = (scale < 0.999).astype(int)

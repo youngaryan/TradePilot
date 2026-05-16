@@ -594,6 +594,12 @@ export interface BacktestTemplate {
   symbols: string[];
   start: string;
   end: string;
+  train_bars?: number;
+  test_bars?: number;
+  step_bars?: number;
+  purge_bars?: number;
+  embargo_bars?: number;
+  pbo_partitions?: number;
   sector_map_path?: string | null;
   event_file?: string | null;
   parameters: Record<string, unknown>;
@@ -776,6 +782,9 @@ export interface MarketResearchRunRequest {
   include_financial_events?: boolean;
   lookback_days?: number | null;
   options?: Record<string, unknown>;
+  tickers?: string[] | null;
+  pair?: string | null;
+  universe_filter?: Record<string, unknown> | null;
 }
 
 export interface NvidiaModelCatalogItem {
@@ -861,6 +870,7 @@ export interface MarketResearchProgressEvent {
   timestamp_utc: string;
   provider?: string;
   model?: string;
+  ticker?: string;
   agent_name?: string;
   display_name?: string;
   agent_version?: string;
@@ -933,6 +943,108 @@ export interface MarketResearchReport {
   report_id?: string | null;
 }
 
+export interface StockUniverseItem {
+  ticker: string;
+  company_name: string;
+  sector: string;
+  industry: string;
+  country: string;
+  exchange: string;
+  currency: string;
+  market_cap_category: string;
+  avg_volume: number;
+  is_liquid: boolean;
+}
+
+export interface StockUniverseResponse {
+  name: string;
+  description: string;
+  total_stocks: number;
+  stocks: StockUniverseItem[];
+  sector_counts: Array<{ name: string; count: number }>;
+  country_counts: Array<{ name: string; count: number }>;
+  exchange_counts: Array<{ name: string; count: number }>;
+}
+
+export interface CommitteeDecision {
+  id: string;
+  ticker: string;
+  pair_ticker?: string | null;
+  timestamp: string;
+  analysis_date: string;
+  horizon: string;
+  decision: string;
+  confidence: number;
+  reasoning: string;
+  signals_summary: Record<string, unknown>;
+  market_metrics: Record<string, unknown>;
+  data_quality: Record<string, unknown>;
+  evaluation: Record<string, unknown>;
+  recommendation: string;
+  llm_provider: string;
+  llm_model: string;
+}
+
+export interface ChartPoint {
+  date: string;
+  close?: number | null;
+  sma20?: number | null;
+  sma50?: number | null;
+}
+
+export interface ChartMarker {
+  date: string;
+  price?: number;
+  spread?: number;
+  zscore?: number;
+  label: string;
+}
+
+export interface SpreadChartData {
+  type: "spread";
+  pair: string;
+  data: Array<{ date: string; spread: number; zscore: number }>;
+  bands: { mean: number; std: number; upper_1sigma: number; lower_1sigma: number; upper_2sigma: number; lower_2sigma: number };
+  markers: ChartMarker[];
+}
+
+export interface ZScoreChartData {
+  type: "zscore";
+  pair: string;
+  data: Array<{ date: string; zscore: number }>;
+  thresholds: { upper_entry: number; upper_exit: number; lower_entry: number; lower_exit: number };
+  markers: ChartMarker[];
+}
+
+export interface CorrelationChartData {
+  type: "correlation";
+  pair: string;
+  data: Array<{ date: string; rolling_correlation: number | null }>;
+  overall_correlation: number;
+  rolling_window: number;
+}
+
+export interface MultiStockReport {
+  tickers: string[];
+  pair?: string | null;
+  analysis_date: string;
+  horizon: string;
+  reports: MarketResearchReport[];
+  cross_stock_analysis: Record<string, unknown>;
+  summary: string;
+  created_at_utc: string;
+  metadata: Record<string, unknown>;
+  report_type?: "multi_stock" | string;
+  ticker?: string;
+  decision?: MarketResearchDecision | null;
+  confidence?: number | null;
+  warnings?: string[];
+  report_id?: string | null;
+  artifact?: Record<string, unknown>;
+  artifact_id?: string;
+  report_path?: string | null;
+}
+
 export interface MarketResearchReportSummary {
   id: string;
   report_id: string;
@@ -992,7 +1104,7 @@ export interface MarketResearchJob {
   progress_events?: MarketResearchProgressEvent[];
   started_at_utc?: string | null;
   finished_at_utc?: string | null;
-  result?: MarketResearchReport | null;
+  result?: MarketResearchReport | MultiStockReport | null;
   error?: string | null;
 }
 

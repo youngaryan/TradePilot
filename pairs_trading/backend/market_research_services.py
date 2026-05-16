@@ -21,13 +21,20 @@ from ..research.market_research_agents import (
     MarketResearchInput,
     MarketResearchOrchestrator,
     MarketResearchReport,
+    MultiStockReport,
     NewsItem,
     PriceBar,
     ResearchHorizon,
     SourceReference,
+    normalize_ticker,
+    run_multi_stock_research,
 )
 from ..research.market_research_prompts import RESEARCH_DISCLAIMER
 from ..research.nvidia_model_catalog import resolve_nvidia_model
+from ..research.stock_universe import StockUniverse, UniverseBuilder
+from ..research.decision_history import CommitteeDecision, DecisionHistoryStore
+from ..research.chart_data import ChartDataBuilder
+from ..research.data_quality import DataQualityValidator, DecisionEvaluationMetrics
 from .financial_events import FinancialEventsService
 from .llm_config import build_structured_llm_provider, market_research_runtime_diagnostics, preflight_market_research_llm
 from .config import BackendSettings
@@ -380,6 +387,47 @@ class BackendMarketResearchDataProvider:
         )
 
 
+class StockUniverseService:
+    def __init__(self, universe_path: str | Path = "data/stock_universe.json") -> None:
+        self.builder = UniverseBuilder(universe_path)
+        self._universe: StockUniverse | None = None
+
+    def get_universe(self, force_reload: bool = False) -> StockUniverse:
+        if self._universe is None or force_reload:
+            self._universe = self.builder.load_or_build()
+        return self._universe
+
+    def get_filtered(
+        self,
+        *,
+        sector: str | None = None,
+        industry: str | None = None,
+        country: str | None = None,
+        exchange: str | None = None,
+        currency: str | None = None,
+        min_liquid: bool | None = None,
+        min_liquidity: bool | None = None,
+        is_liquid: bool | None = None,
+        tickers: set[str] | None = None,
+        **_: Any,
+    ) -> StockUniverse:
+        universe = self.get_universe()
+        liquidity_filter = min_liquid
+        if liquidity_filter is None:
+            liquidity_filter = min_liquidity
+        if liquidity_filter is None:
+            liquidity_filter = is_liquid
+        return universe.filter(
+            sector=sector,
+            industry=industry,
+            country=country,
+            exchange=exchange,
+            currency=currency,
+            min_liquid=liquidity_filter,
+            tickers=tickers,
+        )
+
+
 class MarketResearchService:
     def __init__(
         self,
@@ -389,6 +437,11 @@ class MarketResearchService:
     ) -> None:
         self.settings = settings
         self.data_provider = data_provider or BackendMarketResearchDataProvider(settings)
+        self.universe_service = StockUniverseService()
+        self.decision_store = DecisionHistoryStore(settings)
+        self.chart_builder = ChartDataBuilder()
+        self.quality_validator = DataQualityValidator()
+        self.eval_metrics = DecisionEvaluationMetrics()
 
     def validate_request(self, request: MarketResearchRunRequest) -> MarketResearchInput:
         return self._input(request)
@@ -452,7 +505,47 @@ class MarketResearchService:
             include_financial_events=request.include_financial_events,
             lookback_days=request.lookback_days,
             options=request.options or {},
+            pair=request.pair,
         )
+
+    def _pair_for_request(self, request: MarketResearchRunRequest) -> tuple[str, str] | None:
+        if not request.pair:
+            return None
+        parts = [normalize_ticker(part) for part in request.pair.split(",") if part.strip()]
+        if len(parts) != 2:
+            raise ValueError("pair must contain exactly two valid ticker symbols separated by a comma.")
+        if parts[0] == parts[1]:
+            raise ValueError("pair tickers must be different.")
+        return parts[0], parts[1]
+
+    def _tickers_for_request(self, request: MarketResearchRunRequest, *, max_universe_tickers: int = 20) -> list[str]:
+        pair = self._pair_for_request(request)
+        if pair is not None:
+            return list(pair)
+        if request.universe_filter:
+            allowed_filter_keys = {
+                "sector",
+                "industry",
+                "country",
+                "exchange",
+                "currency",
+                "min_liquid",
+                "min_liquidity",
+                "is_liquid",
+                "tickers",
+            }
+            raw_filter = {key: value for key, value in request.universe_filter.items() if key in allowed_filter_keys}
+            raw_tickers = raw_filter.get("tickers")
+            if isinstance(raw_tickers, list):
+                raw_filter["tickers"] = {normalize_ticker(str(ticker)) for ticker in raw_tickers}
+            universe = self.universe_service.get_filtered(**raw_filter)
+            selected = universe.tickers()[:max_universe_tickers]
+            if not selected:
+                raise ValueError("Universe filter did not match any stocks.")
+            return selected
+        if request.tickers:
+            return [normalize_ticker(ticker) for ticker in request.tickers]
+        return [normalize_ticker(request.ticker)]
 
     def generate_report(
         self,
@@ -495,6 +588,146 @@ class MarketResearchService:
             progress_callback=progress_callback,
         )
         return orchestrator.run(context)
+
+    def generate_multi_report(
+        self,
+        request: MarketResearchRunRequest,
+        *,
+        organization_id: str | None = None,
+        user_id: str | None = None,
+        job_id: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> MultiStockReport:
+        runtime_settings = self._effective_settings(request)
+        tickers = self._tickers_for_request(request)
+        pair_tuple = self._pair_for_request(request)
+        llm_provider = build_structured_llm_provider(runtime_settings)
+
+        result = run_multi_stock_research(
+            tickers=tickers,
+            analysis_date=request.analysis_date or date.today().isoformat(),
+            horizon=ResearchHorizon(str(request.horizon)),
+            llm_provider=llm_provider,
+            data_provider=self.data_provider,
+            data_provider_kwargs={"organization_id": organization_id, "user_id": user_id},
+            per_agent_timeout_seconds=runtime_settings.market_research_agent_timeout_seconds,
+            max_llm_failures=runtime_settings.market_research_llm_fail_fast_after_failures,
+            progress_callback=progress_callback,
+            pair=pair_tuple,
+        )
+
+        self._record_decisions(result, organization_id=organization_id, user_id=user_id, job_id=job_id)
+        return result
+
+    def _record_decisions(
+        self,
+        multi_report: MultiStockReport,
+        *,
+        organization_id: str | None = None,
+        user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> None:
+        for report in multi_report.reports:
+            signals_summary = {
+                s.label: {"direction": s.direction, "strength": s.strength}
+                for s in report.technical_signals + report.fundamental_signals + report.news_sentiment_signals
+            }
+            quality = self.quality_validator.validate_report(report)
+            evaluation = self.eval_metrics.evaluate(report)
+            pair_ticker = None
+            if multi_report.pair:
+                parts = multi_report.pair.split(",")
+                if len(parts) == 2:
+                    other = parts[1] if parts[0].upper() == report.ticker.upper() else parts[0]
+                    pair_ticker = other
+
+            decision = CommitteeDecision(
+                ticker=report.ticker,
+                pair_ticker=pair_ticker,
+                analysis_date=report.analysis_date,
+                horizon=str(report.time_horizon),
+                decision=report.decision,
+                confidence=report.confidence,
+                reasoning=report.summary,
+                signals_summary=signals_summary,
+                market_metrics=evaluation,
+                data_quality=quality,
+                evaluation=evaluation,
+                recommendation=report.decision,
+                llm_provider=report.metadata.get("llm_provider", ""),
+                llm_model=report.metadata.get("llm_model", ""),
+                organization_id=organization_id,
+                user_id=user_id,
+                job_id=job_id,
+                report_id=report.report_id if hasattr(report, "report_id") else None,
+            )
+            self.decision_store.add(decision)
+
+    def get_chart_data(
+        self,
+        request: MarketResearchRunRequest,
+        report: MarketResearchReport | None = None,
+        *,
+        organization_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        tickers = self._tickers_for_request(request)
+
+        prices: dict[str, list[PriceBar]] = {}
+        for t in tickers:
+            inp = self._input(request.model_copy(update={"ticker": t}))
+            try:
+                context = self.data_provider.collect(inp, organization_id=organization_id, user_id=user_id)
+                prices[t] = context.price_history
+            except Exception:
+                prices[t] = []
+
+        pair_tuple = self._pair_for_request(request)
+
+        rec_dates = None
+        if report:
+            rec_dates = [report.analysis_date]
+
+        return self.chart_builder.build_all(
+            prices=prices,
+            tickers=tickers,
+            recommendation_dates=rec_dates,
+            pair=pair_tuple,
+        )
+
+    def record_decision(
+        self,
+        report: MarketResearchReport,
+        *,
+        organization_id: str | None = None,
+        user_id: str | None = None,
+        job_id: str | None = None,
+    ) -> None:
+        signals_summary = {
+            s.label: {"direction": s.direction, "strength": s.strength}
+            for s in report.technical_signals + report.fundamental_signals + report.news_sentiment_signals
+        }
+        quality = self.quality_validator.validate_report(report)
+        evaluation = self.eval_metrics.evaluate(report)
+        decision = CommitteeDecision(
+            ticker=report.ticker,
+            analysis_date=report.analysis_date,
+            horizon=str(report.time_horizon),
+            decision=report.decision,
+            confidence=report.confidence,
+            reasoning=report.summary,
+            signals_summary=signals_summary,
+            market_metrics=evaluation,
+            data_quality=quality,
+            evaluation=evaluation,
+            recommendation=report.decision,
+            llm_provider=report.metadata.get("llm_provider", ""),
+            llm_model=report.metadata.get("llm_model", ""),
+            organization_id=organization_id,
+            user_id=user_id,
+            job_id=job_id,
+        )
+        self.decision_store.add(decision)
 
 
 @dataclass
@@ -639,6 +872,7 @@ class MarketResearchJobRunner:
             "timestamp_utc",
             "provider",
             "model",
+            "ticker",
             "agent_name",
             "display_name",
             "agent_version",
@@ -731,6 +965,64 @@ class MarketResearchJobRunner:
             job.progress_events = [*job.progress_events, safe_event][-200:]
             self._save_locked(job)
 
+    @staticmethod
+    def _summarize_result_for_storage(request: MarketResearchRunRequest, result: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(result.get("reports"), list):
+            reports = [item for item in result.get("reports", []) if isinstance(item, dict)]
+            tickers = [str(item.get("ticker") or "").upper() for item in reports if item.get("ticker")]
+            if not tickers:
+                tickers = [str(item).upper() for item in result.get("tickers", []) if str(item).strip()]
+            ticker_label = ",".join(tickers[:6]) if tickers else request.ticker
+            if len(tickers) > 6:
+                ticker_label += f",+{len(tickers) - 6}"
+            confidence_values = [
+                int(item.get("confidence"))
+                for item in reports
+                if isinstance(item.get("confidence"), int)
+            ]
+            decision_counts: dict[str, int] = {}
+            for item in reports:
+                decision = str(item.get("decision") or "").upper()
+                if decision:
+                    decision_counts[decision] = decision_counts.get(decision, 0) + 1
+            aggregate_decision = max(decision_counts.items(), key=lambda item: item[1])[0] if decision_counts else None
+            warnings = list(
+                dict.fromkeys(
+                    str(warning)
+                    for item in reports
+                    for warning in (item.get("warnings") or [])
+                    if str(warning).strip()
+                )
+            )
+            first_metadata = next((item.get("metadata") for item in reports if isinstance(item.get("metadata"), dict)), {})
+            return {
+                "ticker": ticker_label,
+                "decision": aggregate_decision,
+                "confidence": round(sum(confidence_values) / len(confidence_values)) if confidence_values else None,
+                "warnings": warnings,
+                "metadata": {
+                    "report_type": "multi_stock",
+                    "tickers": tickers,
+                    "pair": result.get("pair"),
+                    "decision_breakdown": decision_counts,
+                    "agent_versions": {
+                        str(item.get("ticker") or f"report_{index + 1}"): item.get("metadata", {}).get("agent_versions", {})
+                        for index, item in enumerate(reports)
+                        if isinstance(item.get("metadata"), dict)
+                    },
+                    "prompt_version": first_metadata.get("prompt_version") if isinstance(first_metadata, dict) else None,
+                    "llm_provider": first_metadata.get("llm_provider") if isinstance(first_metadata, dict) else None,
+                    "llm_model": first_metadata.get("llm_model") if isinstance(first_metadata, dict) else None,
+                },
+            }
+        return {
+            "ticker": str(result.get("ticker") or request.ticker).upper(),
+            "decision": result.get("decision"),
+            "confidence": result.get("confidence"),
+            "warnings": result.get("warnings", []),
+            "metadata": result.get("metadata", {}) if isinstance(result.get("metadata"), dict) else {},
+        }
+
     def _run_job(self, job_id: str, request: MarketResearchRunRequest, organization_id: str) -> None:
         self._set_status(
             job_id,
@@ -755,15 +1047,36 @@ class MarketResearchJobRunner:
                 stage="collecting_data",
                 message="Collecting market research context and provenance.",
             )
-            report = service.generate_report(
-                request,
-                organization_id=organization_id,
-                user_id=job.user_id,
-                job_id=job_id,
-                progress_callback=lambda event: self._record_progress_event(job_id, event),
-            )
-            result = report.model_dump(mode="json")
-            result["report_id"] = job.report_id
+            if request.tickers or request.pair or request.universe_filter:
+                multi_report = service.generate_multi_report(
+                    request,
+                    organization_id=organization_id,
+                    user_id=job.user_id,
+                    job_id=job_id,
+                    progress_callback=lambda event: self._record_progress_event(job_id, event),
+                )
+                result = multi_report.model_dump(mode="json")
+                result["report_id"] = job.report_id
+                result["report_type"] = "multi_stock"
+                storage_summary = self._summarize_result_for_storage(request, result)
+                result.setdefault("ticker", storage_summary["ticker"])
+                result.setdefault("decision", storage_summary["decision"])
+                result.setdefault("confidence", storage_summary["confidence"])
+                result.setdefault("warnings", storage_summary["warnings"])
+                result["metadata"] = {**storage_summary["metadata"], **dict(result.get("metadata") or {})}
+            else:
+                report = service.generate_report(
+                    request,
+                    organization_id=organization_id,
+                    user_id=job.user_id,
+                    job_id=job_id,
+                    progress_callback=lambda event: self._record_progress_event(job_id, event),
+                )
+                result = report.model_dump(mode="json")
+                result["report_id"] = job.report_id
+                result["report_type"] = "single_stock"
+                service.record_decision(report, organization_id=organization_id, user_id=job.user_id, job_id=job_id)
+                storage_summary = self._summarize_result_for_storage(request, result)
             self._set_status(
                 job_id,
                 "running",
@@ -791,13 +1104,13 @@ class MarketResearchJobRunner:
                     "byte_count": reference.byte_count,
                     "metadata": {
                         "report_id": job.report_id,
-                        "ticker": result["ticker"],
+                        "ticker": storage_summary["ticker"],
                         "analysis_date": result["analysis_date"],
-                        "decision": result["decision"],
-                        "confidence": result["confidence"],
-                        "agent_versions": result.get("metadata", {}).get("agent_versions", {}),
-                        "prompt_version": result.get("metadata", {}).get("prompt_version"),
-                        "warnings": result.get("warnings", []),
+                        "decision": storage_summary["decision"],
+                        "confidence": storage_summary["confidence"],
+                        "agent_versions": storage_summary["metadata"].get("agent_versions", {}),
+                        "prompt_version": storage_summary["metadata"].get("prompt_version"),
+                        "warnings": storage_summary["warnings"],
                     },
                 },
             )
@@ -819,7 +1132,7 @@ class MarketResearchJobRunner:
                 finished_at_utc=_utc_now_iso(),
                 progress=1.0,
                 stage="completed",
-                message=f"Market research completed for {result['ticker']} with simulated decision {result['decision']}.",
+                message=f"Market research completed for {storage_summary['ticker']} with simulated decision {storage_summary['decision'] or 'n/a'}.",
             )
         except Exception as exc:
             self._persist_report_record(job, status="failed", error=str(exc))

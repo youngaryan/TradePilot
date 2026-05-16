@@ -9,6 +9,7 @@ import type {
   BillingCheckoutRequest,
   BillingResponse,
   BillingStatusPayload,
+  CommitteeDecision,
   ExperimentRecord,
   HealthResponse,
   MarketResearchJob,
@@ -17,6 +18,7 @@ import type {
   MarketResearchRuntimeConfig,
   MarketResearchReportSummary,
   MarketResearchRunRequest,
+  StockUniverseResponse,
   PaperDashboardPayload,
   PaperRunRequest,
   PaperRunJob,
@@ -433,6 +435,35 @@ export function listMarketResearchJobs() {
 
 export function getMarketResearchJob(jobId: string) {
   return requestJson<MarketResearchJob>(`/api/market-research/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function getStockUniverse(params?: { sector?: string; country?: string; exchange?: string }) {
+  const search = new URLSearchParams();
+  if (params?.sector) search.set("sector", params.sector);
+  if (params?.country) search.set("country", params.country);
+  if (params?.exchange) search.set("exchange", params.exchange);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<StockUniverseResponse>(`/api/market-research/universe${suffix}`);
+}
+
+export function getUniverseGroups() {
+  return requestJson<{ sectors: Array<{ name: string; count: number }>; countries: Array<{ name: string; count: number }>; exchanges: Array<{ name: string; count: number }> }>("/api/market-research/universe/groups");
+}
+
+export function listCommitteeDecisions(ticker?: string, limit?: number) {
+  const search = new URLSearchParams();
+  if (ticker) search.set("ticker", ticker);
+  if (limit) search.set("limit", String(limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<CommitteeDecision[]>(`/api/market-research/decisions${suffix}`);
+}
+
+export function getDecisionsSummary() {
+  return requestJson<{ total_decisions: number; unique_tickers: number; decision_breakdown: Record<string, number>; average_confidence: number }>("/api/market-research/decisions/summary");
+}
+
+export function getChartData(jobId: string) {
+  return requestJson<{ charts: Record<string, unknown> }>(`/api/market-research/charts/${encodeURIComponent(jobId)}`);
 }
 
 export function listWorkspaceReports(query?: MarketResearchReportListQuery) {

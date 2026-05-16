@@ -31,11 +31,13 @@ from ..engines.backtesting import (
     json_ready,
     run_trial_grid,
 )
+from ..research.decision_history import DecisionHistoryStore
 from ..engines.broker import BrokerConfig, SimulatedBroker
 from ..engines.execution import ExecutionConfig
 from ..engines.risk import RiskConfig
 from ..engines.validation import ValidationConfig
 from ..pipelines import (
+    CommitteeSignalFollowerPipeline,
     DirectionalPipelineConfig,
     DirectionalStrategyPipeline,
     ETFMomentumConfig,
@@ -110,7 +112,7 @@ DEFAULT_EVENT_SYMBOLS = [
     "XOM",
 ]
 
-ADVANCED_PIPELINES = ["graph_stat_arb", "pead_sentiment"]
+ADVANCED_PIPELINES = ["graph_stat_arb", "pead_sentiment", "committee_signal_follower"]
 
 DIRECTIONAL_PIPELINES = [
     "buy_and_hold",
@@ -1015,7 +1017,7 @@ def run_directional_pipeline(
     experiment_name: str | None = None,
     price_cache_dir: str = "data/cache",
     artifact_root: str = "artifacts/experiments",
-    train_bars: int = 252,
+    train_bars: int = 300,
     test_bars: int = 63,
     step_bars: int = 63,
     bars_per_year: int = 252,
@@ -1102,6 +1104,11 @@ def run_directional_pipeline(
         regime_volatility_quantile=regime_volatility_quantile,
         strategy_cost_bps=strategy_cost_bps,
     )
+    if train_bars < min_history:
+        raise ValueError(
+            f"{strategy_name} requires at least {min_history} train_bars for its indicator warmup; "
+            f"received {train_bars}."
+        )
 
     price_provider = CachedParquetProvider(
         upstream=YahooFinanceProvider(),
@@ -1586,6 +1593,98 @@ def run_pead_sentiment_pipeline(
     )
 
 
+def run_committee_signal_follower_pipeline(
+    symbols: list[str],
+    decision_store: DecisionHistoryStore,
+    start: str = "2018-01-01",
+    end: str = "2026-04-15",
+    interval: str = "1d",
+    experiment_name: str = "committee_signal_follower",
+    price_cache_dir: str = "data/cache",
+    artifact_root: str = "artifacts/experiments",
+    position_sizing: str = "confidence_weighted",
+    max_position_pct: float = 0.25,
+    confidence_threshold: int = 30,
+    scale_in_confidence_delta: int = 10,
+    scale_out_on_opposite: bool = True,
+    flat_on_avoid: bool = True,
+    train_bars: int = 1,
+    test_bars: int | None = None,
+    step_bars: int | None = None,
+    purge_bars: int = 5,
+    embargo_bars: int = 0,
+    pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if not symbols:
+        raise ValueError("Committee signal follower requires at least one symbol.")
+
+    symbols = list(dict.fromkeys(str(s).upper() for s in symbols))
+    price_provider = CachedParquetProvider(
+        upstream=YahooFinanceProvider(),
+        cache_dir=price_cache_dir,
+    )
+    prices = price_provider.get_close_prices(
+        symbols=symbols,
+        start=start,
+        end=end,
+        interval=interval,
+    )
+
+    pipeline = CommitteeSignalFollowerPipeline(
+        symbols=symbols,
+        decision_store=decision_store,
+        position_sizing=position_sizing,
+        max_position_pct=max_position_pct,
+        confidence_threshold=confidence_threshold,
+        scale_in_confidence_delta=scale_in_confidence_delta,
+        scale_out_on_opposite=scale_out_on_opposite,
+        flat_on_avoid=flat_on_avoid,
+        name=experiment_name,
+    )
+    n_bars = len(prices)
+    test_bars = test_bars if test_bars is not None else max(20, n_bars - train_bars - purge_bars)
+    step_bars = step_bars if step_bars is not None else test_bars
+    walk_forward = WalkForwardConfig(
+        train_bars=train_bars,
+        test_bars=test_bars,
+        step_bars=step_bars,
+        bars_per_year=252,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
+    )
+    cost_model = CostModel(
+        commission_bps=0.5,
+        spread_bps=1.0,
+        slippage_bps=0.75,
+        market_impact_bps=0.5,
+        borrow_bps_annual=25.0,
+        delay_bars=1,
+    )
+    broker = _build_broker(
+        max_gross_leverage=1.25,
+        max_net_leverage=1.0,
+        max_turnover=None,
+        cost_model=cost_model,
+    )
+
+    return _run_pipeline_with_validation(
+        pipeline=pipeline,
+        prices=prices,
+        config=walk_forward,
+        cost_model=cost_model,
+        broker=broker,
+        experiment_name=experiment_name,
+        artifact_root=artifact_root,
+        validation_config=ValidationConfig(
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+            pbo_partitions=pbo_partitions,
+        ),
+        progress_callback=progress_callback,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the quant walk-forward research pipeline.")
     parser.add_argument(
@@ -1604,7 +1703,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end", default="2026-04-15", help="Backtest end date (YYYY-MM-DD).")
     parser.add_argument("--interval", default="1d", help="Price bar interval.")
     parser.add_argument("--experiment-name", help="Experiment label. Defaults to the selected pipeline name.")
-    parser.add_argument("--train-bars", type=int, default=252, help="Training bars per walk-forward fold.")
+    parser.add_argument("--train-bars", type=int, default=300, help="Training bars per walk-forward fold.")
     parser.add_argument("--test-bars", type=int, default=63, help="Test bars per walk-forward fold.")
     parser.add_argument("--step-bars", type=int, default=63, help="Walk-forward step size.")
     parser.add_argument("--bars-per-year", type=int, default=252, help="Bars per year for annualization.")
@@ -1697,6 +1796,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regime-volatility-window", type=int, default=30, help="Volatility window for adaptive_regime.")
     parser.add_argument("--regime-volatility-quantile", type=float, default=0.70, help="Volatility quantile used by adaptive_regime.")
     parser.add_argument("--strategy-cost-bps", type=float, default=2.0, help="Internal strategy turnover cost in bps.")
+    parser.add_argument("--max-position-pct", type=float, default=0.25, help="Maximum position size as fraction of equity for committee_signal_follower.")
+    parser.add_argument("--confidence-threshold", type=int, default=30, help="Minimum confidence score (0-100) to act on a committee signal.")
+    parser.add_argument("--scale-in-confidence-delta", type=int, default=10, help="Confidence increase needed to scale into a repeated signal.")
+    parser.add_argument("--scale-out-on-opposite", action=argparse.BooleanOptionalAction, default=True, help="Flatten when an opposite signal arrives.")
+    parser.add_argument("--flat-on-avoid", action=argparse.BooleanOptionalAction, default=True, help="Flatten position when AVOID signal is received.")
     return parser
 
 
@@ -1850,6 +1954,28 @@ def main() -> None:
             use_sec_companyfacts=args.use_sec_companyfacts,
             include_sec_filings=args.include_sec_filings,
             sec_filing_forms=args.sec_filing_forms,
+            purge_bars=args.validation_purge_bars,
+            embargo_bars=args.validation_embargo_bars,
+            pbo_partitions=args.validation_pbo_partitions,
+        )
+    elif args.pipeline == "committee_signal_follower":
+        run_output = run_committee_signal_follower_pipeline(
+            symbols=args.symbols,
+            decision_store=DecisionHistoryStore(),
+            start=args.start,
+            end=args.end,
+            interval=args.interval,
+            experiment_name=experiment_name,
+            price_cache_dir=args.price_cache_dir,
+            artifact_root=args.artifact_root,
+            max_position_pct=args.max_position_pct,
+            confidence_threshold=args.confidence_threshold,
+            scale_in_confidence_delta=args.scale_in_confidence_delta,
+            scale_out_on_opposite=args.scale_out_on_opposite,
+            flat_on_avoid=args.flat_on_avoid,
+            train_bars=args.train_bars,
+            test_bars=args.test_bars,
+            step_bars=args.step_bars,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,

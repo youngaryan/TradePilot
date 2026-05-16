@@ -16,7 +16,9 @@ import pandas as pd
 from ..api import build_paper_dashboard_payload
 from ..apps.cli import (
     DIRECTIONAL_PIPELINES,
+    _build_directional_strategy_factory,
     json_ready,
+    run_committee_signal_follower_pipeline,
     run_directional_pipeline,
     run_etf_trend_pipeline,
     run_event_driven_pipeline,
@@ -457,6 +459,35 @@ def _clean_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in parameters.items() if value is not None}
 
 
+def _directional_min_history(pipeline: str, params: dict[str, Any]) -> int:
+    _, min_history = _build_directional_strategy_factory(
+        pipeline,
+        fast_window=int(params.get("fast_window", 20)),
+        slow_window=int(params.get("slow_window", 80)),
+        ema_fast_window=int(params.get("ema_fast_window", 12)),
+        ema_slow_window=int(params.get("ema_slow_window", 48)),
+        rsi_window=int(params.get("rsi_window", 14)),
+        sma_window=int(params.get("sma_window", 40)),
+        stochastic_window=int(params.get("stochastic_window", 14)),
+        stochastic_smooth_window=int(params.get("stochastic_smooth_window", 3)),
+        bollinger_window=int(params.get("bollinger_window", 20)),
+        macd_fast_window=int(params.get("macd_fast_window", 12)),
+        macd_slow_window=int(params.get("macd_slow_window", 26)),
+        macd_signal_window=int(params.get("macd_signal_window", 9)),
+        breakout_window=int(params.get("breakout_window", 55)),
+        breakout_exit_window=int(params.get("breakout_exit_window", 20)),
+        keltner_window=int(params.get("keltner_window", 40)),
+        trend_window=int(params.get("trend_window", 120)),
+        volatility_window=int(params.get("volatility_window", 20)),
+        momentum_lookbacks=params.get("momentum_lookbacks"),
+        regime_fast_window=int(params.get("regime_fast_window", 30)),
+        regime_slow_window=int(params.get("regime_slow_window", 120)),
+        regime_mean_reversion_window=int(params.get("regime_mean_reversion_window", 40)),
+        regime_volatility_window=int(params.get("regime_volatility_window", 30)),
+    )
+    return min_history
+
+
 def _publish_directory_reference(storage, *, source_dir: str | Path | None, organization_id: str, artifact_type: str, artifact_id: str) -> dict[str, Any] | None:
     if not source_dir:
         return None
@@ -827,7 +858,7 @@ class BacktestService:
             symbols = request.symbols or spec.get("asset_universe", {}).get("symbols", [])
             if not symbols:
                 raise ValueError("User-created strategies require at least one symbol.")
-        if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment"}) and not request.symbols:
+        if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment", "committee_signal_follower"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
         if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.event_dataset_id and not request.use_sec_companyfacts and not request.include_sec_filings:
             raise ValueError("Event backtests require an event file, SEC company facts, or official SEC filings.")
@@ -839,10 +870,18 @@ class BacktestService:
         validate_relative_path(request.artifact_root, settings=self.settings, field_name="artifact_root")
         validate_relative_path(request.sector_map_path, settings=self.settings, field_name="sector_map_path")
         validate_relative_path(request.event_file, settings=self.settings, field_name="event_file")
-        if request.train_bars <= request.purge_bars + 5:
+        if request.pipeline != "committee_signal_follower" and request.train_bars <= request.purge_bars + 5:
             raise ValueError("Training bars must be meaningfully larger than purge bars.")
         if request.step_bars < request.test_bars:
             raise ValueError("step_bars must be greater than or equal to test_bars to avoid overlapping out-of-sample accounting.")
+        if request.pipeline in DIRECTIONAL_PIPELINES:
+            params = _clean_parameters(request.parameters)
+            min_history = _directional_min_history(request.pipeline, params)
+            if request.train_bars < min_history:
+                raise ValueError(
+                    f"{request.pipeline} requires at least {min_history} train_bars for indicator warmup; "
+                    f"received {request.train_bars}."
+                )
 
     def run_backtest(
         self,
@@ -1150,6 +1189,40 @@ class BacktestService:
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
 
+        if pipeline == "committee_signal_follower":
+            report(
+                "running_committee_signal_follower",
+                f"Running committee signal follower across {len(request.symbols)} symbols with decisions from DecisionHistoryStore.",
+                0.22,
+            )
+            from ..research.decision_history import DecisionHistoryStore
+            decision_store = DecisionHistoryStore(self.settings)
+            run_output = run_committee_signal_follower_pipeline(
+                symbols=request.symbols,
+                decision_store=decision_store,
+                start=request.start,
+                end=request.end,
+                interval=request.interval,
+                experiment_name=experiment_name,
+                price_cache_dir=str(self.settings.price_cache_dir),
+                artifact_root=artifact_root,
+                position_sizing=str(params.get("position_sizing", "confidence_weighted")),
+                max_position_pct=float(params.get("max_position_pct", 0.25)),
+                confidence_threshold=int(params.get("confidence_threshold", 30)),
+                scale_in_confidence_delta=int(params.get("scale_in_confidence_delta", 10)),
+                scale_out_on_opposite=bool(params.get("scale_out_on_opposite", True)),
+                flat_on_avoid=bool(params.get("flat_on_avoid", True)),
+                train_bars=1,
+                test_bars=None,
+                step_bars=None,
+                purge_bars=0,
+                embargo_bars=0,
+                pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
+            )
+            report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
+            return _result_payload(run_output)
+
         raise ValueError(f"Unsupported backtest pipeline: {pipeline}")
 
     @staticmethod
@@ -1247,6 +1320,29 @@ class BacktestService:
                 "objective": "Test whether official events plus positive/negative sentiment create post-event continuation.",
                 "risk_level": "High",
                 "validation_focus": "Look-ahead safety, event timestamp quality, sentiment coverage, and overfit thresholds.",
+            },
+            {
+                "id": "committee_signal_agent",
+                "name": "Committee Signal Follower",
+                "pipeline": "committee_signal_follower",
+                "symbols": ["AAPL", "MSFT", "GLD"],
+                "start": "2025-01-01",
+                "end": "2026-05-20",
+                "train_bars": 1,
+                "test_bars": 63,
+                "step_bars": 63,
+                "purge_bars": 0,
+                "parameters": {
+                    "max_position_pct": 0.25,
+                    "confidence_threshold": 30,
+                    "scale_in_confidence_delta": 10,
+                    "scale_out_on_opposite": True,
+                    "flat_on_avoid": True,
+                },
+                "description": "Simulates trading every historical committee research decision — BUY goes long, SELL goes short, AVOID flattens — to measure the real P&L of following the AI research agents.",
+                "objective": "Validate whether past committee recommendations would have been profitable.",
+                "risk_level": "Medium",
+                "validation_focus": "Decision coverage, signal quality, drawdown during conflicting signals.",
             },
         ]
 

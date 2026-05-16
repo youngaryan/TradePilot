@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -835,6 +836,78 @@ class BackendMarketResearchProviderTests(unittest.TestCase):
         self.assertEqual(len(context.price_history), 10)
         self.assertEqual(len(stub.calls), 2)
         self.assertTrue(any("365-day extension was unavailable" in warning for warning in context.warnings))
+
+
+class MultiStockResearchExtensionTests(unittest.TestCase):
+    def test_pair_request_validates_both_symbols(self) -> None:
+        request = MarketResearchRunRequest(ticker="ko", pair="ko,pep")
+        self.assertEqual(request.ticker, "KO")
+        self.assertEqual(request.pair, "KO,PEP")
+        with self.assertRaises(ValueError):
+            MarketResearchRunRequest(ticker="KO", pair="BAD SYMBOL,PEP")
+        with self.assertRaises(ValueError):
+            MarketResearchRunRequest(ticker="KO", pair="KO")
+
+    def test_universe_filter_is_case_insensitive_and_supports_liquidity_alias(self) -> None:
+        from pairs_trading.research.stock_universe import UniverseBuilder
+
+        universe = UniverseBuilder().build_default()
+        software = universe.filter(sector="technology", industry="software", min_liquidity=True)
+
+        self.assertGreater(len(universe.stocks), 400)
+        self.assertTrue(software.stocks)
+        self.assertTrue(all(item.sector == "Technology" for item in software.stocks))
+        self.assertTrue(all(item.is_liquid for item in software.stocks))
+
+    def test_chart_data_single_observation_does_not_emit_nan_bands(self) -> None:
+        from pairs_trading.research.chart_data import ChartDataBuilder
+
+        point = [PriceBar(date="2026-05-01", close=100.0)]
+        spread = ChartDataBuilder().spread_chart(point, point, "AAA", "BBB")
+
+        self.assertEqual(spread["bands"]["std"], 0.0)
+        self.assertEqual(spread["bands"]["upper_2sigma"], 0.0)
+        self.assertEqual(spread["data"][0]["zscore"], 0.0)
+
+    def test_pair_job_persists_aggregate_multi_stock_result(self) -> None:
+        from pairs_trading.backend.market_research_services import MarketResearchJobRunner
+
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            settings = BackendSettings(
+                metadata_db_path=root / "metadata.sqlite3",
+                market_research_job_state_dir=root / "jobs",
+                market_research_artifact_root=root / "reports",
+                market_research_data_provider="demo",
+                market_research_llm_provider="mock",
+                enable_in_process_jobs=True,
+            )
+            runner = MarketResearchJobRunner(settings)
+            demo = runner.metadata_store.ensure_demo_workspace()
+            job = runner.submit(
+                MarketResearchRunRequest(ticker="KO", pair="KO,PEP"),
+                organization_id=demo["organization_id"],
+                user_id=demo["user_id"],
+            )
+
+            completed = None
+            for _ in range(80):
+                current = runner.get_job(job["id"], organization_id=demo["organization_id"])
+                if current and current["status"] not in {"queued", "running"}:
+                    completed = current
+                    break
+                time.sleep(0.05)
+
+            self.assertIsNotNone(completed)
+            assert completed is not None
+            self.assertEqual(completed["status"], "completed", completed.get("error"))
+            result = completed["result"]
+            self.assertEqual(result["report_type"], "multi_stock")
+            self.assertEqual(result["ticker"], "KO,PEP")
+            self.assertIn(result["decision"], {"BUY", "HOLD", "SELL", "AVOID"})
+            self.assertGreaterEqual(result["confidence"], 0)
+            self.assertEqual(len(result["reports"]), 2)
+            self.assertIn("pair_metrics", result["cross_stock_analysis"])
 
 
 if __name__ == "__main__":
