@@ -1979,9 +1979,20 @@ class SentimentJobRunner:
     def get_job(self, job_id: str, *, organization_id: str) -> dict[str, Any] | None:
         with self.lock:
             job = self.jobs.get(job_id)
-            if job is None or job.organization_id != organization_id:
-                return None
-            return None if job is None else job.to_dict()
+            if job is not None and job.organization_id == organization_id:
+                return job.to_dict()
+        stored = self.metadata_store.get_job(kind="sentiment", job_id=job_id, organization_id=organization_id)
+        if stored is not None:
+            return stored
+        path = self.jobs_dir / f"{job_id}.json"
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if payload.get("organization_id") == organization_id:
+                    return payload
+            except Exception:
+                pass
+        return None
 
     def _set_status(self, job_id: str, status: str, **updates: Any) -> None:
         now = _utc_now_iso()
