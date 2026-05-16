@@ -694,10 +694,6 @@ tr:last-child td {
     repeating-linear-gradient(90deg, rgba(20, 32, 51, 0.035) 0, rgba(20, 32, 51, 0.035) 1px, transparent 1px, transparent 76px);
 }
 
-.chart--large {
-  min-height: 280px;
-}
-
 .chart--heatmap {
   display: block;
   min-height: 260px;
@@ -729,47 +725,6 @@ tr:last-child td {
 .chart-grid {
   stroke: rgba(143, 161, 184, 0.28);
   stroke-width: 1;
-}
-
-.chart-line {
-  stroke-width: 3.2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.chart-line--primary {
-  stroke: #0b5cad;
-}
-
-.chart-line--danger {
-  stroke: #b42318;
-}
-
-.chart-line--accent {
-  stroke: #0f766e;
-}
-
-.chart-bar--good,
-.chart-bubble--good {
-  fill: rgba(19, 117, 71, 0.76);
-}
-
-.chart-bar--bad,
-.chart-bubble--bad {
-  fill: rgba(180, 35, 24, 0.72);
-}
-
-.chart-bar--neutral {
-  fill: rgba(62, 102, 142, 0.32);
-}
-
-.chart-bubble--neutral {
-  fill: rgba(62, 102, 142, 0.58);
-}
-
-.chart-bubble {
-  stroke: rgba(255, 255, 255, 0.86);
-  stroke-width: 2;
 }
 
 .chart-label {
@@ -3378,22 +3333,6 @@ button.warning-item-header {
 :root[data-theme="dark"] .chart-sub-label,
 :root[data-theme="dark"] .chart-tick {
   fill: #94a3b8;
-}
-
-:root[data-theme="dark"] .chart-line--primary {
-  stroke: #60a5fa;
-}
-
-:root[data-theme="dark"] .chart-line--danger {
-  stroke: #f87171;
-}
-
-:root[data-theme="dark"] .chart-line--accent {
-  stroke: #5eead4;
-}
-
-:root[data-theme="dark"] .chart-bubble--neutral {
-  fill: rgba(148, 163, 184, 0.62);
 }
 
 :root[data-theme="dark"] .backtest-chart-canvas,

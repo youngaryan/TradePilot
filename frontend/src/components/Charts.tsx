@@ -2,6 +2,7 @@ import type { LeaderboardRow, PaperStrategy, SentimentDailyPoint, SentimentSourc
 import { formatCurrency, formatDateTime, formatNumber, formatPercent, pipelineLabel, toNumber } from "../utils/format";
 import { aggregateEquityHistory, orderNotional } from "../utils/quant";
 import type { PaperOrder } from "../api/types";
+import { Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from "recharts";
 
 function scale(value: number, min: number, max: number, low: number, high: number) {
   if (Math.abs(max - min) < 1e-9) return (low + high) / 2;
@@ -40,57 +41,49 @@ function EmptyChart({ label }: { label: string }) {
   return <div className="empty-state chart-empty">{label}</div>;
 }
 
+function shortDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 export function PortfolioEquityChart({ strategies }: { strategies: PaperStrategy[] }) {
   const points = aggregateEquityHistory(strategies);
   if (points.length < 2) return <EmptyChart label="Run at least two paper batches to build the equity trail." />;
 
-  const width = 900;
-  const height = 300;
-  const padding = 36;
-  const equities = points.map((point) => point.equity);
-  const pnlValues = points.map((point) => point.dailyPnl);
-  const minEquity = Math.min(...equities);
-  const maxEquity = Math.max(...equities);
-  const maxAbsPnl = Math.max(1, ...pnlValues.map((value) => Math.abs(value)));
-  const x = (index: number) => scale(index, 0, points.length - 1, padding, width - padding);
-  const yEquity = (value: number) => scale(value, minEquity, maxEquity, height * 0.62, padding);
-  const yPnl = (value: number) => scale(value, -maxAbsPnl, maxAbsPnl, height - padding, height * 0.73);
-  const equityPath = points.map((point, index) => `${x(index)},${yEquity(point.equity)}`).join(" ");
-  const zeroY = yPnl(0);
+  const data = points.map((point) => ({
+    ts: point.timestamp,
+    equity: point.equity,
+    pnl: point.dailyPnl,
+  }));
+  const latest = data.at(-1);
 
   return (
-    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Portfolio equity and PnL">
-      <defs>
-        <linearGradient id="equityGradient" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor="#0b5cad" stopOpacity="0.2" />
-          <stop offset="100%" stopColor="#0b5cad" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <line x1={padding} x2={width - padding} y1={height * 0.67} y2={height * 0.67} className="chart-axis" />
-      <line x1={padding} x2={width - padding} y1={zeroY} y2={zeroY} className="chart-axis chart-axis--dashed" />
-      {points.map((point, index) => {
-        const barX = x(index);
-        const barY = yPnl(point.dailyPnl);
-        return (
-          <rect
-            key={`${point.timestamp}-${index}`}
-            x={barX - 3}
-            y={Math.min(barY, zeroY)}
-            width={6}
-            height={Math.max(Math.abs(barY - zeroY), 1)}
-            rx={3}
-            className={point.dailyPnl >= 0 ? "chart-bar chart-bar--good" : "chart-bar chart-bar--bad"}
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+        <span className="chart-label">Equity {formatCurrency(latest?.equity, true)}</span>
+        <span className="chart-label">Latest PnL {formatCurrency(latest?.pnl, true)}</span>
+      </div>
+      <ResponsiveContainer width="100%" height={300}>
+        <ComposedChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+          <XAxis dataKey="ts" hide />
+          <YAxis yAxisId="equity" domain={["auto", "auto"]} hide />
+          <YAxis yAxisId="pnl" domain={["auto", "auto"]} hide />
+          <Tooltip
+            contentStyle={{ fontSize: 13, background: "var(--surface-color)", border: "1px solid var(--border-color)" }}
+            formatter={(value: unknown, name: unknown) => [formatCurrency(Number(value), true), name === "equity" ? "Equity" : "Daily PnL"]}
+            labelFormatter={() => ""}
           />
-        );
-      })}
-      <polyline points={equityPath} fill="none" className="chart-line chart-line--primary" />
-      <text x={padding} y={24} className="chart-label">
-        Equity {formatCurrency(points.at(-1)?.equity, true)}
-      </text>
-      <text x={width - 240} y={24} className="chart-label">
-        Latest PnL {formatCurrency(points.at(-1)?.dailyPnl, true)}
-      </text>
-    </svg>
+          <Bar yAxisId="pnl" dataKey="pnl" isAnimationActive={false}>
+            {data.map((entry, index) => (
+              <Cell key={index} fill={entry.pnl >= 0 ? "var(--color-success)" : "var(--color-danger)"} />
+            ))}
+          </Bar>
+          <Line yAxisId="equity" type="monotone" dataKey="equity" stroke="var(--color-primary)" dot={false} strokeWidth={2} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -101,32 +94,34 @@ export function BacktestEquityChart({
 }) {
   if (!points.length) return <EmptyChart label="No backtest equity curve returned yet." />;
 
-  const width = 900;
-  const height = 300;
-  const padding = 36;
-  const equities = points.map((point) => point.equity);
-  const drawdowns = points.map((point) => point.drawdown);
-  const minEquity = Math.min(...equities);
-  const maxEquity = Math.max(...equities);
-  const minDrawdown = Math.min(-0.01, ...drawdowns);
-  const x = (index: number) => scale(index, 0, points.length - 1, padding, width - padding);
-  const yEquity = (value: number) => scale(value, minEquity, maxEquity, height * 0.58, padding);
-  const yDrawdown = (value: number) => scale(Math.abs(value), 0, Math.abs(minDrawdown), height - padding, height * 0.72);
-  const equityPath = points.map((point, index) => `${x(index)},${yEquity(point.equity)}`).join(" ");
-  const drawdownPath = points.map((point, index) => `${x(index)},${yDrawdown(point.drawdown)}`).join(" ");
+  const data = points.map((point) => ({
+    ts: point.timestamp,
+    equity: point.equity,
+    drawdown: point.drawdown * 100,
+  }));
+  const last = data.at(-1);
+  const minDD = Math.min(-0.01, ...points.map((p) => p.drawdown)) * 100;
 
   return (
-    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Backtest equity and drawdown">
-      <line x1={padding} x2={width - padding} y1={height * 0.66} y2={height * 0.66} className="chart-axis" />
-      <polyline points={equityPath} fill="none" className="chart-line chart-line--primary" />
-      <polyline points={drawdownPath} fill="none" className="chart-line chart-line--danger" />
-      <text x={padding} y={24} className="chart-label">
-        Final equity {formatNumber(points.at(-1)?.equity)}
-      </text>
-      <text x={width - 220} y={24} className="chart-label">
-        Max drawdown {formatPercent(minDrawdown)}
-      </text>
-    </svg>
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+        <span className="chart-label">Final equity {formatNumber(last?.equity)}</span>
+        <span className="chart-label">Max drawdown {formatPercent(minDD / 100)}</span>
+      </div>
+      <ResponsiveContainer width="100%" height={300}>
+        <ComposedChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+          <XAxis dataKey="ts" hide />
+          <YAxis yAxisId="equity" domain={["auto", "auto"]} hide />
+          <YAxis yAxisId="drawdown" domain={["auto", 0]} hide />
+          <Tooltip
+            contentStyle={{ fontSize: 13, background: "var(--surface-color)", border: "1px solid var(--border-color)" }}
+          />
+          <Line yAxisId="equity" type="monotone" dataKey="equity" stroke="var(--color-primary)" dot={false} strokeWidth={2} />
+          <Line yAxisId="drawdown" type="monotone" dataKey="drawdown" stroke="var(--color-danger)" dot={false} strokeWidth={2} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -217,42 +212,40 @@ export function AllocationStrip({ strategies }: { strategies: PaperStrategy[] })
 
 export function RiskReturnMap({ strategies }: { strategies: PaperStrategy[] }) {
   if (!strategies.length) return <EmptyChart label="Run paper strategies to populate the risk map." />;
-  const width = 900;
-  const height = 300;
-  const padding = 42;
-  const pnl = strategies.map((strategy) => strategy.daily_pnl);
-  const exposure = strategies.map((strategy) => strategy.gross_exposure_ratio);
-  const minPnl = Math.min(-1, ...pnl);
-  const maxPnl = Math.max(1, ...pnl);
-  const maxExposure = Math.max(0.25, ...exposure);
-  const x = (value: number) => scale(value, 0, maxExposure, padding, width - padding);
-  const y = (value: number) => scale(value, minPnl, maxPnl, height - padding, padding);
-  const zeroY = y(0);
+
+  const positive = strategies.filter((s) => s.daily_pnl >= 0).map((s) => ({
+    name: s.name, exposure: s.gross_exposure_ratio, pnl: s.daily_pnl, trades: s.trade_count
+  }));
+  const negative = strategies.filter((s) => s.daily_pnl < 0).map((s) => ({
+    name: s.name, exposure: s.gross_exposure_ratio, pnl: s.daily_pnl, trades: s.trade_count
+  }));
 
   return (
-    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Risk return map">
-      <line x1={padding} x2={width - padding} y1={zeroY} y2={zeroY} className="chart-axis chart-axis--dashed" />
-      <line x1={padding} x2={padding} y1={padding} y2={height - padding} className="chart-axis" />
-      {strategies.map((strategy) => {
-        const radius = Math.max(7, Math.min(22, 7 + strategy.trade_count * 1.5));
-        return (
-          <g key={strategy.name}>
-            <circle
-              cx={x(strategy.gross_exposure_ratio)}
-              cy={y(strategy.daily_pnl)}
-              r={radius}
-              className={strategy.daily_pnl >= 0 ? "chart-bubble chart-bubble--good" : "chart-bubble chart-bubble--bad"}
-            />
-            <text x={x(strategy.gross_exposure_ratio) + radius + 6} y={y(strategy.daily_pnl) + 4} className="chart-label">
-              {strategy.name.slice(0, 26)}
-            </text>
-          </g>
-        );
-      })}
-      <text x={padding} y={24} className="chart-label">
-        X exposure | Y daily PnL | bubble trade count
-      </text>
-    </svg>
+    <div>
+      <div style={{ padding: "0 4px", marginBottom: 8 }}>
+        <span className="chart-label">X = exposure | Y = daily PnL | bubble size = trade count</span>
+      </div>
+      <ResponsiveContainer width="100%" height={300}>
+        <ScatterChart>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+          <XAxis dataKey="exposure" tick={{ fontSize: 11 }} />
+          <YAxis dataKey="pnl" tick={{ fontSize: 11 }} />
+          <ZAxis dataKey="trades" range={[60, 400]} />
+          <Tooltip
+            contentStyle={{ fontSize: 13, background: "var(--surface-color)", border: "1px solid var(--border-color)" }}
+            formatter={(value: unknown, name: unknown) => {
+              const v = Number(value);
+              if (name === "exposure") return [formatPercent(v), "Exposure"];
+              if (name === "pnl") return [formatCurrency(v, true), "Daily PnL"];
+              return [String(v), String(name)];
+            }}
+          />
+          <ReferenceLine y={0} stroke="var(--border-color)" strokeDasharray="3 3" />
+          <Scatter data={positive} fill="#0f766e" isAnimationActive={false} />
+          <Scatter data={negative} fill="#b42318" isAnimationActive={false} />
+        </ScatterChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -279,12 +272,6 @@ export function StrategyConcentrationBars({ strategy }: { strategy: PaperStrateg
   return <HorizontalBars valueKind="percent" rows={rows} />;
 }
 
-function shortDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
 export function SentimentTimelineChart({
   points,
   title = "Sentiment overlay",
@@ -296,11 +283,6 @@ export function SentimentTimelineChart({
 }) {
   if (!points.length) return <EmptyChart label="No sentiment points yet. Run the accumulator to build the overlay dataset." />;
 
-  const width = 900;
-  const height = 360;
-  const padding = 58;
-  const rightPadding = 34;
-  const bottomPadding = 58;
   const byDate = Array.from(
     points.reduce((map, point) => {
       const dateKey = String(point.date).slice(0, 10);
@@ -320,106 +302,74 @@ export function SentimentTimelineChart({
   })).sort((a, b) => a.date.localeCompare(b.date));
 
   const maxArticles = Math.max(1, ...byDate.map((point) => point.article_count));
-  const x = (index: number) => scale(index, 0, Math.max(byDate.length - 1, 1), padding, width - rightPadding);
-  const ySentiment = (value: number) => scale(value, -1, 1, height - bottomPadding, padding);
-  const yArticle = (value: number) => scale(value, 0, maxArticles, height - bottomPadding, height * 0.60);
-  const zeroY = ySentiment(0);
-  const sentimentPath = byDate.map((point, index) => `${x(index)},${ySentiment(point.sentiment)}`).join(" ");
-  const tickIndexes = byDate
-    .map((_, index) => index)
-    .filter((index) => byDate.length <= 8 || index === 0 || index === byDate.length - 1 || index % Math.ceil(byDate.length / 6) === 0);
-  const latest = byDate.at(-1);
   const averageSentiment = byDate.reduce((sum, point) => sum + point.sentiment, 0) / Math.max(byDate.length, 1);
   const totalArticles = byDate.reduce((sum, point) => sum + point.article_count, 0);
   const bestPoint = byDate.reduce((best, point) => (point.sentiment > best.sentiment ? point : best), byDate[0]);
   const worstPoint = byDate.reduce((worst, point) => (point.sentiment < worst.sentiment ? point : worst), byDate[0]);
+  const latest = byDate.at(-1);
 
   return (
-    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Sentiment score and article count">
-      <defs>
-        <linearGradient id="sentimentAreaGradient" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor="#0b5cad" stopOpacity="0.14" />
-          <stop offset="100%" stopColor="#0b5cad" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {[1, 0.5, 0, -0.5, -1].map((tick) => (
-        <g key={tick}>
-          <line x1={padding} x2={width - rightPadding} y1={ySentiment(tick)} y2={ySentiment(tick)} className={tick === 0 ? "chart-axis chart-axis--dashed" : "chart-grid"} />
-          <text x={padding - 12} y={ySentiment(tick) + 4} className="chart-tick" textAnchor="end">
-            {formatNumber(tick)}
-          </text>
-        </g>
-      ))}
-      <line x1={padding} x2={padding} y1={padding} y2={height - bottomPadding} className="chart-axis" />
-      <line x1={padding} x2={width - rightPadding} y1={height - bottomPadding} y2={height - bottomPadding} className="chart-axis" />
-      {byDate.map((point, index) => {
-        const barX = x(index);
-        const barY = yArticle(point.article_count);
-        return (
-          <rect
-            key={point.date}
-            x={barX - 6}
-            y={barY}
-            width={12}
-            height={Math.max(height - bottomPadding - barY, 1)}
-            rx={4}
-            className="chart-bar chart-bar--neutral"
-          >
-            <title>{`${point.date}: ${formatNumber(point.article_count, 0)} articles`}</title>
-          </rect>
-        );
-      })}
-      <polygon
-        points={`${padding},${zeroY} ${sentimentPath} ${width - rightPadding},${zeroY}`}
-        fill="url(#sentimentAreaGradient)"
-      />
-      <polyline points={sentimentPath} fill="none" className="chart-line chart-line--primary" />
-      {byDate.map((point, index) => {
-        const sentimentClass = point.sentiment >= 0 ? "chart-bubble chart-bubble--good" : "chart-bubble chart-bubble--bad";
-        return (
-          <g key={`${point.date}-dot`}>
-            <circle
-              cx={x(index)}
-              cy={ySentiment(point.sentiment)}
-              r={Math.max(5, 5 + point.confidence_avg * 6)}
-              className={sentimentClass}
-            >
-              <title>
-                {`${point.date}\nSentiment: ${formatNumber(point.sentiment)}\nArticles: ${formatNumber(point.article_count, 0)}\nConfidence: ${formatNumber(point.confidence_avg)}`}
-              </title>
-            </circle>
-            {(point.date === bestPoint.date || point.date === worstPoint.date || point.date === latest?.date) ? (
-              <text x={x(index)} y={ySentiment(point.sentiment) - 16} className="chart-mini-label" textAnchor="middle">
-                {formatNumber(point.sentiment)}
-              </text>
-            ) : null}
-          </g>
-        );
-      })}
-      {tickIndexes.map((index) => (
-        <g key={`${byDate[index].date}-tick`}>
-          <line x1={x(index)} x2={x(index)} y1={height - bottomPadding} y2={height - bottomPadding + 6} className="chart-axis" />
-          <text x={x(index)} y={height - 30} className="chart-tick" textAnchor="middle">
-            {shortDate(byDate[index].date)}
-          </text>
-          <text x={x(index)} y={height - 14} className="chart-tick chart-tick--muted" textAnchor="middle">
-            {byDate[index].date.slice(0, 4)}
-          </text>
-        </g>
-      ))}
-      <text x={padding} y={24} className="chart-label">
-        {title}
-      </text>
-      <text x={padding} y={43} className="chart-sub-label">
-        {detail ?? "Line = weighted sentiment | bars = articles | dot size = confidence"}
-      </text>
-      <text x={width - 330} y={24} className="chart-label">
-        Latest {formatNumber(latest?.sentiment)} | Avg {formatNumber(averageSentiment)}
-      </text>
-      <text x={width - 330} y={43} className="chart-sub-label">
-        {formatNumber(totalArticles, 0)} articles | high {formatNumber(bestPoint.sentiment)} on {shortDate(bestPoint.date)} | low {formatNumber(worstPoint.sentiment)} on {shortDate(worstPoint.date)}
-      </text>
-    </svg>
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, padding: "0 4px" }}>
+        <div>
+          <div className="chart-label">{title}</div>
+          <div className="chart-sub-label">{detail ?? "Line = weighted sentiment | bars = articles | dot size = confidence"}</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="chart-label">
+            Latest {formatNumber(latest?.sentiment)} | Avg {formatNumber(averageSentiment)}
+          </div>
+          <div className="chart-sub-label">
+            {formatNumber(totalArticles, 0)} articles | high {formatNumber(bestPoint.sentiment)} on {shortDate(bestPoint.date)} | low {formatNumber(worstPoint.sentiment)} on {shortDate(worstPoint.date)}
+          </div>
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={360}>
+        <ComposedChart data={byDate}>
+          <defs>
+            <linearGradient id="sentimentAreaGradient" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="var(--color-primary)" stopOpacity={0.14} />
+              <stop offset="100%" stopColor="var(--color-primary)" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 11 }}
+            interval="preserveStartEnd"
+            tickFormatter={(val: string) => shortDate(val)}
+          />
+          <YAxis yAxisId="sentiment" domain={[-1, 1]} tick={{ fontSize: 11 }} />
+          <YAxis yAxisId="articles" domain={[0, "auto"]} hide orientation="right" />
+          <Tooltip
+            contentStyle={{ fontSize: 13, background: "var(--surface-color)", border: "1px solid var(--border-color)" }}
+            formatter={(value: unknown, name: unknown) => {
+              const v = Number(value);
+              if (name === "sentiment") return [formatNumber(v), "Sentiment"];
+              if (name === "article_count") return [formatNumber(v, 0), "Articles"];
+              if (name === "confidence_avg") return [formatNumber(v), "Confidence"];
+              return [String(v), String(name)];
+            }}
+          />
+          <Bar yAxisId="articles" dataKey="article_count" fill="var(--color-neutral)" opacity={0.5} radius={[4, 4, 0, 0]} />
+          <Area yAxisId="sentiment" type="monotone" dataKey="sentiment" fill="url(#sentimentAreaGradient)" stroke="none" />
+          <Line yAxisId="sentiment" type="monotone" dataKey="sentiment" stroke="var(--color-primary)" dot={false} strokeWidth={2} />
+          <Scatter
+            yAxisId="sentiment"
+            dataKey="sentiment"
+            isAnimationActive={false}
+            shape={(props: { cx?: number; cy?: number; payload?: { sentiment?: number; confidence_avg?: number } }) => {
+              const cx = props.cx ?? 0;
+              const cy = props.cy ?? 0;
+              const r = Math.max(5, 5 + (props.payload?.confidence_avg ?? 0) * 6);
+              const color = (props.payload?.sentiment ?? 0) >= 0 ? "#0f766e" : "#b42318";
+              return <circle cx={cx} cy={cy} r={r} fill={color} opacity={0.7} />;
+            }}
+          />
+          <ReferenceLine yAxisId="sentiment" y={0} stroke="var(--border-color)" strokeDasharray="3 3" />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -674,90 +624,41 @@ export function TelemetryTimelineChart({ events }: { events: TelemetryEventRecor
     .sort((a, b) => a.key.localeCompare(b.key))
     .slice(-14);
 
-  const width = 900;
-  const height = 320;
-  const padding = 48;
-  const bottomPadding = 62;
-  const chartTop = 66;
-  const chartBottom = height - bottomPadding;
-  const maxCount = Math.max(1, ...buckets.map((bucket) => bucket.total));
-  const slotWidth = (width - padding * 2) / Math.max(buckets.length, 1);
-  const barWidth = Math.max(18, Math.min(44, slotWidth * 0.62));
-  const y = (value: number) => scale(value, 0, maxCount, chartBottom, chartTop);
   const latest = datedEvents.at(-1)?.event;
   const total = buckets.reduce((sum, bucket) => sum + bucket.total, 0);
   const errors = buckets.reduce((sum, bucket) => sum + bucket.error, 0);
 
   return (
-    <svg className="chart chart--large" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Telemetry events over time">
-      <line x1={padding} x2={width - padding} y1={chartBottom} y2={chartBottom} className="chart-axis" />
-      {[0.25, 0.5, 0.75, 1].map((ratio) => (
-        <g key={ratio}>
-          <line x1={padding} x2={width - padding} y1={y(maxCount * ratio)} y2={y(maxCount * ratio)} className="chart-grid" />
-          <text x={padding - 12} y={y(maxCount * ratio) + 4} textAnchor="end" className="chart-tick">
-            {formatNumber(maxCount * ratio, 0)}
-          </text>
-        </g>
-      ))}
-      {buckets.map((bucket, index) => {
-        const x = padding + index * slotWidth + slotWidth / 2 - barWidth / 2;
-        let cursor = chartBottom;
-        const segments = [
-          ["product", bucket.product],
-          ["refresh", bucket.refresh],
-          ["engineering", bucket.engineering],
-          ["other", bucket.other],
-          ["error", bucket.error]
-        ] as const;
-        return (
-          <g key={bucket.key}>
-            {segments.map(([segment, count]) => {
-              if (!count) return null;
-              const segmentHeight = chartBottom - y(count);
-              cursor -= segmentHeight;
-              return (
-                <rect
-                  key={segment}
-                  x={x}
-                  y={cursor}
-                  width={barWidth}
-                  height={Math.max(segmentHeight, 2)}
-                  rx={segment === "error" ? 2 : 4}
-                  className={`telemetry-segment telemetry-segment--${segment}`}
-                >
-                  <title>{`${bucket.label}\n${segment}: ${formatNumber(count, 0)} events\nTotal: ${formatNumber(bucket.total, 0)}`}</title>
-                </rect>
-              );
-            })}
-            <text x={x + barWidth / 2} y={height - 34} textAnchor="middle" className="chart-tick">
-              {bucket.label}
-            </text>
-          </g>
-        );
-      })}
-      <text x={padding} y={28} className="chart-label">
-        Telemetry event volume
-      </text>
-      <text x={padding} y={48} className="chart-sub-label">
-        Stacked by product, refresh, engineering, other, and error events
-      </text>
-      <text x={width - 360} y={28} className="chart-label">
-        {formatNumber(total, 0)} events | {formatNumber(errors, 0)} errors
-      </text>
-      <text x={width - 360} y={48} className="chart-sub-label">
-        Latest: {latest ? `${latest.name} at ${formatDateTime(latest.occurred_at_utc)}` : "No latest event"}
-      </text>
-      <g className="telemetry-chart-legend" transform={`translate(${padding}, ${height - 18})`}>
-        {["product", "refresh", "engineering", "other", "error"].map((segment, index) => (
-          <g key={segment} transform={`translate(${index * 136}, 0)`}>
-            <rect width={10} height={10} rx={3} className={`telemetry-segment telemetry-segment--${segment}`} />
-            <text x={16} y={9} className="chart-tick">
-              {segment}
-            </text>
-          </g>
-        ))}
-      </g>
-    </svg>
+    <div role="img" aria-label="Telemetry events over time">
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+        <div>
+          <div className="chart-label">Telemetry event volume</div>
+          <div className="chart-sub-label">Stacked by product, refresh, engineering, other, and error events</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="chart-label">{formatNumber(total, 0)} events | {formatNumber(errors, 0)} errors</div>
+          <div className="chart-sub-label">
+            Latest: {latest ? `${latest.name} at ${formatDateTime(latest.occurred_at_utc)}` : "No latest event"}
+          </div>
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={320}>
+        <BarChart data={buckets}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+          <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} />
+          <YAxis tick={{ fontSize: 11 }} />
+          <Tooltip
+            contentStyle={{ fontSize: 13, background: "var(--surface-color)", border: "1px solid var(--border-color)" }}
+          />
+          <Bar stackId="a" dataKey="product" fill="var(--color-info)" />
+          <Bar stackId="a" dataKey="refresh" fill="var(--color-success)" />
+          <Bar stackId="a" dataKey="engineering" fill="var(--color-warn)" />
+          <Bar stackId="a" dataKey="other" fill="var(--color-neutral)" />
+          <Bar stackId="a" dataKey="error" fill="var(--color-danger)" />
+          <Legend fontSize={11} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -770,50 +671,59 @@ export function TelemetryLatencyChart({ events }: { events: TelemetryEventRecord
 
   if (!points.length) return <EmptyChart label="No latency fields found yet. Add latency_ms or duration_ms to event properties to monitor performance." />;
 
-  const width = 900;
-  const height = 260;
-  const padding = 48;
-  const bottomPadding = 54;
-  const maxLatency = Math.max(1, ...points.map((point) => point.latency));
-  const x = (index: number) => scale(index, 0, Math.max(points.length - 1, 1), padding, width - padding);
-  const y = (value: number) => scale(value, 0, maxLatency, height - bottomPadding, padding);
-  const path = points.map((point, index) => `${x(index)},${y(point.latency)}`).join(" ");
   const sortedLatencies = points.map((point) => point.latency).sort((a, b) => a - b);
   const p95 = sortedLatencies[Math.min(sortedLatencies.length - 1, Math.floor(sortedLatencies.length * 0.95))];
   const average = sortedLatencies.reduce((sum, value) => sum + value, 0) / sortedLatencies.length;
+  const data = points.map((point) => ({
+    ts: point.timestamp,
+    latency: point.latency,
+    isError: telemetryIsError(point.event),
+    name: point.event.name,
+  }));
+  const maxLatency = Math.max(1, ...points.map((p) => p.latency));
 
   return (
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Telemetry latency over time">
-      {[0, 0.5, 1].map((ratio) => (
-        <g key={ratio}>
-          <line x1={padding} x2={width - padding} y1={y(maxLatency * ratio)} y2={y(maxLatency * ratio)} className={ratio === 0 ? "chart-axis" : "chart-grid"} />
-          <text x={padding - 12} y={y(maxLatency * ratio) + 4} textAnchor="end" className="chart-tick">
-            {formatNumber(maxLatency * ratio, 0)}ms
-          </text>
-        </g>
-      ))}
-      <polyline points={path} fill="none" className="chart-line chart-line--accent" />
-      {points.map((point, index) => (
-        <circle
-          key={`${point.event.id}-${index}`}
-          cx={x(index)}
-          cy={y(point.latency)}
-          r={telemetryIsError(point.event) ? 7 : 5}
-          className={telemetryIsError(point.event) ? "chart-bubble chart-bubble--bad" : "chart-bubble chart-bubble--neutral"}
-        >
-          <title>{`${point.event.name}\n${formatNumber(point.latency, 0)}ms\n${formatDateTime(point.event.occurred_at_utc)}`}</title>
-        </circle>
-      ))}
-      <text x={padding} y={26} className="chart-label">
-        Latency trail
-      </text>
-      <text x={padding} y={46} className="chart-sub-label">
-        Reads latency_ms, duration_ms, elapsed_ms, response_ms, or runtime_ms from event properties/context
-      </text>
-      <text x={width - 260} y={26} className="chart-label">
-        Avg {formatNumber(average, 0)}ms | P95 {formatNumber(p95, 0)}ms
-      </text>
-    </svg>
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+        <div>
+          <div className="chart-label">Latency trail</div>
+          <div className="chart-sub-label">
+            Reads latency_ms, duration_ms, elapsed_ms, response_ms, or runtime_ms from event properties/context
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="chart-label">Avg {formatNumber(average, 0)}ms | P95 {formatNumber(p95, 0)}ms</div>
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={260}>
+        <ComposedChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+          <XAxis dataKey="ts" hide />
+          <YAxis yAxisId="latency" domain={[0, "auto"]} tick={{ fontSize: 11 }} tickFormatter={(v: number) => `${formatNumber(v, 0)}ms`} />
+          <Tooltip
+            contentStyle={{ fontSize: 13, background: "var(--surface-color)", border: "1px solid var(--border-color)" }}
+            formatter={(value: unknown) => [formatNumber(Number(value), 0) + "ms", "Latency"]}
+            labelFormatter={(label: unknown) => {
+              const d = new Date(Number(label));
+              return Number.isFinite(d.getTime()) ? formatDateTime(d.toISOString()) : String(label);
+            }}
+          />
+          <Line yAxisId="latency" type="monotone" dataKey="latency" stroke="var(--color-primary)" dot={false} strokeWidth={2} />
+          <Scatter
+            yAxisId="latency"
+            dataKey="latency"
+            isAnimationActive={false}
+            shape={(props: { cx?: number; cy?: number; payload?: { isError?: boolean } }) => {
+              const cx = props.cx ?? 0;
+              const cy = props.cy ?? 0;
+              const r = props.payload?.isError ? 7 : 5;
+              const fill = props.payload?.isError ? "#b42318" : "#94a3b8";
+              return <circle cx={cx} cy={cy} r={r} fill={fill} opacity={0.7} />;
+            }}
+          />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
