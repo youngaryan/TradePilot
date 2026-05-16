@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 
 import type { Tone } from "./Badge";
+import styles from "./Notice.module.css";
 
 const toneIconMap: Record<string, ReactNode> = {
   error: <AlertTriangle size={16} />,
@@ -38,7 +39,7 @@ export function Notice({
       {icon}
       <span>{children}</span>
       {onDismiss ? (
-        <button type="button" className="notice-dismiss" onClick={onDismiss} aria-label="Dismiss notice">
+        <button type="button" className={styles.dismiss} onClick={onDismiss} aria-label="Dismiss notice">
           <X size={14} />
         </button>
       ) : null}
@@ -65,7 +66,7 @@ export function NoticeBanner({
         <p>{children}</p>
       </div>
       {onDismiss ? (
-        <button type="button" className="notice-dismiss" onClick={onDismiss} aria-label="Dismiss notice">
+        <button type="button" className={styles.dismiss} onClick={onDismiss} aria-label="Dismiss notice">
           <X size={16} />
         </button>
       ) : null}

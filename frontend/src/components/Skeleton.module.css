@@ -1,0 +1,43 @@
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+  100% { opacity: 0.4; }
+}
+
+.base {
+  display: block;
+  background: var(--border-color);
+  border-radius: 4px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.line {
+  composes: base;
+  height: 14px;
+  margin-bottom: 8px;
+  min-width: 20px;
+}
+
+.circle {
+  composes: base;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
+.card {
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cardLine {
+  composes: base;
+  height: 14px;
+  margin-bottom: 8px;
+  background: var(--border-color);
+}

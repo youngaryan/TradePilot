@@ -1,3 +1,5 @@
+import styles from "./Skeleton.module.css";
+
 export function Skeleton({
   variant = "line",
   width,
@@ -14,18 +16,18 @@ export function Skeleton({
   if (height) style.height = typeof height === "number" ? `${height}px` : height;
 
   if (variant === "circle") {
-    return <span className={`skeleton skeleton--circle ${className}`} style={style} aria-hidden="true" />;
+    return <span data-testid="skeleton" className={`${styles.circle} ${className}`} style={style} aria-hidden="true" />;
   }
   if (variant === "card") {
     return (
-      <div className={`skeleton skeleton--card ${className}`} style={style} aria-hidden="true">
-        <span className="skeleton skeleton--line" style={{ width: "60%" }} />
-        <span className="skeleton skeleton--line" style={{ width: "40%" }} />
-        <span className="skeleton skeleton--line" style={{ width: "80%" }} />
+      <div data-testid="skeleton-card" className={`${styles.card} ${className}`} style={style} aria-hidden="true">
+        <span data-testid="skeleton-line" className={styles.cardLine} style={{ width: "60%" }} />
+        <span data-testid="skeleton-line" className={styles.cardLine} style={{ width: "40%" }} />
+        <span data-testid="skeleton-line" className={styles.cardLine} style={{ width: "80%" }} />
       </div>
     );
   }
-  return <span className={`skeleton skeleton--line ${className}`} style={style} aria-hidden="true" />;
+  return <span data-testid="skeleton" className={`${styles.line} ${className}`} style={style} aria-hidden="true" />;
 }
 
 export function SkeletonCard({
@@ -36,10 +38,10 @@ export function SkeletonCard({
   className?: string;
 }) {
   return (
-    <div className={`skeleton skeleton--card ${className}`} aria-hidden="true" role="presentation">
-      <span className="skeleton skeleton--line" style={{ width: "55%" }} />
+    <div data-testid="skeleton-card" className={`${styles.card} ${className}`} aria-hidden="true" role="presentation">
+      <span data-testid="skeleton-line" className={styles.cardLine} style={{ width: "55%" }} />
       {Array.from({ length: lines }).map((_, i) => (
-        <span key={i} className="skeleton skeleton--line" style={{ width: `${70 - i * 10}%` }} />
+        <span key={i} data-testid="skeleton-line" className={styles.cardLine} style={{ width: `${70 - i * 10}%` }} />
       ))}
     </div>
   );

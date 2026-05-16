@@ -4554,14 +4554,3 @@ textarea {
 /* Legend swatch dot */
 .legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 
-/* Notice dismiss button */
-.notice-dismiss { background: none; border: none; cursor: pointer; color: inherit; opacity: 0.6; padding: 2px; margin-left: auto; flex-shrink: 0; line-height: 1; }
-.notice-dismiss:hover { opacity: 1; }
-
-/* Skeleton loading placeholders */
-@keyframes skeleton-pulse { 0% { opacity: 0.4; } 50% { opacity: 0.8; } 100% { opacity: 0.4; } }
-.skeleton { display: block; background: var(--border-color); border-radius: 4px; animation: skeleton-pulse 1.5s ease-in-out infinite; }
-.skeleton--line { height: 14px; margin-bottom: 8px; min-width: 20px; }
-.skeleton--circle { width: 32px; height: 32px; border-radius: 50%; }
-.skeleton--card { padding: 16px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 4px; }
-.skeleton--card .skeleton--line { background: var(--border-color); }
