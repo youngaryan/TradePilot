@@ -15,21 +15,13 @@ import type {
   MarketResearchSignal
 } from "../../api/types";
 import { Badge } from "../../components/Badge";
-import type { Tone } from "../../components/Badge";
 import { MetricCard, Panel } from "../../components/Cards";
 import { DataTable } from "../../components/Table";
-import { formatDateTime, formatNumber, statusTone, toNumber } from "../../utils/format";
+import { decisionTone, formatDateTime, formatNumber, statusTone, toNumber } from "../../utils/format";
 
 const DISCLAIMER = "For research and educational purposes only. Not financial advice.";
 
-function decisionTone(decision?: string | null): Tone {
-  if (decision === "BUY") return "good";
-  if (decision === "SELL" || decision === "AVOID") return "bad";
-  if (decision === "HOLD") return "warn";
-  return "neutral";
-}
-
-function signalTone(signal: MarketResearchSignal): Tone {
+function signalTone(signal: MarketResearchSignal): "good" | "bad" | "warn" | "neutral" {
   if (signal.direction === "bullish") return "good";
   if (signal.direction === "bearish") return "bad";
   if (signal.direction === "mixed") return "warn";
@@ -198,17 +190,17 @@ export function MarketResearchReports({
       ) : null}
 
       <div className="report-toolbar">
-        <label>
+        <label htmlFor="reports-search">
           Search
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ticker, title, summary" />
+          <input id="reports-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ticker, title, summary" />
         </label>
-        <label>
+        <label htmlFor="reports-ticker">
           Ticker
-          <input value={ticker} onChange={(event) => setTicker(event.target.value.toUpperCase())} placeholder="AAPL" />
+          <input id="reports-ticker" value={ticker} onChange={(event) => setTicker(event.target.value.toUpperCase())} placeholder="AAPL" />
         </label>
-        <label>
+        <label htmlFor="reports-status">
           Status
-          <select value={status} onChange={(event) => setStatus(event.target.value)}>
+          <select id="reports-status" value={status} onChange={(event) => setStatus(event.target.value)}>
             <option value="">All</option>
             <option value="queued">Queued</option>
             <option value="running">Running</option>

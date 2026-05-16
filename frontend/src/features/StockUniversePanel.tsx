@@ -132,8 +132,9 @@ export function StockUniversePanel({ selectedTickers, onSelectionChange, pairMod
                 </div>
                 <div className="universe-stock-list">
                   {filteredStocks.slice(0, 50).map((s) => (
-                    <label key={s.ticker} className={`universe-stock-item ${selectedTickers.includes(s.ticker) ? "universe-stock-item--selected" : ""}`}>
+                    <label key={s.ticker} htmlFor={"su-ticker-" + s.ticker} className={`universe-stock-item ${selectedTickers.includes(s.ticker) ? "universe-stock-item--selected" : ""}`}>
                       <input
+                        id={"su-ticker-" + s.ticker}
                         type="checkbox"
                         name={pairMode ? "pair-ticker" : "ticker-select"}
                         checked={selectedTickers.includes(s.ticker)}

@@ -195,9 +195,9 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
           </article>
         </div>
         <div className="admin-toolbar admin-toolbar--compact">
-          <label>
+          <label htmlFor="admin-landing-search">
             Search landing events
-            <input value={landingSearch} onChange={(event) => setLandingSearch(event.target.value)} placeholder="pricing, signup, country, CTA..." />
+            <input id="admin-landing-search" value={landingSearch} onChange={(event) => setLandingSearch(event.target.value)} placeholder="pricing, signup, country, CTA..." />
           </label>
         </div>
         <DataTable
@@ -215,29 +215,29 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
 
       <Panel title="Search and manage users" subtitle="Filter, sort, deactivate, reactivate, and change roles with confirmation prompts.">
         <div className="admin-toolbar">
-          <label>
+          <label htmlFor="admin-user-search">
             Search
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Email, name, or organization" />
+            <input id="admin-user-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Email, name, or organization" />
           </label>
-          <label>
+          <label htmlFor="admin-user-role">
             Role
-            <select value={role} onChange={(event) => setRole(event.target.value)}>
+            <select id="admin-user-role" value={role} onChange={(event) => setRole(event.target.value)}>
               <option value="">All roles</option>
               <option value="admin">Admins</option>
               <option value="user">Users</option>
             </select>
           </label>
-          <label>
+          <label htmlFor="admin-user-status">
             Status
-            <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <select id="admin-user-status" value={status} onChange={(event) => setStatus(event.target.value)}>
               <option value="">All statuses</option>
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
             </select>
           </label>
-          <label>
+          <label htmlFor="admin-user-sort">
             Sort
-            <select value={sortBy} onChange={(event) => setSortBy(event.target.value as UserSort)}>
+            <select id="admin-user-sort" value={sortBy} onChange={(event) => setSortBy(event.target.value as UserSort)}>
               <option value="created_at_utc">Created</option>
               <option value="email">Email</option>
               <option value="role">Role</option>
@@ -247,9 +247,9 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
               <option value="subscription_status">Subscription</option>
             </select>
           </label>
-          <label>
+          <label htmlFor="admin-user-dir">
             Direction
-            <select value={sortDir} onChange={(event) => setSortDir(event.target.value as "asc" | "desc")}>
+            <select id="admin-user-dir" value={sortDir} onChange={(event) => setSortDir(event.target.value as "asc" | "desc")}>
               <option value="desc">Descending</option>
               <option value="asc">Ascending</option>
             </select>
@@ -293,17 +293,17 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
 
       <Panel title="User-created strategies" subtitle="Audit AI-generated specs, ownership, approval history, usage, and safety status.">
         <div className="admin-toolbar admin-toolbar--strategy">
-          <label>
+          <label htmlFor="admin-strategy-status">
             Status
-            <select value={strategyStatus} onChange={(event) => setStrategyStatus(event.target.value)}>
+            <select id="admin-strategy-status" value={strategyStatus} onChange={(event) => setStrategyStatus(event.target.value)}>
               <option value="">All statuses</option>
               <option value="active">Active</option>
               <option value="disabled">Disabled</option>
             </select>
           </label>
-          <label>
+          <label htmlFor="admin-strategy-risk">
             Risk
-            <select value={strategyRisk} onChange={(event) => setStrategyRisk(event.target.value)}>
+            <select id="admin-strategy-risk" value={strategyRisk} onChange={(event) => setStrategyRisk(event.target.value)}>
               <option value="">All risk levels</option>
               <option value="low">Low</option>
               <option value="medium">Medium</option>

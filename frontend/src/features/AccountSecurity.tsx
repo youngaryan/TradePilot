@@ -98,9 +98,9 @@ export function AccountSecurity({
             </div>
           ) : null}
           <div className="form-row">
-            <label>
+            <label htmlFor="as-6-digit-code">
               6-digit code
-              <input value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} placeholder="123456" />
+              <input id="as-6-digit-code" value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} placeholder="123456" />
             </label>
             <button type="button" className="primary-button" disabled={isBusy || !mfaCode.trim()} onClick={() => void run(async () => {
               await verifyMfa(mfaCode);

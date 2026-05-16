@@ -466,9 +466,9 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
             <Badge label="email verification" tone="good" />
             <h1>Verify your email</h1>
             <p>Use the secure one-time token from your email to activate production login.</p>
-            <label>
+            <label htmlFor="app-verify-token">
               Verification token
-              <input value={authToken} readOnly />
+              <input id="app-verify-token" value={authToken} readOnly />
             </label>
             {error ? <span className="form-error">{error}</span> : null}
             <button type="button" className="primary-button" onClick={() => void submitVerifyEmail()} disabled={isLoading || !authToken}>
@@ -495,13 +495,13 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
             <h1>{authToken ? "Choose a new password" : "Request a reset link"}</h1>
             {authToken ? (
               <>
-                <label>
+                <label htmlFor="app-reset-token">
                   Reset token
-                  <input value={authToken} readOnly />
+                  <input id="app-reset-token" value={authToken} readOnly />
                 </label>
-                <label>
+                <label htmlFor="app-new-password">
                   New password
-                  <input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+                  <input id="app-new-password" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
                 </label>
                 <button type="button" className="primary-button" onClick={() => void submitPasswordResetConfirm()} disabled={isLoading || newPassword.length < 8}>
                   {isLoading ? "Updating" : "Update password"}
@@ -510,9 +510,9 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
               </>
             ) : (
               <>
-                <label>
+                <label htmlFor="app-account-email">
                   Account email
-                  <input value={email} onChange={(event) => setEmail(event.target.value)} />
+                  <input id="app-account-email" value={email} onChange={(event) => setEmail(event.target.value)} />
                 </label>
                 <button type="button" className="primary-button" onClick={() => void submitPasswordResetRequest()} disabled={isLoading}>
                   {isLoading ? "Sending" : "Send reset link"}
@@ -615,23 +615,23 @@ function LoginScreen({ onLogin }: { onLogin: (auth: AuthResponse) => void }) {
             </div>
             {mode === "signup" ? (
               <>
-                <label>
+                <label htmlFor="app-signup-name">
                   Name
-                  <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+                  <input id="app-signup-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
                 </label>
-                <label>
+                <label htmlFor="app-signup-org">
                   Organization
-                  <input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} />
+                  <input id="app-signup-org" value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} />
                 </label>
               </>
             ) : null}
-            <label>
+            <label htmlFor="app-email">
               Email
-              <input value={email} onChange={(event) => setEmail(event.target.value)} />
+              <input id="app-email" value={email} onChange={(event) => setEmail(event.target.value)} />
             </label>
-            <label>
+            <label htmlFor="app-password">
               Password
-              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+              <input id="app-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
             </label>
             <div className="button-cluster">
               <button type="button" className="ghost-button" onClick={() => useDemo("admin")}>Use admin demo</button>
@@ -1041,9 +1041,9 @@ export default function App() {
           <Badge label={health?.status === "ok" ? "Backend online" : "Backend unknown"} tone={backendTone(health)} />
           <Badge label={hasPremiumAccess ? "Premium" : "Free"} tone={hasPremiumAccess ? "good" : "warn"} />
           {organizations.length > 1 ? (
-            <label className="compact-control compact-control--nav">
+            <label className="compact-control compact-control--nav" htmlFor="app-workspace">
               <span>Workspace</span>
-              <select value={activeOrgId ?? ""} onChange={(event) => switchOrganization(event.target.value)} aria-label="Switch workspace">
+              <select id="app-workspace" value={activeOrgId ?? ""} onChange={(event) => switchOrganization(event.target.value)} aria-label="Switch workspace">
                 {organizations.map((organization) => (
                   <option key={organization.id} value={organization.id}>{organization.name}</option>
                 ))}
@@ -1106,10 +1106,11 @@ export default function App() {
             <span>{auth.user.email}</span>
           </div>
           <div className="topbar-actions">
-            <label className="compact-control">
+            <label className="compact-control" htmlFor="app-theme">
               <SunMoon size={15} />
               <span>Theme</span>
               <select
+                id="app-theme"
                 value={themeMode}
                 onChange={(event) => {
                   const next = event.target.value as ThemeMode;
@@ -1123,10 +1124,11 @@ export default function App() {
                 <option value="dark">Dark</option>
               </select>
             </label>
-            <label className="compact-control">
+            <label className="compact-control" htmlFor="app-analytics">
               <Monitor size={15} />
               <span>Analytics</span>
               <select
+                id="app-analytics"
                 value={telemetryConsent}
                 onChange={(event) => {
                   const next = event.target.value as TelemetryConsent;

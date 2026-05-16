@@ -5,19 +5,12 @@ import { getChartData, getMarketResearchJob, getMarketResearchRuntime, listMarke
 import type { MarketResearchAgentOutput, MarketResearchJob, MarketResearchReport, MarketResearchRuntimeConfig, MarketResearchSignal, MultiStockReport } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel } from "../components/Cards";
-import { formatDateTime, formatNumber, statusTone } from "../utils/format";
+import { decisionTone, formatDateTime, formatNumber, statusTone } from "../utils/format";
 import { DecisionHistoryPanel } from "./DecisionHistoryPanel";
 import { ResearchCharts } from "./ResearchCharts";
 import { StockUniversePanel } from "./StockUniversePanel";
 
 const DISCLAIMER = "For research and educational purposes only. Not financial advice.";
-
-function decisionTone(decision: string) {
-  if (decision === "BUY") return "good" as const;
-  if (decision === "SELL" || decision === "AVOID") return "bad" as const;
-  if (decision === "HOLD") return "info" as const;
-  return "neutral" as const;
-}
 
 function directionTone(direction: string) {
   if (direction === "bullish") return "good" as const;
@@ -658,9 +651,10 @@ export function MarketResearchLab() {
       <div className="content-grid">
         <Panel title="Research Committee" subtitle="Ticker, date, horizon, universe, and runtime configuration">
           <div className="market-research-config-grid">
-            <label>
+            <label htmlFor="mr-ticker">
               {pairMode ? "Ticker A / Pair First" : "Ticker"}
               <input
+                id="mr-ticker"
                 value={pairMode && universeTickers.length > 0 ? universeTickers[0] : tickerText}
                 onChange={(event) => {
                   if (pairMode && universeTickers.length > 0) {
@@ -676,9 +670,10 @@ export function MarketResearchLab() {
               />
             </label>
             {pairMode ? (
-              <label>
+              <label htmlFor="mr-ticker-b">
                 Ticker B / Pair Second
                 <input
+                  id="mr-ticker-b"
                   value={universeTickers.length > 1 ? universeTickers[1] : ""}
                   onChange={(event) => {
                     const first = universeTickers[0] || tickerText;
@@ -689,21 +684,21 @@ export function MarketResearchLab() {
                 />
               </label>
             ) : null}
-            <label>
+            <label htmlFor="mr-analysis-date">
               Analysis date
-              <input value={analysisDate} onChange={(event) => setAnalysisDate(event.target.value)} placeholder="Defaults to today" />
+              <input id="mr-analysis-date" value={analysisDate} onChange={(event) => setAnalysisDate(event.target.value)} placeholder="Defaults to today" />
             </label>
-            <label>
+            <label htmlFor="mr-horizon">
               Horizon
-              <select value={horizon} onChange={(event) => setHorizon(event.target.value)}>
+              <select id="mr-horizon" value={horizon} onChange={(event) => setHorizon(event.target.value)}>
                 <option value="intraday">Intraday</option>
                 <option value="swing">Swing</option>
                 <option value="long-term">Long-term</option>
               </select>
             </label>
-            <label>
+            <label htmlFor="mr-llm-model">
               LLM model
-              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtime?.model_override_enabled}>
+              <select id="mr-llm-model" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtime?.model_override_enabled}>
                 <option value="">Server default</option>
                 {nvidiaModelOptions.map((model) => (
                   <option key={model.model} value={`${model.provider}|${model.model}`}>
@@ -714,16 +709,16 @@ export function MarketResearchLab() {
             </label>
           </div>
           <div className="button-row button-row--compact">
-            <label className="toggle-label">
-              <input type="checkbox" checked={pairMode} onChange={(e) => { setPairMode(e.target.checked); if (!e.target.checked) { setUniversePair(""); } }} />
+            <label className="toggle-label" htmlFor="mr-pair-mode">
+              <input id="mr-pair-mode" type="checkbox" checked={pairMode} onChange={(e) => { setPairMode(e.target.checked); if (!e.target.checked) { setUniversePair(""); } }} />
               Pair research mode
             </label>
-            <label className="toggle-label">
-              <input type="checkbox" checked={showUniverse} onChange={(e) => setShowUniverse(e.target.checked)} />
+            <label className="toggle-label" htmlFor="mr-show-universe">
+              <input id="mr-show-universe" type="checkbox" checked={showUniverse} onChange={(e) => setShowUniverse(e.target.checked)} />
               <Layers size={14} /> Stock universe
             </label>
-            <label className="toggle-label">
-              <input type="checkbox" checked={showDecisions} onChange={(e) => setShowDecisions(e.target.checked)} />
+            <label className="toggle-label" htmlFor="mr-show-decisions">
+              <input id="mr-show-decisions" type="checkbox" checked={showDecisions} onChange={(e) => setShowDecisions(e.target.checked)} />
               <History size={14} /> Decision history
             </label>
           </div>
@@ -797,8 +792,8 @@ export function MarketResearchLab() {
             </div>
             <small>{formatNumber(jobProgress, 0)}% complete</small>
           </div>
-          <label className="trace-toggle">
-            <input type="checkbox" checked={showProgressTrace} onChange={(event) => setShowProgressTrace(event.target.checked)} />
+          <label className="trace-toggle" htmlFor="mr-show-trace">
+            <input id="mr-show-trace" type="checkbox" checked={showProgressTrace} onChange={(event) => setShowProgressTrace(event.target.checked)} />
             Show progress trace
           </label>
           {showProgressTrace ? (

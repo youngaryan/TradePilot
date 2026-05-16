@@ -1,6 +1,8 @@
+import { memo } from "react";
 import type { LeaderboardRow, PaperStrategy, SentimentDailyPoint, SentimentSourceSummary, TelemetryEventRecord } from "../api/types";
 import { formatCurrency, formatDateTime, formatNumber, formatPercent, pipelineLabel, toNumber } from "../utils/format";
 import { aggregateEquityHistory, orderNotional } from "../utils/quant";
+import { telemetryBucketLabel, telemetryCategory, telemetryEventTime, telemetryIsError, telemetryLatencyMs, telemetryToneForCategory } from "../utils/telemetry";
 import type { PaperOrder } from "../api/types";
 import { Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from "recharts";
 
@@ -47,7 +49,7 @@ function shortDate(value: string) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-export function PortfolioEquityChart({ strategies }: { strategies: PaperStrategy[] }) {
+export const PortfolioEquityChart = memo(function PortfolioEquityChart({ strategies }: { strategies: PaperStrategy[] }) {
   const points = aggregateEquityHistory(strategies);
   if (points.length < 2) return <EmptyChart label="Run at least two paper batches to build the equity trail." />;
 
@@ -59,8 +61,8 @@ export function PortfolioEquityChart({ strategies }: { strategies: PaperStrategy
   const latest = data.at(-1);
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+    <div aria-label="Portfolio equity curve">
+      <div className="chart-flex-header">
         <span className="chart-label">Equity {formatCurrency(latest?.equity, true)}</span>
         <span className="chart-label">Latest PnL {formatCurrency(latest?.pnl, true)}</span>
       </div>
@@ -85,9 +87,9 @@ export function PortfolioEquityChart({ strategies }: { strategies: PaperStrategy
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
-export function BacktestEquityChart({
+export const BacktestEquityChart = memo(function BacktestEquityChart({
   points
 }: {
   points: Array<{ timestamp: string; equity: number; drawdown: number; net_return: number }>;
@@ -103,8 +105,8 @@ export function BacktestEquityChart({
   const minDD = Math.min(-0.01, ...points.map((p) => p.drawdown)) * 100;
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+    <div aria-label="Backtest equity curve">
+      <div className="chart-flex-header">
         <span className="chart-label">Final equity {formatNumber(last?.equity)}</span>
         <span className="chart-label">Max drawdown {formatPercent(minDD / 100)}</span>
       </div>
@@ -123,9 +125,9 @@ export function BacktestEquityChart({
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
-export function HorizontalBars({
+export const HorizontalBars = memo(function HorizontalBars({
   rows,
   valueKind = "number"
 }: {
@@ -137,7 +139,7 @@ export function HorizontalBars({
   const format = valueKind === "currency" ? formatCurrency : valueKind === "percent" ? formatPercent : formatNumber;
 
   return (
-    <div className="bar-list">
+    <div className="bar-list" aria-label="Horizontal bar comparison chart">
       {rows.map((row) => (
         <div className="bar-row" key={row.label}>
           <span>{row.label}</span>
@@ -153,43 +155,47 @@ export function HorizontalBars({
       ))}
     </div>
   );
-}
+});
 
-export function LeaderboardBars({ leaderboard }: { leaderboard: LeaderboardRow[] }) {
+export const LeaderboardBars = memo(function LeaderboardBars({ leaderboard }: { leaderboard: LeaderboardRow[] }) {
   return (
-    <HorizontalBars
-      valueKind="currency"
-      rows={leaderboard.slice(0, 8).map((row) => ({
-        label: row.strategy,
-        value: row.daily_pnl,
-        detail: pipelineLabel(row.pipeline)
-      }))}
-    />
+    <div aria-label="Leaderboard ranking chart">
+      <HorizontalBars
+        valueKind="currency"
+        rows={leaderboard.slice(0, 8).map((row) => ({
+          label: row.strategy,
+          value: row.daily_pnl,
+          detail: pipelineLabel(row.pipeline)
+        }))}
+      />
+    </div>
   );
-}
+});
 
-export function ExposureBars({ strategies }: { strategies: PaperStrategy[] }) {
+export const ExposureBars = memo(function ExposureBars({ strategies }: { strategies: PaperStrategy[] }) {
   return (
-    <HorizontalBars
-      valueKind="percent"
-      rows={strategies
-        .map((strategy) => ({
-          label: strategy.name,
-          value: strategy.gross_exposure_ratio,
-          detail: `${strategy.position_count} positions`,
-          tone: "neutral" as const
-        }))
-        .sort((a, b) => b.value - a.value)}
-    />
+    <div aria-label="Market exposure chart">
+      <HorizontalBars
+        valueKind="percent"
+        rows={strategies
+          .map((strategy) => ({
+            label: strategy.name,
+            value: strategy.gross_exposure_ratio,
+            detail: `${strategy.position_count} positions`,
+            tone: "neutral" as const
+          }))
+          .sort((a, b) => b.value - a.value)}
+      />
+    </div>
   );
-}
+});
 
-export function AllocationStrip({ strategies }: { strategies: PaperStrategy[] }) {
+export const AllocationStrip = memo(function AllocationStrip({ strategies }: { strategies: PaperStrategy[] }) {
   if (!strategies.length) return <EmptyChart label="No allocation state available." />;
   const total = strategies.reduce((sum, strategy) => sum + Math.abs(strategy.equity), 0) || 1;
   let left = 0;
   return (
-    <div className="allocation-strip">
+    <div className="allocation-strip" aria-label="Strategy allocation chart">
       <div className="allocation-strip__bar">
         {strategies.map((strategy, index) => {
           const width = (Math.abs(strategy.equity) / total) * 100;
@@ -208,9 +214,9 @@ export function AllocationStrip({ strategies }: { strategies: PaperStrategy[] })
       </div>
     </div>
   );
-}
+});
 
-export function RiskReturnMap({ strategies }: { strategies: PaperStrategy[] }) {
+export const RiskReturnMap = memo(function RiskReturnMap({ strategies }: { strategies: PaperStrategy[] }) {
   if (!strategies.length) return <EmptyChart label="Run paper strategies to populate the risk map." />;
 
   const positive = strategies.filter((s) => s.daily_pnl >= 0).map((s) => ({
@@ -221,8 +227,8 @@ export function RiskReturnMap({ strategies }: { strategies: PaperStrategy[] }) {
   }));
 
   return (
-    <div>
-      <div style={{ padding: "0 4px", marginBottom: 8 }}>
+    <div aria-label="Risk return scatter chart">
+      <div className="chart-subtitle">
         <span className="chart-label">X = exposure | Y = daily PnL | bubble size = trade count</span>
       </div>
       <ResponsiveContainer width="100%" height={300}>
@@ -247,32 +253,38 @@ export function RiskReturnMap({ strategies }: { strategies: PaperStrategy[] }) {
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
-export function OrderNotionalBars({ orders }: { orders: Array<PaperOrder & { strategy?: string }> }) {
+export const OrderNotionalBars = memo(function OrderNotionalBars({ orders }: { orders: Array<PaperOrder & { strategy?: string }> }) {
   const totals = new Map<string, number>();
   for (const order of orders) {
     const key = String(order.strategy ?? "unknown");
     totals.set(key, (totals.get(key) ?? 0) + orderNotional(order));
   }
   return (
-    <HorizontalBars
-      valueKind="currency"
-      rows={Array.from(totals, ([label, value]) => ({ label, value, tone: "neutral" as const })).sort((a, b) => b.value - a.value)}
-    />
+    <div aria-label="Order notional value chart">
+      <HorizontalBars
+        valueKind="currency"
+        rows={Array.from(totals, ([label, value]) => ({ label, value, tone: "neutral" as const })).sort((a, b) => b.value - a.value)}
+      />
+    </div>
   );
-}
+});
 
-export function StrategyConcentrationBars({ strategy }: { strategy: PaperStrategy | null }) {
+export const StrategyConcentrationBars = memo(function StrategyConcentrationBars({ strategy }: { strategy: PaperStrategy | null }) {
   if (!strategy) return <EmptyChart label="Choose a strategy to inspect concentration." />;
   const rows = Object.entries(strategy.target_weights)
     .map(([label, value]) => ({ label, value: Math.abs(toNumber(value)), tone: "neutral" as const }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 12);
-  return <HorizontalBars valueKind="percent" rows={rows} />;
-}
+  return (
+    <div aria-label="Strategy concentration chart">
+      <HorizontalBars valueKind="percent" rows={rows} />
+    </div>
+  );
+});
 
-export function SentimentTimelineChart({
+export const SentimentTimelineChart = memo(function SentimentTimelineChart({
   points,
   title = "Sentiment overlay",
   detail
@@ -309,13 +321,13 @@ export function SentimentTimelineChart({
   const latest = byDate.at(-1);
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, padding: "0 4px" }}>
+    <div aria-label="Sentiment timeline chart">
+      <div className="chart-flex-header chart-flex-header--compact">
         <div>
           <div className="chart-label">{title}</div>
           <div className="chart-sub-label">{detail ?? "Line = weighted sentiment | bars = articles | dot size = confidence"}</div>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div className="chart-value-right">
           <div className="chart-label">
             Latest {formatNumber(latest?.sentiment)} | Avg {formatNumber(averageSentiment)}
           </div>
@@ -371,9 +383,9 @@ export function SentimentTimelineChart({
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
-export function SentimentTickerBars({ points }: { points: SentimentDailyPoint[] }) {
+export const SentimentTickerBars = memo(function SentimentTickerBars({ points }: { points: SentimentDailyPoint[] }) {
   const rows = Array.from(
     points.reduce((map, point) => {
       const current = map.get(point.ticker) ?? { ticker: point.ticker, article_count: 0, weighted_sentiment: 0 };
@@ -389,10 +401,14 @@ export function SentimentTickerBars({ points }: { points: SentimentDailyPoint[] 
     detail: `${formatNumber(value.article_count, 0)} articles`
   })).sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
 
-  return <HorizontalBars valueKind="number" rows={rows} />;
-}
+  return (
+    <div aria-label="Sentiment by ticker chart">
+      <HorizontalBars valueKind="number" rows={rows} />
+    </div>
+  );
+});
 
-export function SentimentHeatmapChart({ points }: { points: SentimentDailyPoint[] }) {
+export const SentimentHeatmapChart = memo(function SentimentHeatmapChart({ points }: { points: SentimentDailyPoint[] }) {
   if (!points.length) return <EmptyChart label="No sentiment heatmap data for the current filters." />;
 
   const normalized = points
@@ -517,74 +533,24 @@ export function SentimentHeatmapChart({ points }: { points: SentimentDailyPoint[
       </svg>
     </div>
   );
-}
+});
 
-export function SentimentSourceBars({ sources }: { sources: SentimentSourceSummary[] }) {
+export const SentimentSourceBars = memo(function SentimentSourceBars({ sources }: { sources: SentimentSourceSummary[] }) {
   return (
-    <HorizontalBars
-      valueKind="number"
-      rows={sources.map((source) => ({
-        label: source.source || "unknown",
-        value: source.headline_count,
-        tone: "neutral" as const
-      }))}
-    />
+    <div aria-label="Sentiment by source chart">
+      <HorizontalBars
+        valueKind="number"
+        rows={sources.map((source) => ({
+          label: source.source || "unknown",
+          value: source.headline_count,
+          tone: "neutral" as const
+        }))}
+      />
+    </div>
   );
-}
+});
 
-function telemetryEventTime(event: TelemetryEventRecord) {
-  const parsed = new Date(event.occurred_at_utc).getTime();
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function telemetryCategory(event: TelemetryEventRecord) {
-  return String(event.category || "unknown").toLowerCase();
-}
-
-function telemetryIsError(event: TelemetryEventRecord) {
-  const category = telemetryCategory(event);
-  const name = event.name.toLowerCase();
-  const status = String(event.properties?.status ?? event.context?.status ?? "").toLowerCase();
-  return category === "error" || name.includes("error") || name.includes("failed") || status === "failed";
-}
-
-function telemetryLatencyMs(event: TelemetryEventRecord) {
-  const numericKeys = ["latency_ms", "duration_ms", "elapsed_ms", "response_ms", "runtime_ms"];
-  const secondKeys = ["latency_seconds", "duration_seconds", "elapsed_seconds", "runtime_seconds"];
-  for (const source of [event.properties, event.context]) {
-    for (const key of numericKeys) {
-      const value = source?.[key];
-      if (typeof value === "number" || typeof value === "string") {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
-      }
-    }
-    for (const key of secondKeys) {
-      const value = source?.[key];
-      if (typeof value === "number" || typeof value === "string") {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed) && parsed >= 0) return parsed * 1000;
-      }
-    }
-  }
-  return null;
-}
-
-function telemetryToneForCategory(category: string): "good" | "bad" | "neutral" {
-  if (category === "error" || category === "security") return "bad";
-  if (category === "refresh" || category === "billing") return "good";
-  return "neutral";
-}
-
-function telemetryBucketLabel(timestamp: number, hourly: boolean) {
-  const date = new Date(timestamp);
-  if (hourly) {
-    return date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit" });
-  }
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
-export function TelemetryTimelineChart({ events }: { events: TelemetryEventRecord[] }) {
+export const TelemetryTimelineChart = memo(function TelemetryTimelineChart({ events }: { events: TelemetryEventRecord[] }) {
   const datedEvents = events
     .map((event) => ({ event, timestamp: telemetryEventTime(event) }))
     .filter((row): row is { event: TelemetryEventRecord; timestamp: number } => row.timestamp !== null)
@@ -630,12 +596,12 @@ export function TelemetryTimelineChart({ events }: { events: TelemetryEventRecor
 
   return (
     <div role="img" aria-label="Telemetry events over time">
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+      <div className="chart-flex-header">
         <div>
           <div className="chart-label">Telemetry event volume</div>
           <div className="chart-sub-label">Stacked by product, refresh, engineering, other, and error events</div>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div className="chart-value-right">
           <div className="chart-label">{formatNumber(total, 0)} events | {formatNumber(errors, 0)} errors</div>
           <div className="chart-sub-label">
             Latest: {latest ? `${latest.name} at ${formatDateTime(latest.occurred_at_utc)}` : "No latest event"}
@@ -660,9 +626,9 @@ export function TelemetryTimelineChart({ events }: { events: TelemetryEventRecor
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
-export function TelemetryLatencyChart({ events }: { events: TelemetryEventRecord[] }) {
+export const TelemetryLatencyChart = memo(function TelemetryLatencyChart({ events }: { events: TelemetryEventRecord[] }) {
   const points = events
     .map((event) => ({ event, timestamp: telemetryEventTime(event), latency: telemetryLatencyMs(event) }))
     .filter((row): row is { event: TelemetryEventRecord; timestamp: number; latency: number } => row.timestamp !== null && row.latency !== null)
@@ -683,15 +649,15 @@ export function TelemetryLatencyChart({ events }: { events: TelemetryEventRecord
   const maxLatency = Math.max(1, ...points.map((p) => p.latency));
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, padding: "0 4px" }}>
+    <div aria-label="Telemetry latency chart">
+      <div className="chart-flex-header">
         <div>
           <div className="chart-label">Latency trail</div>
           <div className="chart-sub-label">
             Reads latency_ms, duration_ms, elapsed_ms, response_ms, or runtime_ms from event properties/context
           </div>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div className="chart-value-right">
           <div className="chart-label">Avg {formatNumber(average, 0)}ms | P95 {formatNumber(p95, 0)}ms</div>
         </div>
       </div>
@@ -725,9 +691,9 @@ export function TelemetryLatencyChart({ events }: { events: TelemetryEventRecord
       </ResponsiveContainer>
     </div>
   );
-}
+});
 
-export function TelemetryCategoryBars({ events }: { events: TelemetryEventRecord[] }) {
+export const TelemetryCategoryBars = memo(function TelemetryCategoryBars({ events }: { events: TelemetryEventRecord[] }) {
   const rows = Array.from(
     events.reduce((map, event) => {
       const key = telemetryCategory(event);
@@ -738,10 +704,14 @@ export function TelemetryCategoryBars({ events }: { events: TelemetryEventRecord
     .map(([label, value]) => ({ label, value, tone: telemetryToneForCategory(label) }))
     .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
 
-  return <HorizontalBars valueKind="number" rows={rows} />;
-}
+  return (
+    <div aria-label="Telemetry by category chart">
+      <HorizontalBars valueKind="number" rows={rows} />
+    </div>
+  );
+});
 
-export function TelemetryConsentBars({ events }: { events: TelemetryEventRecord[] }) {
+export const TelemetryConsentBars = memo(function TelemetryConsentBars({ events }: { events: TelemetryEventRecord[] }) {
   const rows = Array.from(
     events.reduce((map, event) => {
       const key = String(event.consent || "unknown").toLowerCase();
@@ -756,10 +726,14 @@ export function TelemetryConsentBars({ events }: { events: TelemetryEventRecord[
     }))
     .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
 
-  return <HorizontalBars valueKind="number" rows={rows} />;
-}
+  return (
+    <div aria-label="Telemetry consent status chart">
+      <HorizontalBars valueKind="number" rows={rows} />
+    </div>
+  );
+});
 
-export function TelemetryTopEventsBars({ events }: { events: TelemetryEventRecord[] }) {
+export const TelemetryTopEventsBars = memo(function TelemetryTopEventsBars({ events }: { events: TelemetryEventRecord[] }) {
   const rows = Array.from(
     events.reduce((map, event) => {
       const key = event.name || "unknown_event";
@@ -776,5 +750,9 @@ export function TelemetryTopEventsBars({ events }: { events: TelemetryEventRecor
     .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label))
     .slice(0, 8);
 
-  return <HorizontalBars valueKind="number" rows={rows} />;
-}
+  return (
+    <div aria-label="Top telemetry events chart">
+      <HorizontalBars valueKind="number" rows={rows} />
+    </div>
+  );
+});

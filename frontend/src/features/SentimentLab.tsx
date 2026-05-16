@@ -706,14 +706,15 @@ export function SentimentLab() {
 
       <div className="content-grid">
         <Panel title="1. Sources And Symbols" subtitle="RSS works without a key; API providers are optional supplements and report warnings if credentials fail">
-          <label>
+          <label htmlFor="sl-symbols">
             Symbols
-            <input value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="AAPL MSFT NVDA GLD KO COKE" />
+            <input id="sl-symbols" value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="AAPL MSFT NVDA GLD KO COKE" />
           </label>
           <div className="provider-check-grid">
             {SOURCE_OPTIONS.map((source) => (
-              <label key={source.id} className="provider-check">
+              <label key={source.id} className="provider-check" htmlFor={`sl-provider-${source.id}`}>
                 <input
+                  id={`sl-provider-${source.id}`}
                   type="checkbox"
                   checked={request.providers.includes(source.id)}
                   onChange={(event) => setRequest({ ...request, providers: toggleValue(request.providers, source.id, event.target.checked) })}
@@ -724,68 +725,68 @@ export function SentimentLab() {
             ))}
           </div>
           <div className="form-grid">
-            <label>
+            <label htmlFor="sl-start">
               Start
-              <input value={request.start} onChange={(event) => setRequest({ ...request, start: event.target.value })} />
+              <input id="sl-start" value={request.start} onChange={(event) => setRequest({ ...request, start: event.target.value })} />
             </label>
-            <label>
+            <label htmlFor="sl-end">
               End
-              <input value={request.end} onChange={(event) => setRequest({ ...request, end: event.target.value })} />
+              <input id="sl-end" value={request.end} onChange={(event) => setRequest({ ...request, end: event.target.value })} />
             </label>
-            <label>
+            <label htmlFor="sl-news-files">
               News files
-              <input value={request.news_files.join(" ")} onChange={(event) => setRequest({ ...request, news_files: splitList(event.target.value) })} placeholder={DEFAULT_NEWS_FILE} />
+              <input id="sl-news-files" value={request.news_files.join(" ")} onChange={(event) => setRequest({ ...request, news_files: splitList(event.target.value) })} placeholder={DEFAULT_NEWS_FILE} />
             </label>
-            <label>
+            <label htmlFor="sl-rss-feed-urls">
               RSS feed URLs
-              <input value={request.rss_feed_urls.join(" ")} onChange={(event) => setRequest({ ...request, rss_feed_urls: splitList(event.target.value) })} placeholder="Optional. Default Yahoo Finance ticker RSS template is used." />
+              <input id="sl-rss-feed-urls" value={request.rss_feed_urls.join(" ")} onChange={(event) => setRequest({ ...request, rss_feed_urls: splitList(event.target.value) })} placeholder="Optional. Default Yahoo Finance ticker RSS template is used." />
             </label>
-            <label>
+            <label htmlFor="sl-local-web-search-feeds">
               Local web-search feeds
-              <input value={request.local_web_search_urls.join(" ")} onChange={(event) => setRequest({ ...request, local_web_search_urls: splitList(event.target.value) })} placeholder="Optional RSS/Atom feeds; {ticker} templates are supported." />
+              <input id="sl-local-web-search-feeds" value={request.local_web_search_urls.join(" ")} onChange={(event) => setRequest({ ...request, local_web_search_urls: splitList(event.target.value) })} placeholder="Optional RSS/Atom feeds; {ticker} templates are supported." />
               <small>Used by Local web search. Results are cached locally, then searched without calling GDELT.</small>
             </label>
-            <label>
+            <label htmlFor="sl-local-web-cache-refresh-minutes">
               Local web cache refresh minutes
-              <input type="number" min={0} max={1440} value={request.local_web_refresh_minutes} onChange={(event) => setRequest({ ...request, local_web_refresh_minutes: Number(event.target.value) })} />
+              <input id="sl-local-web-cache-refresh-minutes" type="number" min={0} max={1440} value={request.local_web_refresh_minutes} onChange={(event) => setRequest({ ...request, local_web_refresh_minutes: Number(event.target.value) })} />
               <small>Use 60+ for normal work. Set 0 only when you need to force a refetch.</small>
             </label>
-            <label>
+            <label htmlFor="sl-website-domains-to-crawl">
               Website domains to crawl
-              <input value={request.web_research_domains.join(" ")} onChange={(event) => setRequest({ ...request, web_research_domains: splitList(event.target.value) })} placeholder="Optional: reuters.com cnbc.com marketwatch.com" />
+              <input id="sl-website-domains-to-crawl" value={request.web_research_domains.join(" ")} onChange={(event) => setRequest({ ...request, web_research_domains: splitList(event.target.value) })} placeholder="Optional: reuters.com cnbc.com marketwatch.com" />
               <small>Local web search crawls each domain's sitemap/homepage and caches article pages. GDELT also uses these domains if selected.</small>
             </label>
-            <label>
+            <label htmlFor="sl-website-pages-per-source">
               Website pages per source
-              <input type="number" min={1} max={250} value={request.local_web_max_pages_per_source} onChange={(event) => setRequest({ ...request, local_web_max_pages_per_source: Number(event.target.value) })} />
+              <input id="sl-website-pages-per-source" type="number" min={1} max={250} value={request.local_web_max_pages_per_source} onChange={(event) => setRequest({ ...request, local_web_max_pages_per_source: Number(event.target.value) })} />
               <small>Higher values gather more text but run slower and may be blocked by some sites.</small>
             </label>
-            <label>
+            <label htmlFor="sl-direct-web-urls">
               Direct web URLs
-              <input value={request.web_research_urls.join(" ")} onChange={(event) => setRequest({ ...request, web_research_urls: splitList(event.target.value) })} placeholder="Optional article URLs or URL templates containing {ticker}" />
+              <input id="sl-direct-web-urls" value={request.web_research_urls.join(" ")} onChange={(event) => setRequest({ ...request, web_research_urls: splitList(event.target.value) })} placeholder="Optional article URLs or URL templates containing {ticker}" />
               <small>Use this when you want a specific page fetched and summarized.</small>
             </label>
-            <label>
+            <label htmlFor="sl-extra-web-query-terms">
               Extra web query terms
-              <input value={request.web_research_query_terms} onChange={(event) => setRequest({ ...request, web_research_query_terms: event.target.value })} placeholder="Optional: earnings OR guidance OR inflation" />
+              <input id="sl-extra-web-query-terms" value={request.web_research_query_terms} onChange={(event) => setRequest({ ...request, web_research_query_terms: event.target.value })} placeholder="Optional: earnings OR guidance OR inflation" />
               <small>Added to each symbol query. Keep it short to avoid filtering out useful stories.</small>
             </label>
-            <label>
+            <label htmlFor="sl-web-articles-per-symbol">
               Web articles per symbol
-              <input type="number" min={1} max={25} value={request.web_research_max_articles} onChange={(event) => setRequest({ ...request, web_research_max_articles: Number(event.target.value) })} />
+              <input id="sl-web-articles-per-symbol" type="number" min={1} max={25} value={request.web_research_max_articles} onChange={(event) => setRequest({ ...request, web_research_max_articles: Number(event.target.value) })} />
               <small>Lower values run faster on weak hardware and slow networks.</small>
             </label>
-            <label>
+            <label htmlFor="sl-newsapi-key">
               NewsAPI key
-              <input value={request.newsapi_api_key ?? ""} onChange={(event) => setRequest({ ...request, newsapi_api_key: event.target.value || null })} placeholder="Optional unless NewsAPI is selected" />
+              <input id="sl-newsapi-key" value={request.newsapi_api_key ?? ""} onChange={(event) => setRequest({ ...request, newsapi_api_key: event.target.value || null })} placeholder="Optional unless NewsAPI is selected" />
             </label>
-            <label>
+            <label htmlFor="sl-alpha-vantage-key">
               Alpha Vantage key
-              <input value={request.alphavantage_api_key ?? ""} onChange={(event) => setRequest({ ...request, alphavantage_api_key: event.target.value || null })} placeholder="Optional unless Alpha Vantage is selected" />
+              <input id="sl-alpha-vantage-key" value={request.alphavantage_api_key ?? ""} onChange={(event) => setRequest({ ...request, alphavantage_api_key: event.target.value || null })} placeholder="Optional unless Alpha Vantage is selected" />
             </label>
-            <label>
+            <label htmlFor="sl-benzinga-key">
               Benzinga key
-              <input value={request.benzinga_api_key ?? ""} onChange={(event) => setRequest({ ...request, benzinga_api_key: event.target.value || null })} placeholder="Optional unless Benzinga is selected" />
+              <input id="sl-benzinga-key" value={request.benzinga_api_key ?? ""} onChange={(event) => setRequest({ ...request, benzinga_api_key: event.target.value || null })} placeholder="Optional unless Benzinga is selected" />
             </label>
           </div>
           <div className="hint-card">
@@ -805,16 +806,16 @@ export function SentimentLab() {
             </button>
           </div>
           <div className="sentiment-panel">
-            <label className="checkbox-line">
-              <input type="checkbox" checked={request.web_research_fetch_article_text} onChange={(event) => setRequest({ ...request, web_research_fetch_article_text: event.target.checked })} />
+            <label className="checkbox-line" htmlFor="sl-fetch-web-pages">
+              <input id="sl-fetch-web-pages" type="checkbox" checked={request.web_research_fetch_article_text} onChange={(event) => setRequest({ ...request, web_research_fetch_article_text: event.target.checked })} />
               Fetch web pages and create lightweight summaries
             </label>
-            <label className="checkbox-line">
-              <input type="checkbox" checked={request.use_finbert} onChange={(event) => setRequest({ ...request, use_finbert: event.target.checked })} />
+            <label className="checkbox-line" htmlFor="sl-use-finbert">
+              <input id="sl-use-finbert" type="checkbox" checked={request.use_finbert} onChange={(event) => setRequest({ ...request, use_finbert: event.target.checked })} />
               Use FinBERT when available (heavier, optional)
             </label>
-            <label className="checkbox-line">
-              <input type="checkbox" checked={request.local_finbert_only} onChange={(event) => setRequest({ ...request, local_finbert_only: event.target.checked })} />
+            <label className="checkbox-line" htmlFor="sl-local-model-cache-only">
+              <input id="sl-local-model-cache-only" type="checkbox" checked={request.local_finbert_only} onChange={(event) => setRequest({ ...request, local_finbert_only: event.target.checked })} />
               Use local model cache only during UI runs
             </label>
             <small>For weak hardware, leave FinBERT unchecked. The fallback scorer is fast and runs locally without model downloads.</small>
@@ -887,13 +888,13 @@ export function SentimentLab() {
 
       <Panel title="Sentiment Explorer" subtitle="Choose stored symbols, date windows, and headline sources before reading the charts">
         <div className="sentiment-filter-grid">
-          <label>
+          <label htmlFor="sl-search-available-symbols">
             Search available symbols
-            <input value={tickerSearch} onChange={(event) => setTickerSearch(event.target.value)} placeholder="Try GLD, AAPL, NVDA..." />
+            <input id="sl-search-available-symbols" value={tickerSearch} onChange={(event) => setTickerSearch(event.target.value)} placeholder="Try GLD, AAPL, NVDA..." />
           </label>
-          <label>
+          <label htmlFor="sl-add-symbol">
             Add symbol
-            <select value="" onChange={(event) => addTickerFilter(event.target.value)}>
+            <select id="sl-add-symbol" value="" onChange={(event) => addTickerFilter(event.target.value)}>
               <option value="">Choose a symbol to add</option>
               <option value="ALL">Reset to all symbols</option>
               {availableTickers.map((ticker) => (
@@ -903,20 +904,20 @@ export function SentimentLab() {
               ))}
             </select>
           </label>
-          <label>
+          <label htmlFor="sl-chart-start">
             Chart start
-            <input value={chartStart} onChange={(event) => setChartStart(event.target.value)} placeholder={availableDateRange.start || "YYYY-MM-DD"} />
+            <input id="sl-chart-start" value={chartStart} onChange={(event) => setChartStart(event.target.value)} placeholder={availableDateRange.start || "YYYY-MM-DD"} />
           </label>
-          <label>
+          <label htmlFor="sl-chart-end">
             Chart end
-            <input value={chartEnd} onChange={(event) => setChartEnd(event.target.value)} placeholder={availableDateRange.end || "YYYY-MM-DD"} />
+            <input id="sl-chart-end" value={chartEnd} onChange={(event) => setChartEnd(event.target.value)} placeholder={availableDateRange.end || "YYYY-MM-DD"} />
           </label>
-          <label>
+          <label htmlFor="sl-source-filter">
             Source filter
             {availableSources.length <= 1 ? (
-              <input value={availableSources.length === 1 ? `Only source: ${availableSources[0]}` : "No sources loaded yet"} disabled />
+              <input id="sl-source-filter" value={availableSources.length === 1 ? `Only source: ${availableSources[0]}` : "No sources loaded yet"} disabled />
             ) : (
-              <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value)}>
+              <select id="sl-source-filter" value={selectedSource} onChange={(event) => setSelectedSource(event.target.value)}>
                 <option value="ALL">All sources ({formatNumber(dataset?.summary.headline_count ?? 0, 0)} headlines)</option>
                 {availableSources.map((source) => (
                   <option key={source} value={source}>
@@ -926,9 +927,9 @@ export function SentimentLab() {
               </select>
             )}
           </label>
-          <label>
+          <label htmlFor="sl-headline-search">
             Headline search
-            <input value={headlineSearch} onChange={(event) => setHeadlineSearch(event.target.value)} placeholder="Search title, summary, label..." />
+            <input id="sl-headline-search" value={headlineSearch} onChange={(event) => setHeadlineSearch(event.target.value)} placeholder="Search title, summary, label..." />
           </label>
         </div>
         <div className="hint-card">

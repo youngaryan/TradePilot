@@ -565,51 +565,10 @@ button.confidence-card-header:hover {
   border-color: #d8e1ec;
 }
 
-.primary-button,
-.ghost-button,
-.danger-button,
-.link-button,
 .pill,
 .template-card,
 .strategy-list-item {
   border: 0;
-}
-
-.primary-button,
-.ghost-button,
-.danger-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  min-height: 42px;
-  padding: 10px 16px;
-  border-radius: 14px;
-  font-weight: 800;
-}
-
-.primary-button {
-  color: white;
-  background: linear-gradient(135deg, #0b5cad, #0f766e);
-  box-shadow: 0 16px 30px rgba(11, 92, 173, 0.22);
-}
-
-.primary-button:disabled,
-.ghost-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.58;
-}
-
-.ghost-button {
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.76);
-  border: 1px solid var(--line);
-}
-
-.danger-button {
-  color: #9f1c13;
-  background: #ffe8e5;
-  border: 1px solid #ffc9c2;
 }
 
 .link-button {
@@ -617,6 +576,7 @@ button.confidence-card-header:hover {
   color: var(--accent);
   background: transparent;
   font-weight: 800;
+  border: 0;
 }
 
 .pill {
@@ -3101,12 +3061,6 @@ button.warning-item-header {
   font-weight: 850;
 }
 
-.danger-button {
-  color: #991b1b;
-  border-color: rgba(248, 113, 113, 0.42);
-  background: rgba(254, 226, 226, 0.7);
-}
-
 :root[data-theme="dark"] .nav-rail {
   background:
     linear-gradient(180deg, rgba(7, 16, 29, 0.98), rgba(8, 17, 31, 0.96)),
@@ -3693,7 +3647,8 @@ button.warning-item-header {
 .nav-cta,
 .primary-button,
 .secondary-button,
-.ghost-button {
+.ghost-button,
+.danger-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3702,6 +3657,16 @@ button.warning-item-header {
   border-radius: 999px;
   font-weight: 950;
   letter-spacing: -0.02em;
+  cursor: pointer;
+}
+
+.nav-cta:disabled,
+.primary-button:disabled,
+.secondary-button:disabled,
+.ghost-button:disabled,
+.danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .nav-cta,
@@ -3730,6 +3695,13 @@ button.warning-item-header {
   border: 1px solid rgba(16, 21, 31, 0.10);
   background: rgba(255, 255, 255, 0.72);
   box-shadow: 0 8px 26px rgba(31, 24, 14, 0.06);
+}
+
+.danger-button {
+  color: #fff;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, #b42318, #f04438);
+  box-shadow: var(--shadow-sm);
 }
 
 .secondary-link {
@@ -3880,26 +3852,6 @@ button.secondary-link:hover {
   display: grid;
   place-items: center;
   padding: 48px 20px;
-}
-
-.danger-button {
-  border: 0;
-  border-radius: 999px;
-  background: linear-gradient(135deg, #b42318, #f04438);
-  color: #fff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 12px 18px;
-  font-weight: 800;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-}
-
-.danger-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 
 .signin-card__header {
@@ -4592,3 +4544,12 @@ textarea {
 /* Chevron */
 .chevron { transition: transform 0.15s; }
 .chevron--open { transform: rotate(180deg); }
+
+/* Chart layout utilities */
+.chart-flex-header { display: flex; justify-content: space-between; margin-bottom: 8px; padding: 0 4px; }
+.chart-flex-header--compact { margin-bottom: 4px; }
+.chart-value-right { text-align: right; }
+.chart-subtitle { padding: 0 4px; margin-bottom: 8px; }
+
+/* Legend swatch dot */
+.legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }

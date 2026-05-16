@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   AreaSeries,
   ColorType,
@@ -96,7 +96,7 @@ function markerForEvent(event: BacktestTradeEvent): SeriesMarker<Time> | null {
   };
 }
 
-export function BacktestPerformanceChart({
+export const BacktestPerformanceChart = memo(function BacktestPerformanceChart({
   payload,
   isRunning = false
 }: {
@@ -280,11 +280,11 @@ export function BacktestPerformanceChart({
       </div>
 
       <div className="backtest-legend-grid">
-        <span><i style={{ background: "#0b5cad" }} /> Strategy equity {formatNumber(display?.strategy)}</span>
-        <span><i style={{ background: "#0f766e" }} /> {payload?.baseline_label ?? "Baseline"} {formatNumber(display?.baseline)}</span>
-        <span><i style={{ background: "#27384f" }} /> {payload?.primary_symbol ?? "Price"} {formatNumber(display?.close)}</span>
-        <span><i style={{ background: "#b42318" }} /> Strategy DD {formatPercent((display?.drawdown ?? 0))}</span>
-        <span><i style={{ background: "#ca8a04" }} /> Baseline DD {formatPercent((display?.baselineDrawdown ?? 0))}</span>
+        <span><i className="legend-swatch" style={{ background: "#0b5cad" }} /> Strategy equity {formatNumber(display?.strategy)}</span>
+        <span><i className="legend-swatch" style={{ background: "#0f766e" }} /> {payload?.baseline_label ?? "Baseline"} {formatNumber(display?.baseline)}</span>
+        <span><i className="legend-swatch" style={{ background: "#27384f" }} /> {payload?.primary_symbol ?? "Price"} {formatNumber(display?.close)}</span>
+        <span><i className="legend-swatch" style={{ background: "#b42318" }} /> Strategy DD {formatPercent((display?.drawdown ?? 0))}</span>
+        <span><i className="legend-swatch" style={{ background: "#ca8a04" }} /> Baseline DD {formatPercent((display?.baselineDrawdown ?? 0))}</span>
         <span>{display ? compactDate(display.timestamp) : "Hover a chart point"}</span>
       </div>
 
@@ -299,4 +299,4 @@ export function BacktestPerformanceChart({
       </div>
     </div>
   );
-}
+});

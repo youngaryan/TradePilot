@@ -5,14 +5,7 @@ import { listCommitteeDecisions, getDecisionsSummary } from "../api/client";
 import type { CommitteeDecision } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel } from "../components/Cards";
-import { formatDateTime, formatNumber, statusTone } from "../utils/format";
-
-function decisionTone(decision: string) {
-  if (decision === "BUY") return "good" as const;
-  if (decision === "SELL" || decision === "AVOID") return "bad" as const;
-  if (decision === "HOLD") return "info" as const;
-  return "neutral" as const;
-}
+import { decisionTone, formatDateTime, formatNumber, statusTone } from "../utils/format";
 
 function metricValue(value: unknown) {
   if (typeof value === "number") return formatNumber(value, 4);
