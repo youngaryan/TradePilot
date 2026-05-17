@@ -35,6 +35,7 @@ import {
 import { Explainer, MetricCard, Panel, SectionHeader } from "../components/Cards";
 import { DataTable } from "../components/Table";
 import { formatCurrency, formatDateTime, formatNumber, formatPercent, pipelineLabel, statusTone, toNumber } from "../utils/format";
+import { telemetryIsError, telemetryLatencyMs } from "../utils/telemetry";
 import { MarketResearchReports } from "./workspace/MarketResearchReports";
 
 type WorkspaceSection = "onboarding" | "experiments" | "agents" | "reports" | "data" | "operations" | "billing";
@@ -67,33 +68,6 @@ function equityPoints(experiment: ExperimentRecord | null) {
       net_return: toNumber(point.net_return) ?? 0
     }))
     .filter((point) => point.timestamp !== "n/a");
-}
-
-function telemetryIsError(event: TelemetryEventRecord) {
-  const category = event.category.toLowerCase();
-  const name = event.name.toLowerCase();
-  const status = String(event.properties?.status ?? event.context?.status ?? "").toLowerCase();
-  return category === "error" || name.includes("error") || name.includes("failed") || status === "failed";
-}
-
-function telemetryLatencyMs(event: TelemetryEventRecord) {
-  for (const source of [event.properties, event.context]) {
-    for (const key of ["latency_ms", "duration_ms", "elapsed_ms", "response_ms", "runtime_ms"]) {
-      const value = source?.[key];
-      if (typeof value === "number" || typeof value === "string") {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed) && parsed >= 0) return parsed;
-      }
-    }
-    for (const key of ["latency_seconds", "duration_seconds", "elapsed_seconds", "runtime_seconds"]) {
-      const value = source?.[key];
-      if (typeof value === "number" || typeof value === "string") {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed) && parsed >= 0) return parsed * 1000;
-      }
-    }
-  }
-  return null;
 }
 
 export function SaaSWorkspace({
@@ -351,9 +325,9 @@ export function SaaSWorkspace({
               ))}
             </div>
             <div className="form-row">
-              <label>
+              <label htmlFor="saas-project-name">
                 Project name
-                <input value={projectName} onChange={(event) => setProjectName(event.target.value)} />
+                <input id="saas-project-name" value={projectName} onChange={(event) => setProjectName(event.target.value)} />
               </label>
               <button type="button" className="primary-button" onClick={() => void handleCreateProject()} disabled={isBusy}>
                 {isBusy ? <Loader2 size={16} className="spin" /> : <CheckCircle2 size={16} />}
@@ -499,25 +473,25 @@ export function SaaSWorkspace({
           </Panel>
           <Panel title="Scoped API keys" subtitle="Users stay on HttpOnly cookies. Machines use separately scoped API keys. Leave secret fields blank to generate one.">
             <div className="form-grid">
-              <label>
+              <label htmlFor="saas-api-name">
                 Name
-                <input value={apiKeyForm.name} onChange={(event) => setApiKeyForm({ ...apiKeyForm, name: event.target.value })} />
+                <input id="saas-api-name" value={apiKeyForm.name} onChange={(event) => setApiKeyForm({ ...apiKeyForm, name: event.target.value })} />
               </label>
-              <label>
+              <label htmlFor="saas-api-provider">
                 Provider
-                <input value={apiKeyForm.provider} onChange={(event) => setApiKeyForm({ ...apiKeyForm, provider: event.target.value })} />
+                <input id="saas-api-provider" value={apiKeyForm.provider} onChange={(event) => setApiKeyForm({ ...apiKeyForm, provider: event.target.value })} />
               </label>
-              <label>
+              <label htmlFor="saas-api-secret-ref">
                 Secret reference
-                <input value={apiKeyForm.secret_ref ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret_ref: event.target.value, secret: null })} />
+                <input id="saas-api-secret-ref" value={apiKeyForm.secret_ref ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret_ref: event.target.value, secret: null })} />
               </label>
-              <label>
+              <label htmlFor="saas-api-secret-val">
                 Secret value for masking only
-                <input value={apiKeyForm.secret ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret: event.target.value, secret_ref: null })} />
+                <input id="saas-api-secret-val" value={apiKeyForm.secret ?? ""} onChange={(event) => setApiKeyForm({ ...apiKeyForm, secret: event.target.value, secret_ref: null })} />
               </label>
-              <label>
+              <label htmlFor="saas-api-scopes">
                 Machine scopes
-                <input value={(apiKeyForm.scopes ?? []).join(" ")} onChange={(event) => setApiKeyForm({ ...apiKeyForm, scopes: event.target.value.split(/\s+/).filter(Boolean) })} />
+                <input id="saas-api-scopes" value={(apiKeyForm.scopes ?? []).join(" ")} onChange={(event) => setApiKeyForm({ ...apiKeyForm, scopes: event.target.value.split(/\s+/).filter(Boolean) })} />
               </label>
             </div>
             <button type="button" className="primary-button" onClick={() => void handleCreateApiKey()} disabled={isBusy}>

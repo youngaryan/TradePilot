@@ -1,0 +1,12 @@
+# GitGuardian configuration
+# Exclude development docker-compose and .env files from secret detection.
+# These contain intentionally non-sensitive default credentials for local dev.
+
+version: 2
+
+secret:
+  ignored-paths:
+    - "docker-compose*.yml"
+    - "docker-compose*.yaml"
+    - ".env"
+    - ".env.*"

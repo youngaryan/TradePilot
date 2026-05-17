@@ -16,6 +16,18 @@ from .directional import (
 )
 from .events import EventDriftStrategy, PEADSentimentStrategy
 from .graph_stat_arb import GraphClusterResidualStrategy, GraphClusterTradingConfig
+from .oxford import (
+    OxfordBollingerMomentumStrategy,
+    OxfordBollingerPercentBReversalStrategy,
+    OxfordCombinedDonchianStrategy,
+    OxfordDualMomentumROCStrategy,
+    OxfordKeltnerThreePhaseStrategy,
+    OxfordNormalizedRegressionSlopeStrategy,
+    OxfordPriceMomentumStrategy,
+    OxfordRSI2PullbackStrategy,
+    OxfordVolatilityClusteringStrategy,
+    OxfordWyckoffRangeReversionStrategy,
+)
 from .pairs import KalmanPairsStrategy
 from .rule_based import RuleBasedDirectionalStrategy, build_rule_based_strategy_factory
 from .stat_arb import SectorResidualMeanReversionStrategy
@@ -34,6 +46,16 @@ __all__ = [
     "KeltnerChannelBreakoutStrategy",
     "MACDTrendStrategy",
     "MovingAverageCrossStrategy",
+    "OxfordBollingerMomentumStrategy",
+    "OxfordBollingerPercentBReversalStrategy",
+    "OxfordCombinedDonchianStrategy",
+    "OxfordDualMomentumROCStrategy",
+    "OxfordKeltnerThreePhaseStrategy",
+    "OxfordNormalizedRegressionSlopeStrategy",
+    "OxfordPriceMomentumStrategy",
+    "OxfordRSI2PullbackStrategy",
+    "OxfordVolatilityClusteringStrategy",
+    "OxfordWyckoffRangeReversionStrategy",
     "PriceSMADeviationStrategy",
     "RSIMeanReversionStrategy",
     "RuleBasedDirectionalStrategy",

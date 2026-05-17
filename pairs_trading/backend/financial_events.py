@@ -5,9 +5,9 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-from ..apps.cli import json_ready
 from ..data.events import EventProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
 from ..data.market import CachedParquetProvider, MarketDataProvider, YahooFinanceProvider
+from ..engines.backtesting import json_ready
 from .config import BackendSettings
 
 

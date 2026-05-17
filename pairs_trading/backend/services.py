@@ -14,9 +14,12 @@ from uuid import uuid4
 import pandas as pd
 
 from ..api import build_paper_dashboard_payload
+from ..core.timeframes import TradingMode, resolve_timeframe_spec
 from ..apps.cli import (
     DIRECTIONAL_PIPELINES,
+    _build_directional_strategy_factory,
     json_ready,
+    run_committee_signal_follower_pipeline,
     run_directional_pipeline,
     run_etf_trend_pipeline,
     run_event_driven_pipeline,
@@ -384,13 +387,24 @@ def _decision_report(summary: dict[str, Any], validation: dict[str, Any]) -> dic
     max_drawdown = _safe_metric(summary, "max_drawdown")
     avg_turnover = _safe_metric(summary, "avg_turnover")
     folds = _safe_metric(summary, "folds")
+    trading_mode = str(summary.get("trading_mode") or "daily")
+    signal_intervals = {str(item) for item in summary.get("signal_intervals", []) or []}
+    sharpe_threshold = 1.25 if trading_mode == TradingMode.SHORT_TERM.value else 1.0
+    turnover_limit = 6.0 if trading_mode == TradingMode.SHORT_TERM.value else 1.50
 
-    add_check("Sharpe", sharpe, sharpe is not None and sharpe >= 1.0, "Prefer Sharpe above 1.0 after costs.")
+    add_check("Sharpe", sharpe, sharpe is not None and sharpe >= sharpe_threshold, f"Prefer Sharpe above {sharpe_threshold:.2f} after costs.")
     add_check("DSR", dsr, dsr is not None and dsr >= 0.60, "DSR adjusts for multiple testing and non-normality.")
     add_check("PBO", pbo, pbo is not None and pbo <= 0.30, "Lower PBO means lower estimated overfitting risk.")
     add_check("Drawdown", max_drawdown, max_drawdown is not None and max_drawdown >= -0.25, "Large drawdowns can make live trading impossible.")
-    add_check("Turnover", avg_turnover, avg_turnover is not None and avg_turnover <= 1.50, "High turnover is fragile after slippage and spread.")
+    add_check("Turnover", avg_turnover, avg_turnover is not None and avg_turnover <= turnover_limit, "High turnover is fragile after slippage and spread.")
     add_check("Folds", folds, folds is not None and folds >= 3.0, "More walk-forward folds make the estimate less brittle.")
+    if trading_mode == TradingMode.SHORT_TERM.value:
+        add_check(
+            "Timeframes",
+            float(len(signal_intervals)),
+            {"1h", "4h"}.issubset(signal_intervals),
+            "Short-term promotion requires both hourly execution and 4-hour signal context.",
+        )
 
     passed_count = sum(1 for check in checks if check["passed"])
     if passed_count >= 5:
@@ -453,8 +467,119 @@ def _result_payload(run_output: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _comparison_payload(*, request: BacktestRunRequest, mode_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    leaderboard: list[dict[str, Any]] = []
+    for mode, payload in mode_results.items():
+        summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+        validation = payload.get("validation", {}) if isinstance(payload, dict) else {}
+        leaderboard.append(
+            {
+                "trading_mode": mode,
+                "execution_interval": summary.get("execution_interval"),
+                "signal_intervals": summary.get("signal_intervals", []),
+                "total_return": _safe_metric(summary, "total_return"),
+                "annualized_return": _safe_metric(summary, "annualized_return"),
+                "sharpe": _safe_metric(summary, "sharpe"),
+                "max_drawdown": _safe_metric(summary, "max_drawdown"),
+                "avg_turnover": _safe_metric(summary, "avg_turnover"),
+                "dsr": _safe_metric(validation, "dsr"),
+                "pbo": _safe_metric(validation, "pbo"),
+                "verdict": payload.get("decision", {}).get("verdict"),
+            }
+        )
+    leaderboard.sort(key=lambda item: (item.get("sharpe") is not None, item.get("sharpe") or float("-inf")), reverse=True)
+    best = leaderboard[0]["trading_mode"] if leaderboard else None
+    daily = next((item for item in leaderboard if item["trading_mode"] == TradingMode.DAILY.value), {})
+    short_term = next((item for item in leaderboard if item["trading_mode"] == TradingMode.SHORT_TERM.value), {})
+    metric_deltas = {
+        "short_minus_daily_sharpe": None,
+        "short_minus_daily_total_return": None,
+        "short_minus_daily_max_drawdown": None,
+    }
+    if daily and short_term:
+        for key, output_key in (
+            ("sharpe", "short_minus_daily_sharpe"),
+            ("total_return", "short_minus_daily_total_return"),
+            ("max_drawdown", "short_minus_daily_max_drawdown"),
+        ):
+            left = short_term.get(key)
+            right = daily.get(key)
+            metric_deltas[output_key] = None if left is None or right is None else float(left) - float(right)
+
+    summary = {
+        "experiment_id": f"{request.experiment_name or request.pipeline}_mode_comparison",
+        "strategy": request.experiment_name or request.pipeline,
+        "pipeline": request.pipeline,
+        "comparison": True,
+        "mode_count": len(mode_results),
+        "compared_modes": list(mode_results.keys()),
+        "best_mode_by_sharpe": best,
+    }
+    return {
+        "summary": summary,
+        "validation": {},
+        "visuals": {},
+        "artifact_dir": None,
+        "fold_metrics_tail": [],
+        "equity_curve_tail": [],
+        "equity_curve_points": [],
+        "ledger": {},
+        "trade_events": [],
+        "trade_summary": [],
+        "mode_results": mode_results,
+        "comparison": {
+            "leaderboard": leaderboard,
+            "metric_deltas": metric_deltas,
+        },
+        "decision": {
+            "verdict": "compare_modes",
+            "headline": f"Best mode by Sharpe: {best}" if best else "No mode completed",
+            "passed_checks": sum(1 for item in leaderboard if item.get("verdict") == "paper_candidate"),
+            "total_checks": len(leaderboard),
+            "checks": [
+                {
+                    "name": str(item.get("trading_mode") or "mode"),
+                    "value": item.get("sharpe"),
+                    "passed": item.get("trading_mode") == best,
+                    "message": f"{item.get('execution_interval') or 'n/a'} execution, return {item.get('total_return') if item.get('total_return') is not None else 'n/a'}, verdict {item.get('verdict') or 'n/a'}.",
+                }
+                for item in leaderboard
+            ],
+        },
+    }
+
+
 def _clean_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in parameters.items() if value is not None}
+
+
+def _directional_min_history(pipeline: str, params: dict[str, Any]) -> int:
+    _, min_history = _build_directional_strategy_factory(
+        pipeline,
+        fast_window=int(params.get("fast_window", 20)),
+        slow_window=int(params.get("slow_window", 80)),
+        ema_fast_window=int(params.get("ema_fast_window", 12)),
+        ema_slow_window=int(params.get("ema_slow_window", 48)),
+        rsi_window=int(params.get("rsi_window", 14)),
+        sma_window=int(params.get("sma_window", 40)),
+        stochastic_window=int(params.get("stochastic_window", 14)),
+        stochastic_smooth_window=int(params.get("stochastic_smooth_window", 3)),
+        bollinger_window=int(params.get("bollinger_window", 20)),
+        macd_fast_window=int(params.get("macd_fast_window", 12)),
+        macd_slow_window=int(params.get("macd_slow_window", 26)),
+        macd_signal_window=int(params.get("macd_signal_window", 9)),
+        breakout_window=int(params.get("breakout_window", 55)),
+        breakout_exit_window=int(params.get("breakout_exit_window", 20)),
+        keltner_window=int(params.get("keltner_window", 40)),
+        trend_window=int(params.get("trend_window", 120)),
+        volatility_window=int(params.get("volatility_window", 20)),
+        momentum_lookbacks=params.get("momentum_lookbacks"),
+        regime_fast_window=int(params.get("regime_fast_window", 30)),
+        regime_slow_window=int(params.get("regime_slow_window", 120)),
+        regime_mean_reversion_window=int(params.get("regime_mean_reversion_window", 40)),
+        regime_volatility_window=int(params.get("regime_volatility_window", 30)),
+    )
+    return min_history
 
 
 def _publish_directory_reference(storage, *, source_dir: str | Path | None, organization_id: str, artifact_type: str, artifact_id: str) -> dict[str, Any] | None:
@@ -646,7 +771,7 @@ class BacktestJobRunner:
                     artifact_type="backtests",
                     source_id=experiment_id,
                     reference=artifact_reference,
-                    metadata={"job_id": job_id, "pipeline": request.pipeline},
+                    metadata={"job_id": job_id, "pipeline": request.pipeline, "trading_mode": summary.get("trading_mode"), "compare_modes": request.compare_modes},
                 )
                 if artifact_record:
                     result["artifact_id"] = artifact_record["id"]
@@ -667,6 +792,7 @@ class BacktestJobRunner:
                     "job_id": job_id,
                     "name": str(summary.get("strategy") or request.experiment_name or experiment_id),
                     "pipeline": request.pipeline,
+                    "trading_mode": summary.get("trading_mode"),
                     "status": "completed",
                     "artifact_dir": artifact_reference.get("uri") if artifact_reference else result.get("artifact_dir"),
                     "summary": json_ready(summary),
@@ -827,7 +953,7 @@ class BacktestService:
             symbols = request.symbols or spec.get("asset_universe", {}).get("symbols", [])
             if not symbols:
                 raise ValueError("User-created strategies require at least one symbol.")
-        if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment"}) and not request.symbols:
+        if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment", "committee_signal_follower"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
         if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.event_dataset_id and not request.use_sec_companyfacts and not request.include_sec_filings:
             raise ValueError("Event backtests require an event file, SEC company facts, or official SEC filings.")
@@ -839,10 +965,18 @@ class BacktestService:
         validate_relative_path(request.artifact_root, settings=self.settings, field_name="artifact_root")
         validate_relative_path(request.sector_map_path, settings=self.settings, field_name="sector_map_path")
         validate_relative_path(request.event_file, settings=self.settings, field_name="event_file")
-        if request.train_bars <= request.purge_bars + 5:
+        if request.pipeline != "committee_signal_follower" and request.train_bars <= request.purge_bars + 5:
             raise ValueError("Training bars must be meaningfully larger than purge bars.")
         if request.step_bars < request.test_bars:
             raise ValueError("step_bars must be greater than or equal to test_bars to avoid overlapping out-of-sample accounting.")
+        if request.pipeline in DIRECTIONAL_PIPELINES:
+            params = _clean_parameters(request.parameters)
+            min_history = _directional_min_history(request.pipeline, params)
+            if request.train_bars < min_history:
+                raise ValueError(
+                    f"{request.pipeline} requires at least {min_history} train_bars for indicator warmup; "
+                    f"received {request.train_bars}."
+                )
 
     def run_backtest(
         self,
@@ -863,7 +997,7 @@ class BacktestService:
                 equity_curve=payload.get("equity_curve"),
                 prices=payload.get("prices"),
                 ledger=payload.get("ledger"),
-                bars_per_year=int(payload.get("bars_per_year") or request.bars_per_year),
+                bars_per_year=int(payload.get("bars_per_year") or effective_bars_per_year),
                 completed_folds=completed_folds,
                 total_folds=total_folds,
                 status="running",
@@ -876,7 +1010,34 @@ class BacktestService:
                 snapshot,
             )
 
+        if request.compare_modes:
+            self.validate_request(request, organization_id=organization_id, user_id=user_id)
+            base_name = request.experiment_name or f"{request.pipeline}_comparison"
+            mode_results: dict[str, dict[str, Any]] = {}
+            for index, mode in enumerate((TradingMode.DAILY.value, TradingMode.SHORT_TERM.value)):
+                report(
+                    f"running_{mode}",
+                    f"Running {mode.replace('_', '-')} simulation for side-by-side comparison.",
+                    0.10 + index * 0.42,
+                )
+                child_request = request.model_copy(
+                    update={
+                        "compare_modes": False,
+                        "trading_mode": mode,
+                        "experiment_name": f"{base_name}_{mode}",
+                    }
+                )
+                mode_results[mode] = self.run_backtest(
+                    child_request,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    progress=None,
+                )
+            report("comparing_modes", "Daily and short-term simulations completed. Building comparison leaderboard.", 0.92)
+            return _comparison_payload(request=request, mode_results=mode_results)
+
         self.validate_request(request, organization_id=organization_id, user_id=user_id)
+        timeframe = resolve_timeframe_spec(trading_mode=request.trading_mode, interval=request.interval)
         sector_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.sector_dataset_id, suffixes=(".json", ".csv", ".parquet"))
         event_file = self._materialize_dataset_file(organization_id=organization_id, dataset_id=request.event_dataset_id, suffixes=(".csv", ".json", ".parquet"))
         if sector_file or event_file:
@@ -888,6 +1049,8 @@ class BacktestService:
         params = _clean_parameters(request.parameters)
         artifact_root = str(request.artifact_root or self.settings.backtest_artifact_root)
         experiment_name = request.experiment_name or f"{pipeline}_ui"
+        effective_interval = timeframe.execution_interval
+        effective_bars_per_year = timeframe.bars_per_year if request.bars_per_year == 252 and timeframe.mode == TradingMode.SHORT_TERM else request.bars_per_year
 
         custom_strategy_id = parse_custom_strategy_pipeline(pipeline)
         if custom_strategy_id:
@@ -904,20 +1067,23 @@ class BacktestService:
             spec = strategy_record.get("spec") if isinstance(strategy_record.get("spec"), dict) else {}
             spec_symbols = spec.get("asset_universe", {}).get("symbols", []) if isinstance(spec.get("asset_universe"), dict) else []
             symbols = request.symbols or list(spec_symbols)
+            custom_timeframe = resolve_timeframe_spec(trading_mode=request.trading_mode or str(spec.get("timeframe") or ""), interval=request.interval)
+            custom_bars_per_year = custom_timeframe.bars_per_year if request.bars_per_year == 252 and custom_timeframe.mode == TradingMode.SHORT_TERM else request.bars_per_year
             report("running_user_strategy", f"Running user strategy {strategy_record.get('name')} across {len(symbols)} symbols.", 0.22)
             run_output = run_rule_based_strategy_pipeline(
                 spec=spec,
                 symbols=symbols,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=custom_timeframe.execution_interval,
+                trading_mode=str(custom_timeframe.mode),
                 experiment_name=experiment_name if request.experiment_name else str(strategy_record.get("name") or custom_strategy_id),
                 price_cache_dir=str(self.settings.price_cache_dir),
                 artifact_root=artifact_root,
                 train_bars=request.train_bars,
                 test_bars=request.test_bars,
                 step_bars=request.step_bars,
-                bars_per_year=request.bars_per_year,
+                bars_per_year=custom_bars_per_year,
                 purge_bars=request.purge_bars,
                 embargo_bars=request.embargo_bars,
                 pbo_partitions=request.pbo_partitions,
@@ -941,14 +1107,15 @@ class BacktestService:
                 symbols=request.symbols,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
                 experiment_name=experiment_name,
                 price_cache_dir=str(self.settings.price_cache_dir),
                 artifact_root=artifact_root,
                 train_bars=request.train_bars,
                 test_bars=request.test_bars,
                 step_bars=request.step_bars,
-                bars_per_year=request.bars_per_year,
+                bars_per_year=effective_bars_per_year,
                 fast_window=int(params.get("fast_window", 20)),
                 slow_window=int(params.get("slow_window", 80)),
                 ema_fast_window=int(params.get("ema_fast_window", 12)),
@@ -999,7 +1166,8 @@ class BacktestService:
                 symbols=request.symbols,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
                 experiment_name=experiment_name,
                 price_cache_dir=str(self.settings.price_cache_dir),
                 artifact_root=artifact_root,
@@ -1017,7 +1185,8 @@ class BacktestService:
                 sector_map_path=str(request.sector_map_path) if request.sector_map_path else None,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
                 experiment_name=experiment_name,
                 price_cache_dir=str(self.settings.price_cache_dir),
                 sentiment_cache_dir=str(self.settings.sentiment_cache_dir),
@@ -1055,7 +1224,8 @@ class BacktestService:
                 sector_map_path=str(request.sector_map_path) if request.sector_map_path else None,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
                 experiment_name=experiment_name,
                 price_cache_dir=str(self.settings.price_cache_dir),
                 artifact_root=artifact_root,
@@ -1081,7 +1251,8 @@ class BacktestService:
                 symbols=request.symbols,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
                 experiment_name=experiment_name,
                 price_cache_dir=str(self.settings.price_cache_dir),
                 event_cache_dir=str(self.settings.event_cache_dir),
@@ -1105,7 +1276,8 @@ class BacktestService:
                 symbols=request.symbols,
                 start=request.start,
                 end=request.end,
-                interval=request.interval,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
                 experiment_name=experiment_name,
                 price_cache_dir=str(self.settings.price_cache_dir),
                 event_cache_dir=str(self.settings.event_cache_dir),
@@ -1150,6 +1322,41 @@ class BacktestService:
             report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
             return _result_payload(run_output)
 
+        if pipeline == "committee_signal_follower":
+            report(
+                "running_committee_signal_follower",
+                f"Running committee signal follower across {len(request.symbols)} symbols with decisions from DecisionHistoryStore.",
+                0.22,
+            )
+            from ..research.decision_history import DecisionHistoryStore
+            decision_store = DecisionHistoryStore(self.settings)
+            run_output = run_committee_signal_follower_pipeline(
+                symbols=request.symbols,
+                decision_store=decision_store,
+                start=request.start,
+                end=request.end,
+                interval=effective_interval,
+                trading_mode=str(timeframe.mode),
+                experiment_name=experiment_name,
+                price_cache_dir=str(self.settings.price_cache_dir),
+                artifact_root=artifact_root,
+                position_sizing=str(params.get("position_sizing", "confidence_weighted")),
+                max_position_pct=float(params.get("max_position_pct", 0.25)),
+                confidence_threshold=int(params.get("confidence_threshold", 30)),
+                scale_in_confidence_delta=int(params.get("scale_in_confidence_delta", 10)),
+                scale_out_on_opposite=bool(params.get("scale_out_on_opposite", True)),
+                flat_on_avoid=bool(params.get("flat_on_avoid", True)),
+                train_bars=1,
+                test_bars=None,
+                step_bars=None,
+                purge_bars=0,
+                embargo_bars=0,
+                pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
+            )
+            report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
+            return _result_payload(run_output)
+
         raise ValueError(f"Unsupported backtest pipeline: {pipeline}")
 
     @staticmethod
@@ -1160,6 +1367,8 @@ class BacktestService:
                 "name": "ETF Momentum Agent",
                 "pipeline": "etf_trend",
                 "symbols": ["SPY", "QQQ", "IWM", "TLT", "GLD", "XLK"],
+                "trading_mode": "daily",
+                "compare_modes": False,
                 "start": "2015-01-01",
                 "end": "2026-04-15",
                 "parameters": {},
@@ -1167,6 +1376,39 @@ class BacktestService:
                 "objective": "Find a robust liquid ETF rotation candidate.",
                 "risk_level": "Medium",
                 "validation_focus": "DSR, PBO, drawdown, turnover, and sensitivity to rebalance cadence.",
+            },
+            {
+                "id": "short_term_ema_agent",
+                "name": "Short-Term EMA Agent",
+                "pipeline": "ema_cross",
+                "symbols": ["SPY", "QQQ", "IWM"],
+                "trading_mode": "short_term",
+                "compare_modes": False,
+                "start": "2025-01-01",
+                "end": "2026-04-15",
+                "train_bars": 390,
+                "test_bars": 78,
+                "step_bars": 78,
+                "parameters": {"ema_fast_window": 12, "ema_slow_window": 48},
+                "description": "Intraday directional sleeve using hourly execution and 4-hour confirmation.",
+                "objective": "Find shorter-term trend opportunities that daily bars smooth away.",
+                "risk_level": "High",
+                "validation_focus": "Turnover, slippage sensitivity, fold stability, and 1h/4h signal agreement.",
+            },
+            {
+                "id": "daily_vs_short_term_compare",
+                "name": "Daily vs Short-Term Comparison",
+                "pipeline": "ema_cross",
+                "symbols": ["SPY", "QQQ", "IWM"],
+                "trading_mode": "daily",
+                "compare_modes": True,
+                "start": "2025-01-01",
+                "end": "2026-04-15",
+                "parameters": {"ema_fast_window": 12, "ema_slow_window": 48},
+                "description": "Runs daily and short-term simulations side by side using the same strategy family.",
+                "objective": "Compare whether intraday 1h/4h signals add value after costs.",
+                "risk_level": "High",
+                "validation_focus": "Mode leaderboard, Sharpe delta, drawdown delta, turnover, and overfit checks.",
             },
             {
                 "id": "vol_target_agent",
@@ -1247,6 +1489,29 @@ class BacktestService:
                 "objective": "Test whether official events plus positive/negative sentiment create post-event continuation.",
                 "risk_level": "High",
                 "validation_focus": "Look-ahead safety, event timestamp quality, sentiment coverage, and overfit thresholds.",
+            },
+            {
+                "id": "committee_signal_agent",
+                "name": "Committee Signal Follower",
+                "pipeline": "committee_signal_follower",
+                "symbols": ["AAPL", "MSFT", "GLD"],
+                "start": "2025-01-01",
+                "end": "2026-05-20",
+                "train_bars": 1,
+                "test_bars": 63,
+                "step_bars": 63,
+                "purge_bars": 0,
+                "parameters": {
+                    "max_position_pct": 0.25,
+                    "confidence_threshold": 30,
+                    "scale_in_confidence_delta": 10,
+                    "scale_out_on_opposite": True,
+                    "flat_on_avoid": True,
+                },
+                "description": "Simulates trading every historical committee research decision — BUY goes long, SELL goes short, AVOID flattens — to measure the real P&L of following the AI research agents.",
+                "objective": "Validate whether past committee recommendations would have been profitable.",
+                "risk_level": "Medium",
+                "validation_focus": "Decision coverage, signal quality, drawdown during conflicting signals.",
             },
         ]
 

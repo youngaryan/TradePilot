@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+import pandas as pd
+
 from pairs_trading.engines.backtesting import CostModel, WalkForwardBacktester, WalkForwardConfig
-from pairs_trading.pipelines import DirectionalPipelineConfig, DirectionalStrategyPipeline
+from pairs_trading.pipelines import DirectionalPipelineConfig, DirectionalStrategyPipeline, MultiTimeframeSignalConfig
 from pairs_trading.core.portfolio import PortfolioManager
 from pairs_trading.strategies import (
     AdaptiveRegimeStrategy,
@@ -106,6 +108,24 @@ class DirectionalPipelineTests(unittest.TestCase):
         self.assertEqual(len(snapshots), len(result.fold_metrics))
         self.assertEqual(snapshots[-1]["completed_folds"], len(result.fold_metrics))
         self.assertIn("equity_curve", snapshots[-1])
+
+    def test_short_term_directional_pipeline_applies_four_hour_confirmation(self) -> None:
+        prices = synthetic_directional_prices()
+        prices.index = pd.date_range("2024-01-02 09:00", periods=len(prices), freq="h")
+        pipeline = DirectionalStrategyPipeline(
+            strategy_factory=lambda symbol: EMACrossStrategy(symbol=symbol, fast_window=8, slow_window=24),
+            portfolio_manager=PortfolioManager(max_leverage=1.0, risk_per_trade=0.03, volatility_window=12, max_strategy_weight=0.4),
+            config=DirectionalPipelineConfig.from_symbols(["TREND"], min_history=80),
+            name="short_term_directional",
+            multi_timeframe=MultiTimeframeSignalConfig(execution_interval="1h", confirmation_interval="4h", fast_window=4, slow_window=12),
+            timeframe_metadata={"trading_mode": "short_term", "execution_interval": "1h", "signal_intervals": ["1h", "4h"]},
+        )
+
+        output = pipeline.run_fold(prices.iloc[:180][["TREND"]], prices.iloc[180:260][["TREND"]])
+
+        self.assertEqual(output.diagnostics["trading_mode"], "short_term")
+        self.assertEqual(output.diagnostics["signal_intervals"], ["1h", "4h"])
+        self.assertTrue(any(column.startswith("weight_") for column in output.frame.columns))
 
 
 if __name__ == "__main__":

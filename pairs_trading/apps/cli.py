@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 import pandas as pd
 
 from ..core.portfolio import PortfolioManager
+from ..core.timeframes import TimeframeSpec, TradingMode, resolve_timeframe_spec
 from ..data.events import CachedEventProvider, CompositeEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
 from ..data.market import CachedParquetProvider, YahooFinanceProvider
 from ..data.news import (
@@ -31,11 +32,13 @@ from ..engines.backtesting import (
     json_ready,
     run_trial_grid,
 )
+from ..research.decision_history import DecisionHistoryStore
 from ..engines.broker import BrokerConfig, SimulatedBroker
 from ..engines.execution import ExecutionConfig
 from ..engines.risk import RiskConfig
 from ..engines.validation import ValidationConfig
 from ..pipelines import (
+    CommitteeSignalFollowerPipeline,
     DirectionalPipelineConfig,
     DirectionalStrategyPipeline,
     ETFMomentumConfig,
@@ -44,6 +47,7 @@ from ..pipelines import (
     EventDrivenPipeline,
     GraphStatArbConfig,
     GraphStatArbPipeline,
+    MultiTimeframeSignalConfig,
     PEADSentimentConfig,
     PEADSentimentPipeline,
     SectorStatArbPipeline,
@@ -61,6 +65,16 @@ from ..strategies import (
     KeltnerChannelBreakoutStrategy,
     MACDTrendStrategy,
     MovingAverageCrossStrategy,
+    OxfordBollingerMomentumStrategy,
+    OxfordBollingerPercentBReversalStrategy,
+    OxfordCombinedDonchianStrategy,
+    OxfordDualMomentumROCStrategy,
+    OxfordKeltnerThreePhaseStrategy,
+    OxfordNormalizedRegressionSlopeStrategy,
+    OxfordPriceMomentumStrategy,
+    OxfordRSI2PullbackStrategy,
+    OxfordVolatilityClusteringStrategy,
+    OxfordWyckoffRangeReversionStrategy,
     PriceSMADeviationStrategy,
     RSIMeanReversionStrategy,
     StochasticOscillatorStrategy,
@@ -110,7 +124,7 @@ DEFAULT_EVENT_SYMBOLS = [
     "XOM",
 ]
 
-ADVANCED_PIPELINES = ["graph_stat_arb", "pead_sentiment"]
+ADVANCED_PIPELINES = ["graph_stat_arb", "pead_sentiment", "committee_signal_follower"]
 
 DIRECTIONAL_PIPELINES = [
     "buy_and_hold",
@@ -126,7 +140,55 @@ DIRECTIONAL_PIPELINES = [
     "volatility_target_trend",
     "time_series_momentum",
     "adaptive_regime",
+    "oxford_combined_donchian",
+    "oxford_price_momentum",
+    "oxford_dual_momentum_roc",
+    "oxford_bollinger_momentum",
+    "oxford_keltner_three_phase",
+    "oxford_normalized_regression_slope",
+    "oxford_bollinger_percent_b_reversal",
+    "oxford_rsi2_pullback",
+    "oxford_wyckoff_range_reversion",
+    "oxford_volatility_clustering",
 ]
+
+
+def _timeframe_for_run(trading_mode: str | None, interval: str) -> TimeframeSpec:
+    return resolve_timeframe_spec(trading_mode=trading_mode, interval=interval)
+
+
+def _with_timeframe_config(
+    *,
+    train_bars: int,
+    test_bars: int,
+    step_bars: int | None,
+    timeframe: TimeframeSpec,
+    bars_per_year: int | None = None,
+    purge_bars: int = 0,
+    embargo_bars: int = 0,
+) -> WalkForwardConfig:
+    return WalkForwardConfig(
+        train_bars=train_bars,
+        test_bars=test_bars,
+        step_bars=step_bars,
+        bars_per_year=bars_per_year or timeframe.bars_per_year,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
+        trading_mode=str(timeframe.mode),
+        execution_interval=timeframe.execution_interval,
+        signal_intervals=timeframe.signal_intervals,
+    )
+
+
+def _directional_multi_timeframe_config(timeframe: TimeframeSpec) -> MultiTimeframeSignalConfig | None:
+    if timeframe.mode != TradingMode.SHORT_TERM or "4h" not in timeframe.signal_intervals:
+        return None
+    return MultiTimeframeSignalConfig(
+        execution_interval=timeframe.execution_interval,
+        confirmation_interval="4h",
+        fast_window=6,
+        slow_window=24,
+    )
 
 
 def load_sector_map(path: str | Path | None) -> dict[str, str]:
@@ -504,6 +566,117 @@ def _build_directional_strategy_factory(
             ),
             max(240, regime_slow_window + regime_mean_reversion_window + regime_volatility_window),
         )
+    if strategy_name == "oxford_combined_donchian":
+        entry_window = max(breakout_window, breakout_exit_window + 1)
+        return (
+            lambda symbol: OxfordCombinedDonchianStrategy(
+                symbol=symbol,
+                entry_window=entry_window,
+                exit_window=breakout_exit_window,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(140, entry_window + breakout_exit_window + 20),
+        )
+    if strategy_name == "oxford_price_momentum":
+        lookbacks = tuple(momentum_lookbacks or (90, 120))
+        slow_lookback = max(lookbacks)
+        fast_lookback_index = min(0.95, max(0.25, min(lookbacks) / slow_lookback))
+        return (
+            lambda symbol: OxfordPriceMomentumStrategy(
+                symbol=symbol,
+                slow_lookback=slow_lookback,
+                fast_lookback_index=fast_lookback_index,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(180, slow_lookback + 40),
+        )
+    if strategy_name == "oxford_dual_momentum_roc":
+        lookbacks = tuple(momentum_lookbacks or (60, 120))
+        slow_lookback = max(lookbacks)
+        fast_lookback = min(lookbacks)
+        return (
+            lambda symbol: OxfordDualMomentumROCStrategy(
+                symbol=symbol,
+                slow_lookback=slow_lookback,
+                fast_lookback=fast_lookback,
+                time_exit_bars=max(50, breakout_exit_window),
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(180, slow_lookback + 40),
+        )
+    if strategy_name == "oxford_bollinger_momentum":
+        oxford_bollinger_window = max(60, bollinger_window)
+        return (
+            lambda symbol: OxfordBollingerMomentumStrategy(
+                symbol=symbol,
+                window=oxford_bollinger_window,
+                num_std=bollinger_num_std,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(160, oxford_bollinger_window * 3),
+        )
+    if strategy_name == "oxford_keltner_three_phase":
+        return (
+            lambda symbol: OxfordKeltnerThreePhaseStrategy(
+                symbol=symbol,
+                window=keltner_window,
+                atr_multiplier=keltner_atr_multiplier,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(160, keltner_window * 4),
+        )
+    if strategy_name == "oxford_normalized_regression_slope":
+        return (
+            lambda symbol: OxfordNormalizedRegressionSlopeStrategy(
+                symbol=symbol,
+                window=trend_window,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(180, trend_window + 40),
+        )
+    if strategy_name == "oxford_bollinger_percent_b_reversal":
+        return (
+            lambda symbol: OxfordBollingerPercentBReversalStrategy(
+                symbol=symbol,
+                band_window=bollinger_window,
+                trend_window=max(120, trend_window),
+                num_std=bollinger_num_std,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(240, max(120, trend_window) + bollinger_window + 20),
+        )
+    if strategy_name == "oxford_rsi2_pullback":
+        return (
+            lambda symbol: OxfordRSI2PullbackStrategy(
+                symbol=symbol,
+                setup_window=max(120, trend_window),
+                rsi_entry=min(lower_entry, 13.0),
+                exit_window=max(8, min(13, breakout_exit_window)),
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(240, max(120, trend_window) + 20),
+        )
+    if strategy_name == "oxford_wyckoff_range_reversion":
+        return (
+            lambda symbol: OxfordWyckoffRangeReversionStrategy(
+                symbol=symbol,
+                range_window=sma_window,
+                exit_window=max(5, min(40, breakout_exit_window)),
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(120, sma_window * 3),
+        )
+    if strategy_name == "oxford_volatility_clustering":
+        return (
+            lambda symbol: OxfordVolatilityClusteringStrategy(
+                symbol=symbol,
+                range_window=max(10, volatility_window),
+                move_window=2,
+                time_exit_bars=3,
+                transaction_cost_bps=strategy_cost_bps,
+            ),
+            max(100, volatility_window * 4),
+        )
     raise ValueError(f"Unsupported directional strategy: {strategy_name}")
 
 
@@ -666,18 +839,22 @@ def _build_stat_arb_trial_grid(
     }
 
 
-def _build_etf_trial_grid(symbols: list[str], experiment_name: str) -> dict[str, ETFTrendMomentumPipeline]:
+def _build_etf_trial_grid(symbols: list[str], experiment_name: str, timeframe: TimeframeSpec | None = None) -> dict[str, ETFTrendMomentumPipeline]:
+    short_term = timeframe is not None and timeframe.mode == TradingMode.SHORT_TERM
+    lookbacks = (6, 24, 48, 120) if short_term else (21, 63, 126, 252)
+    trend_window = 120 if short_term else 200
+    rebalance_bars = 4 if short_term else 21
     return {
         f"{experiment_name}_trial_top2": ETFTrendMomentumPipeline(
-            ETFMomentumConfig.from_symbols(symbols, top_n=2, trend_window=180),
+            ETFMomentumConfig.from_symbols(symbols, top_n=2, lookbacks=lookbacks, trend_window=trend_window, rebalance_bars=rebalance_bars),
             name=f"{experiment_name}_trial_top2",
         ),
         f"{experiment_name}_trial_top3": ETFTrendMomentumPipeline(
-            ETFMomentumConfig.from_symbols(symbols, top_n=3, trend_window=200),
+            ETFMomentumConfig.from_symbols(symbols, top_n=3, lookbacks=lookbacks, trend_window=trend_window, rebalance_bars=rebalance_bars),
             name=f"{experiment_name}_trial_top3",
         ),
         f"{experiment_name}_trial_top4": ETFTrendMomentumPipeline(
-            ETFMomentumConfig.from_symbols(symbols, top_n=4, trend_window=220),
+            ETFMomentumConfig.from_symbols(symbols, top_n=4, lookbacks=lookbacks, trend_window=trend_window + (24 if short_term else 20), rebalance_bars=rebalance_bars),
             name=f"{experiment_name}_trial_top4",
         ),
     }
@@ -763,6 +940,7 @@ def run_stat_arb_pipeline(
     start: str = "2018-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str = "serious_stat_arb",
     price_cache_dir: str = "data/cache",
     sentiment_cache_dir: str = "data/sentiment_cache",
@@ -791,6 +969,8 @@ def run_stat_arb_pipeline(
     pbo_partitions: int = 8,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
     sector_map = load_sector_map(sector_map_path)
     tickers = list(sector_map.keys())
 
@@ -862,11 +1042,11 @@ def run_stat_arb_pipeline(
         name=experiment_name,
     )
 
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=504,
         test_bars=63,
         step_bars=63,
-        bars_per_year=252,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -913,6 +1093,7 @@ def run_graph_stat_arb_pipeline(
     start: str = "2018-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str = "graph_stat_arb",
     price_cache_dir: str = "data/cache",
     artifact_root: str = "artifacts/experiments",
@@ -929,6 +1110,8 @@ def run_graph_stat_arb_pipeline(
     pbo_partitions: int = 8,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
     sector_map = load_sector_map(sector_map_path)
     tickers = list(sector_map.keys())
     price_provider = CachedParquetProvider(
@@ -967,11 +1150,11 @@ def run_graph_stat_arb_pipeline(
         name=experiment_name,
     )
 
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=504,
         test_bars=63,
         step_bars=63,
-        bars_per_year=252,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -1012,10 +1195,11 @@ def run_directional_pipeline(
     start: str = "2018-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str | None = None,
     price_cache_dir: str = "data/cache",
     artifact_root: str = "artifacts/experiments",
-    train_bars: int = 252,
+    train_bars: int = 300,
     test_bars: int = 63,
     step_bars: int = 63,
     bars_per_year: int = 252,
@@ -1062,6 +1246,10 @@ def run_directional_pipeline(
 ) -> dict[str, Any]:
     if not symbols:
         raise ValueError("Directional pipelines require at least one symbol.")
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
+    if trading_mode is not None and bars_per_year == 252:
+        bars_per_year = timeframe.bars_per_year
 
     strategy_factory, min_history = _build_directional_strategy_factory(
         strategy_name,
@@ -1102,6 +1290,11 @@ def run_directional_pipeline(
         regime_volatility_quantile=regime_volatility_quantile,
         strategy_cost_bps=strategy_cost_bps,
     )
+    if train_bars < min_history:
+        raise ValueError(
+            f"{strategy_name} requires at least {min_history} train_bars for its indicator warmup; "
+            f"received {train_bars}."
+        )
 
     price_provider = CachedParquetProvider(
         upstream=YahooFinanceProvider(),
@@ -1125,13 +1318,16 @@ def run_directional_pipeline(
         ),
         config=DirectionalPipelineConfig.from_symbols(symbols=symbols, min_history=min_history),
         name=pipeline_name,
+        multi_timeframe=_directional_multi_timeframe_config(timeframe),
+        timeframe_metadata=timeframe.to_metadata(),
     )
 
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=train_bars,
         test_bars=test_bars,
         step_bars=step_bars,
         bars_per_year=bars_per_year,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -1174,6 +1370,7 @@ def run_rule_based_strategy_pipeline(
     start: str = "2018-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str | None = None,
     price_cache_dir: str = "data/cache",
     artifact_root: str = "artifacts/experiments",
@@ -1188,6 +1385,10 @@ def run_rule_based_strategy_pipeline(
 ) -> dict[str, Any]:
     if not symbols:
         raise ValueError("User-created strategies require at least one symbol.")
+    timeframe = _timeframe_for_run(trading_mode or str(spec.get("timeframe") or ""), interval)
+    interval = timeframe.execution_interval
+    if trading_mode is not None and bars_per_year == 252:
+        bars_per_year = timeframe.bars_per_year
 
     strategy_factory, min_history = build_rule_based_strategy_factory(spec)
     price_provider = CachedParquetProvider(
@@ -1223,13 +1424,16 @@ def run_rule_based_strategy_pipeline(
         ),
         config=DirectionalPipelineConfig.from_symbols(symbols=symbols, min_history=min_history),
         name=pipeline_name,
+        multi_timeframe=_directional_multi_timeframe_config(timeframe),
+        timeframe_metadata=timeframe.to_metadata(),
     )
 
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=train_bars,
         test_bars=test_bars,
         step_bars=step_bars,
         bars_per_year=bars_per_year,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -1261,6 +1465,7 @@ def run_etf_trend_pipeline(
     start: str = "2010-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str = "etf_trend_momentum",
     price_cache_dir: str = "data/cache",
     artifact_root: str = "artifacts/experiments",
@@ -1269,6 +1474,8 @@ def run_etf_trend_pipeline(
     pbo_partitions: int = 8,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
     symbols = list(dict.fromkeys(symbols or DEFAULT_ETF_UNIVERSE))
     price_provider = CachedParquetProvider(
         upstream=YahooFinanceProvider(),
@@ -1281,15 +1488,22 @@ def run_etf_trend_pipeline(
         interval=interval,
     )
 
+    etf_config = ETFMomentumConfig.from_symbols(
+        symbols,
+        lookbacks=(6, 24, 48, 120) if timeframe.mode == TradingMode.SHORT_TERM else (21, 63, 126, 252),
+        trend_window=120 if timeframe.mode == TradingMode.SHORT_TERM else 200,
+        volatility_window=24 if timeframe.mode == TradingMode.SHORT_TERM else 20,
+        rebalance_bars=4 if timeframe.mode == TradingMode.SHORT_TERM else 21,
+    )
     pipeline = ETFTrendMomentumPipeline(
-        ETFMomentumConfig.from_symbols(symbols),
+        etf_config,
         name=experiment_name,
     )
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=756,
         test_bars=63,
         step_bars=63,
-        bars_per_year=252,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -1316,7 +1530,7 @@ def run_etf_trend_pipeline(
         broker=broker,
         experiment_name=experiment_name,
         artifact_root=artifact_root,
-        trial_strategies=_build_etf_trial_grid(symbols, experiment_name),
+        trial_strategies=_build_etf_trial_grid(symbols, experiment_name, timeframe),
         validation_config=ValidationConfig(
             purge_bars=purge_bars,
             embargo_bars=embargo_bars,
@@ -1331,6 +1545,7 @@ def run_event_driven_pipeline(
     start: str = "2018-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str = "edgar_event_drift",
     price_cache_dir: str = "data/cache",
     event_cache_dir: str = "data/event_cache",
@@ -1345,6 +1560,8 @@ def run_event_driven_pipeline(
     pbo_partitions: int = 8,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
     symbols = list(dict.fromkeys(symbols or DEFAULT_EVENT_SYMBOLS))
     price_provider = CachedParquetProvider(
         upstream=YahooFinanceProvider(),
@@ -1381,11 +1598,11 @@ def run_event_driven_pipeline(
         config=EventDrivenConfig.from_symbols(symbols),
         name=experiment_name,
     )
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=504,
         test_bars=63,
         step_bars=63,
-        bars_per_year=252,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -1427,6 +1644,7 @@ def run_pead_sentiment_pipeline(
     start: str = "2018-01-01",
     end: str = "2026-04-15",
     interval: str = "1d",
+    trading_mode: str | None = None,
     experiment_name: str = "pead_sentiment",
     price_cache_dir: str = "data/cache",
     event_cache_dir: str = "data/event_cache",
@@ -1468,6 +1686,8 @@ def run_pead_sentiment_pipeline(
     pbo_partitions: int = 8,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
     symbols = list(dict.fromkeys(symbols or DEFAULT_EVENT_SYMBOLS))
     price_provider = CachedParquetProvider(
         upstream=YahooFinanceProvider(),
@@ -1540,11 +1760,11 @@ def run_pead_sentiment_pipeline(
         ),
         name=experiment_name,
     )
-    walk_forward = WalkForwardConfig(
+    walk_forward = _with_timeframe_config(
         train_bars=504,
         test_bars=63,
         step_bars=63,
-        bars_per_year=252,
+        timeframe=timeframe,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
     )
@@ -1586,6 +1806,103 @@ def run_pead_sentiment_pipeline(
     )
 
 
+def run_committee_signal_follower_pipeline(
+    symbols: list[str],
+    decision_store: DecisionHistoryStore,
+    start: str = "2018-01-01",
+    end: str = "2026-04-15",
+    interval: str = "1d",
+    trading_mode: str | None = None,
+    experiment_name: str = "committee_signal_follower",
+    price_cache_dir: str = "data/cache",
+    artifact_root: str = "artifacts/experiments",
+    position_sizing: str = "confidence_weighted",
+    max_position_pct: float = 0.25,
+    confidence_threshold: int = 30,
+    scale_in_confidence_delta: int = 10,
+    scale_out_on_opposite: bool = True,
+    flat_on_avoid: bool = True,
+    decision_horizons: list[str] | tuple[str, ...] | None = None,
+    train_bars: int = 1,
+    test_bars: int | None = None,
+    step_bars: int | None = None,
+    purge_bars: int = 5,
+    embargo_bars: int = 0,
+    pbo_partitions: int = 8,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if not symbols:
+        raise ValueError("Committee signal follower requires at least one symbol.")
+    timeframe = _timeframe_for_run(trading_mode, interval)
+    interval = timeframe.execution_interval
+
+    symbols = list(dict.fromkeys(str(s).upper() for s in symbols))
+    price_provider = CachedParquetProvider(
+        upstream=YahooFinanceProvider(),
+        cache_dir=price_cache_dir,
+    )
+    prices = price_provider.get_close_prices(
+        symbols=symbols,
+        start=start,
+        end=end,
+        interval=interval,
+    )
+
+    pipeline = CommitteeSignalFollowerPipeline(
+        symbols=symbols,
+        decision_store=decision_store,
+        position_sizing=position_sizing,
+        max_position_pct=max_position_pct,
+        confidence_threshold=confidence_threshold,
+        scale_in_confidence_delta=scale_in_confidence_delta,
+        scale_out_on_opposite=scale_out_on_opposite,
+        flat_on_avoid=flat_on_avoid,
+        decision_horizons=decision_horizons or timeframe.decision_horizons,
+        name=experiment_name,
+    )
+    n_bars = len(prices)
+    test_bars = test_bars if test_bars is not None else max(20, n_bars - train_bars - purge_bars)
+    step_bars = step_bars if step_bars is not None else test_bars
+    walk_forward = _with_timeframe_config(
+        train_bars=train_bars,
+        test_bars=test_bars,
+        step_bars=step_bars,
+        timeframe=timeframe,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
+    )
+    cost_model = CostModel(
+        commission_bps=0.5,
+        spread_bps=1.0,
+        slippage_bps=0.75,
+        market_impact_bps=0.5,
+        borrow_bps_annual=25.0,
+        delay_bars=1,
+    )
+    broker = _build_broker(
+        max_gross_leverage=1.25,
+        max_net_leverage=1.0,
+        max_turnover=None,
+        cost_model=cost_model,
+    )
+
+    return _run_pipeline_with_validation(
+        pipeline=pipeline,
+        prices=prices,
+        config=walk_forward,
+        cost_model=cost_model,
+        broker=broker,
+        experiment_name=experiment_name,
+        artifact_root=artifact_root,
+        validation_config=ValidationConfig(
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+            pbo_partitions=pbo_partitions,
+        ),
+        progress_callback=progress_callback,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the quant walk-forward research pipeline.")
     parser.add_argument(
@@ -1603,8 +1920,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", default="2018-01-01", help="Backtest start date (YYYY-MM-DD).")
     parser.add_argument("--end", default="2026-04-15", help="Backtest end date (YYYY-MM-DD).")
     parser.add_argument("--interval", default="1d", help="Price bar interval.")
+    parser.add_argument("--trading-mode", choices=["daily", "short_term"], help="Daily uses 1d bars; short_term uses hourly execution with 4h signal context.")
     parser.add_argument("--experiment-name", help="Experiment label. Defaults to the selected pipeline name.")
-    parser.add_argument("--train-bars", type=int, default=252, help="Training bars per walk-forward fold.")
+    parser.add_argument("--train-bars", type=int, default=300, help="Training bars per walk-forward fold.")
     parser.add_argument("--test-bars", type=int, default=63, help="Test bars per walk-forward fold.")
     parser.add_argument("--step-bars", type=int, default=63, help="Walk-forward step size.")
     parser.add_argument("--bars-per-year", type=int, default=252, help="Bars per year for annualization.")
@@ -1697,6 +2015,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regime-volatility-window", type=int, default=30, help="Volatility window for adaptive_regime.")
     parser.add_argument("--regime-volatility-quantile", type=float, default=0.70, help="Volatility quantile used by adaptive_regime.")
     parser.add_argument("--strategy-cost-bps", type=float, default=2.0, help="Internal strategy turnover cost in bps.")
+    parser.add_argument("--max-position-pct", type=float, default=0.25, help="Maximum position size as fraction of equity for committee_signal_follower.")
+    parser.add_argument("--confidence-threshold", type=int, default=30, help="Minimum confidence score (0-100) to act on a committee signal.")
+    parser.add_argument("--scale-in-confidence-delta", type=int, default=10, help="Confidence increase needed to scale into a repeated signal.")
+    parser.add_argument("--scale-out-on-opposite", action=argparse.BooleanOptionalAction, default=True, help="Flatten when an opposite signal arrives.")
+    parser.add_argument("--flat-on-avoid", action=argparse.BooleanOptionalAction, default=True, help="Flatten position when AVOID signal is received.")
     return parser
 
 
@@ -1728,6 +2051,7 @@ def main() -> None:
             start=args.start,
             end=args.end,
             interval=args.interval,
+            trading_mode=args.trading_mode,
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             sentiment_cache_dir=args.sentiment_cache_dir,
@@ -1761,6 +2085,7 @@ def main() -> None:
             start=args.start,
             end=args.end,
             interval=args.interval,
+            trading_mode=args.trading_mode,
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             artifact_root=args.artifact_root,
@@ -1782,6 +2107,7 @@ def main() -> None:
             start=args.start,
             end=args.end,
             interval=args.interval,
+            trading_mode=args.trading_mode,
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             artifact_root=args.artifact_root,
@@ -1795,6 +2121,7 @@ def main() -> None:
             start=args.start,
             end=args.end,
             interval=args.interval,
+            trading_mode=args.trading_mode,
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             event_cache_dir=args.event_cache_dir,
@@ -1841,6 +2168,7 @@ def main() -> None:
             start=args.start,
             end=args.end,
             interval=args.interval,
+            trading_mode=args.trading_mode,
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             event_cache_dir=args.event_cache_dir,
@@ -1854,6 +2182,29 @@ def main() -> None:
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,
         )
+    elif args.pipeline == "committee_signal_follower":
+        run_output = run_committee_signal_follower_pipeline(
+            symbols=args.symbols,
+            decision_store=DecisionHistoryStore(),
+            start=args.start,
+            end=args.end,
+            interval=args.interval,
+            trading_mode=args.trading_mode,
+            experiment_name=experiment_name,
+            price_cache_dir=args.price_cache_dir,
+            artifact_root=args.artifact_root,
+            max_position_pct=args.max_position_pct,
+            confidence_threshold=args.confidence_threshold,
+            scale_in_confidence_delta=args.scale_in_confidence_delta,
+            scale_out_on_opposite=args.scale_out_on_opposite,
+            flat_on_avoid=args.flat_on_avoid,
+            train_bars=args.train_bars,
+            test_bars=args.test_bars,
+            step_bars=args.step_bars,
+            purge_bars=args.validation_purge_bars,
+            embargo_bars=args.validation_embargo_bars,
+            pbo_partitions=args.validation_pbo_partitions,
+        )
     else:
         if not args.symbols:
             parser.error("--symbols is required for directional pipelines.")
@@ -1863,6 +2214,7 @@ def main() -> None:
             start=args.start,
             end=args.end,
             interval=args.interval,
+            trading_mode=args.trading_mode,
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             artifact_root=args.artifact_root,

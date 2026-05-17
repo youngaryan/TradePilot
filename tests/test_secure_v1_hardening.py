@@ -169,6 +169,7 @@ class SecureV1HardeningTests(unittest.TestCase):
             BacktestRunRequest(start="2024-02-01", end="2024-01-01")
         with self.assertRaises(ValidationError):
             BacktestRunRequest(interval="5m")
+        self.assertEqual(BacktestRunRequest(interval="4h", trading_mode="short_term").interval, "4h")
         with self.assertRaises(ValidationError):
             SentimentAccumulationRequest(providers=["unknown"])
         with self.assertRaises(ValidationError):

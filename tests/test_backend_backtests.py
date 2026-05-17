@@ -117,6 +117,75 @@ class BackendBacktestTests(unittest.TestCase):
         self.assertEqual(metadata.get_job(kind="backtest", job_id=job_id)["status"], "completed")
         self.assertEqual(metadata.list_experiment_runs(kind="backtest")[0]["summary"]["sharpe"], 1.2)
 
+    def test_backtest_service_compares_daily_and_short_term_modes(self) -> None:
+        from pairs_trading.backend.config import BackendSettings
+        from pairs_trading.backend.schemas import BacktestRunRequest
+        from pairs_trading.backend.services import BacktestService
+
+        workspace = fresh_test_dir("artifacts/test_backend_backtest_compare_modes")
+        artifact_dir = workspace / "experiments" / "fake"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_directional(**kwargs):
+            mode = str(kwargs["trading_mode"])
+            interval = str(kwargs["interval"])
+            fake_result = SimpleNamespace(
+                artifact_dir=artifact_dir / mode,
+                fold_metrics=pd.DataFrame({"fold": [1], "sharpe": [1.0]}),
+                equity_curve=pd.DataFrame({"net_return": [0.01, 0.02]}, index=pd.date_range("2024-01-01", periods=2)),
+                ledger={},
+            )
+            fake_result.artifact_dir.mkdir(parents=True, exist_ok=True)
+            return {
+                "summary": {
+                    "experiment_id": f"compare_{mode}",
+                    "strategy": f"compare_{mode}",
+                    "trading_mode": mode,
+                    "execution_interval": interval,
+                    "signal_intervals": ["1d"] if mode == "daily" else ["1h", "4h"],
+                    "total_return": 0.10 if mode == "daily" else 0.15,
+                    "annualized_return": 0.12 if mode == "daily" else 0.18,
+                    "sharpe": 1.1 if mode == "daily" else 1.4,
+                    "max_drawdown": -0.05,
+                    "avg_turnover": 0.2 if mode == "daily" else 2.0,
+                    "folds": 4,
+                },
+                "validation": {"dsr": 0.70, "pbo": 0.20},
+                "visuals": {},
+                "result": fake_result,
+            }
+
+        settings = BackendSettings(
+            paper_state_dir=workspace / "state",
+            paper_artifact_root=workspace / "paper_runs",
+            backtest_artifact_root=workspace / "backtest_experiments",
+            backtest_job_state_dir=workspace / "backtest_jobs",
+            metadata_db_path=workspace / "metadata.sqlite3",
+            price_cache_dir=workspace / "cache",
+            default_paper_config=workspace / "missing.json",
+        )
+        with patch("pairs_trading.backend.services.run_directional_pipeline", side_effect=fake_directional) as run_directional:
+            result = BacktestService(settings).run_backtest(
+                BacktestRunRequest(
+                    pipeline="ema_cross",
+                    symbols=["SPY"],
+                    start="2024-01-01",
+                    end="2024-06-01",
+                    compare_modes=True,
+                    parameters={"ema_fast_window": 8, "ema_slow_window": 24},
+                ),
+                organization_id="org_demo",
+                user_id="user_demo",
+            )
+
+        self.assertEqual(run_directional.call_count, 2)
+        intervals = [call.kwargs["interval"] for call in run_directional.call_args_list]
+        modes = [call.kwargs["trading_mode"] for call in run_directional.call_args_list]
+        self.assertEqual(modes, ["daily", "short_term"])
+        self.assertEqual(intervals, ["1d", "1h"])
+        self.assertEqual(result["summary"]["best_mode_by_sharpe"], "short_term")
+        self.assertAlmostEqual(result["comparison"]["metric_deltas"]["short_minus_daily_sharpe"], 0.3)
+
     def test_paper_run_job_routes_submit_and_complete(self) -> None:
         from pairs_trading.backend.app import create_app
         from pairs_trading.backend.config import BackendSettings

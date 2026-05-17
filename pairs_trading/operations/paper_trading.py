@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from ..core.portfolio import PortfolioManager
+from ..core.timeframes import TradingMode, resolve_timeframe_spec
 from ..data.market import CachedParquetProvider, MarketDataProvider, YahooFinanceProvider
 from ..engines.backtesting import json_ready
 from ..pipelines import (
@@ -21,6 +22,7 @@ from ..pipelines import (
     EventDrivenPipeline,
     GraphStatArbConfig,
     GraphStatArbPipeline,
+    MultiTimeframeSignalConfig,
     PEADSentimentConfig,
     PEADSentimentPipeline,
     SectorStatArbPipeline,
@@ -94,8 +96,17 @@ class PaperStrategySpec:
     sec_filing_forms: tuple[str, ...] = field(default_factory=lambda: ("8-K", "10-Q", "10-K"))
     edgar_user_agent: str | None = None
     interval: str = "1d"
+    trading_mode: str | None = None
     lookback_bars: int | None = None
     params: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def timeframe(self):
+        return resolve_timeframe_spec(trading_mode=self.trading_mode, interval=self.interval)
+
+    @property
+    def effective_interval(self) -> str:
+        return self.timeframe.execution_interval
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "PaperStrategySpec":
@@ -128,6 +139,7 @@ class PaperStrategySpec:
             sec_filing_forms=_coerce_str_tuple(payload.get("sec_filing_forms")) or ("8-K", "10-Q", "10-K"),
             edgar_user_agent=payload.get("edgar_user_agent"),
             interval=str(payload.get("interval", "1d")),
+            trading_mode=payload.get("trading_mode"),
             lookback_bars=None if payload.get("lookback_bars") is None else int(payload["lookback_bars"]),
             params=dict(payload.get("params", {})),
         )
@@ -476,7 +488,7 @@ class PaperTradingService:
             strategy_cost_bps=float(spec.params.get("strategy_cost_bps", 2.0)),
         )
 
-        prices = self._price_history(list(spec.symbols), asof=asof, lookback_bars=max(self._default_lookback(spec), min_history + 10), interval=spec.interval)
+        prices = self._price_history(list(spec.symbols), asof=asof, lookback_bars=max(self._default_lookback(spec), min_history + 10), interval=spec.effective_interval)
         pipeline = DirectionalStrategyPipeline(
             strategy_factory=strategy_factory,
             portfolio_manager=PortfolioManager(
@@ -487,6 +499,13 @@ class PaperTradingService:
             ),
             config=DirectionalPipelineConfig.from_symbols(symbols=list(spec.symbols), min_history=min_history),
             name=spec.name,
+            multi_timeframe=MultiTimeframeSignalConfig(
+                execution_interval=spec.timeframe.execution_interval,
+                confirmation_interval="4h",
+                fast_window=6,
+                slow_window=24,
+            ) if spec.timeframe.mode == TradingMode.SHORT_TERM else None,
+            timeframe_metadata=spec.timeframe.to_metadata(),
         )
         output = pipeline.run_fold(train_data=prices.iloc[:-1], test_data=prices.iloc[-1:])
         target_weights = self._extract_asset_weights(output)
@@ -498,12 +517,12 @@ class PaperTradingService:
             target_weights=target_weights,
             instrument_prices=instrument_prices,
             diagnostics=output.diagnostics,
-            metadata={"pipeline": spec.pipeline},
+            metadata={"pipeline": spec.pipeline, "trading_mode": str(spec.timeframe.mode), "execution_interval": spec.timeframe.execution_interval},
         )
 
     def _build_etf_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
         symbols = list(spec.symbols or ("SPY", "QQQ", "IWM", "DIA", "TLT", "IEF", "GLD", "SLV", "XLE", "XLF", "XLK", "XLV"))
-        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.effective_interval)
         pipeline = ETFTrendMomentumPipeline(
             ETFMomentumConfig.from_symbols(
                 symbols,
@@ -536,7 +555,7 @@ class PaperTradingService:
         if not symbols:
             raise ValueError(f"{spec.name} requires 'symbols' in the paper deployment config.")
 
-        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.effective_interval)
         events = cli_module.load_events(
             tickers=symbols,
             start=self._history_start(asof, self._default_lookback(spec)),
@@ -587,7 +606,7 @@ class PaperTradingService:
         if not symbols:
             raise ValueError(f"{spec.name} requires 'symbols' in the paper deployment config.")
 
-        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+        prices = self._price_history(symbols, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.effective_interval)
         history_start = self._history_start(asof, self._default_lookback(spec))
         history_end = self._history_end(asof)
         events = cli_module.load_events(
@@ -673,7 +692,7 @@ class PaperTradingService:
         cli_module = self._cli_helpers()
         sector_map = cli_module.load_sector_map(spec.sector_map_path)
         tickers = list(sector_map.keys())
-        prices = self._price_history(tickers, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+        prices = self._price_history(tickers, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.effective_interval)
 
         daily_sentiment = cli_module.load_daily_sentiment(
             tickers=tickers,
@@ -765,7 +784,7 @@ class PaperTradingService:
         cli_module = self._cli_helpers()
         sector_map = cli_module.load_sector_map(spec.sector_map_path)
         tickers = list(sector_map.keys())
-        prices = self._price_history(tickers, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.interval)
+        prices = self._price_history(tickers, asof=asof, lookback_bars=self._default_lookback(spec), interval=spec.effective_interval)
 
         pipeline = GraphStatArbPipeline(
             sector_map=sector_map,

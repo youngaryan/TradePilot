@@ -17,6 +17,8 @@ const defaultRequest: BacktestRunRequest = {
   start: "2018-01-01",
   end: "2026-04-15",
   interval: "1d",
+  trading_mode: "daily",
+  compare_modes: false,
   experiment_name: "cockpit_backtest",
   sector_map_path: null,
   event_file: null,
@@ -24,7 +26,7 @@ const defaultRequest: BacktestRunRequest = {
   include_sec_filings: false,
   sec_filing_forms: ["8-K", "10-Q", "10-K"],
   edgar_user_agent: null,
-  train_bars: 252,
+  train_bars: 300,
   test_bars: 63,
   step_bars: 63,
   bars_per_year: 252,
@@ -40,6 +42,7 @@ const defaultRequest: BacktestRunRequest = {
 const SECTOR_MAP_PIPELINES = new Set(["stat_arb", "graph_stat_arb"]);
 const EVENT_PIPELINES = new Set(["edgar_event", "pead_sentiment"]);
 const SENTIMENT_PIPELINES = new Set(["stat_arb", "pead_sentiment"]);
+const COMMITTEE_SIGNAL_PIPELINE = "committee_signal_follower";
 const DEFAULT_SENTIMENT_PARAMETERS = {
   news_provider_names: ["rss", "local_web", "local"],
   news_files: ["examples/news_headlines.sample.csv"],
@@ -85,6 +88,7 @@ function optionalNumber(value: unknown, digits = 2) {
 function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
   const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(template.pipeline);
   const isEventPipeline = EVENT_PIPELINES.has(template.pipeline);
+  const isCommitteeSignalPipeline = template.pipeline === COMMITTEE_SIGNAL_PIPELINE;
   const parameters = SENTIMENT_PIPELINES.has(template.pipeline)
     ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...template.parameters }
     : template.parameters;
@@ -94,7 +98,16 @@ function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
     symbols: isSectorMapPipeline ? [] : template.symbols,
     start: template.start,
     end: template.end,
+    interval: template.trading_mode === "short_term" ? "1h" : "1d",
+    trading_mode: template.trading_mode ?? defaultRequest.trading_mode,
+    compare_modes: template.compare_modes ?? false,
     experiment_name: template.id,
+    train_bars: isCommitteeSignalPipeline ? 1 : template.train_bars ?? defaultRequest.train_bars,
+    test_bars: template.test_bars ?? defaultRequest.test_bars,
+    step_bars: template.step_bars ?? defaultRequest.step_bars,
+    purge_bars: isCommitteeSignalPipeline ? 0 : template.purge_bars ?? defaultRequest.purge_bars,
+    embargo_bars: template.embargo_bars ?? defaultRequest.embargo_bars,
+    pbo_partitions: template.pbo_partitions ?? defaultRequest.pbo_partitions,
     sector_map_path: isSectorMapPipeline ? template.sector_map_path ?? "examples/sector_map.sample.json" : null,
     event_file: isEventPipeline ? template.event_file ?? "examples/events.sample.csv" : null,
     use_sec_companyfacts: false,
@@ -137,6 +150,7 @@ export function BacktestLab({
   const usesSectorMap = SECTOR_MAP_PIPELINES.has(request.pipeline);
   const usesEventInputs = EVENT_PIPELINES.has(request.pipeline);
   const usesSentimentInputs = SENTIMENT_PIPELINES.has(request.pipeline);
+  const usesCommitteeSignals = request.pipeline === COMMITTEE_SIGNAL_PIPELINE;
   const parsedParameters = useMemo(() => {
     try {
       return parseJsonObject(parametersText, "Backtest parameters");
@@ -158,6 +172,7 @@ export function BacktestLab({
     const example = (item?.paper_config_example ?? {}) as PipelineExample;
     const isSectorMapPipeline = SECTOR_MAP_PIPELINES.has(pipeline);
     const isEventPipeline = EVENT_PIPELINES.has(pipeline);
+    const isCommitteeSignalPipeline = pipeline === COMMITTEE_SIGNAL_PIPELINE;
     const rawParams = asParameterObject(example.params) ?? {};
     const params = SENTIMENT_PIPELINES.has(pipeline) ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...rawParams } : rawParams;
     const next: BacktestRunRequest = {
@@ -170,6 +185,8 @@ export function BacktestLab({
       include_sec_filings: false,
       edgar_user_agent: isEventPipeline ? request.edgar_user_agent : null,
       experiment_name: asOptionalString(example.name) ?? `${pipeline}_ui`,
+      train_bars: isCommitteeSignalPipeline ? 1 : request.train_bars,
+      purge_bars: isCommitteeSignalPipeline ? 0 : request.purge_bars,
       parameters: params
     };
     setRequest(next);
@@ -312,6 +329,7 @@ export function BacktestLab({
       }
     : visualMetrics;
   const tradeRows = visualization?.trade_summary ?? result?.trade_summary ?? [];
+  const comparisonRows = result?.comparison?.leaderboard ?? [];
 
   return (
     <div className="page-stack">
@@ -340,9 +358,9 @@ export function BacktestLab({
           </div>
 
           <div className="form-grid">
-            <label>
+            <label htmlFor="bt-pipeline">
               Pipeline
-              <select value={request.pipeline} onChange={(event) => applyPipeline(event.target.value)}>
+              <select id="bt-pipeline" value={request.pipeline} onChange={(event) => applyPipeline(event.target.value)}>
                 {catalog.map((item) => (
                   <option key={item.id} value={item.pipeline}>
                     {item.name}
@@ -350,9 +368,9 @@ export function BacktestLab({
                 ))}
               </select>
             </label>
-            <label>
+            <label htmlFor="bt-symbols">
               Symbols
-              <input
+              <input id="bt-symbols"
                 // value={usesSectorMap ? "" : request.symbols.join(" ")}
                 value={usesSectorMap ? "" : symbolsText}
                 disabled={usesSectorMap}
@@ -363,25 +381,56 @@ export function BacktestLab({
               />
               {usesSectorMap ? <small>This pipeline trades every ticker in the sector map, not the Symbols box.</small> : null}
             </label>
-            <label>
+            <label htmlFor="bt-start">
               Start
-              <input value={request.start} onChange={(event) => setRequest({ ...request, start: event.target.value })} />
+              <input id="bt-start" value={request.start} onChange={(event) => setRequest({ ...request, start: event.target.value })} />
             </label>
-            <label>
+            <label htmlFor="bt-end">
               End
-              <input value={request.end} onChange={(event) => setRequest({ ...request, end: event.target.value })} />
+              <input id="bt-end" value={request.end} onChange={(event) => setRequest({ ...request, end: event.target.value })} />
+            </label>
+            <label htmlFor="bt-trading-mode">
+              Trading mode
+              <select
+                id="bt-trading-mode"
+                value={request.trading_mode ?? "daily"}
+                onChange={(event) => {
+                  const tradingMode = event.target.value as "daily" | "short_term";
+                  setRequest({
+                    ...request,
+                    trading_mode: tradingMode,
+                    interval: tradingMode === "short_term" ? "1h" : "1d",
+                    bars_per_year: tradingMode === "short_term" ? 1638 : 252,
+                    train_bars: tradingMode === "short_term" ? 390 : request.train_bars,
+                    test_bars: tradingMode === "short_term" ? 78 : request.test_bars,
+                    step_bars: tradingMode === "short_term" ? 78 : request.step_bars
+                  });
+                }}
+              >
+                <option value="daily">Daily</option>
+                <option value="short_term">Short-term 1h / 4h</option>
+              </select>
+            </label>
+            <label className="checkbox-line" htmlFor="bt-compare-modes">
+              <input
+                id="bt-compare-modes"
+                type="checkbox"
+                checked={Boolean(request.compare_modes)}
+                onChange={(event) => setRequest({ ...request, compare_modes: event.target.checked })}
+              />
+              Compare daily and short-term
             </label>
             {usesSectorMap ? (
-              <label>
+              <label htmlFor="bt-sector-map">
                 Sector map
-                <input value={request.sector_map_path ?? ""} onChange={(event) => setRequest({ ...request, sector_map_path: event.target.value || null })} placeholder="examples/sector_map.sample.json" />
+                <input id="bt-sector-map" value={request.sector_map_path ?? ""} onChange={(event) => setRequest({ ...request, sector_map_path: event.target.value || null })} placeholder="examples/sector_map.sample.json" />
                 <small>Required so graph/stat-arb sectors are explicit and auditable.</small>
               </label>
             ) : null}
             {usesEventInputs ? (
-              <label>
+              <label htmlFor="bt-event-file">
                 Event file
-                <input value={request.event_file ?? ""} onChange={(event) => setRequest({ ...request, event_file: event.target.value || null })} placeholder="examples/events.sample.csv" />
+                <input id="bt-event-file" value={request.event_file ?? ""} onChange={(event) => setRequest({ ...request, event_file: event.target.value || null })} placeholder="examples/events.sample.csv" />
                 <small>Use the sample file for local PEAD testing, or enable official SEC sources below.</small>
               </label>
             ) : null}
@@ -389,8 +438,9 @@ export function BacktestLab({
 
           {usesEventInputs ? (
           <div className="sentiment-panel official-events-panel">
-            <label className="checkbox-line">
+            <label className="checkbox-line" htmlFor="bt-include-official-sec-filing-events">
               <input
+                id="bt-include-official-sec-filing-events"
                 type="checkbox"
                 checked={Boolean(request.include_sec_filings)}
                 onChange={(event) => setRequest({
@@ -405,8 +455,9 @@ export function BacktestLab({
               For event-driven research this adds official SEC EDGAR company events, such as earnings 8-K filings,
               10-Q quarterly reports, and 10-K annual reports.
             </p>
-            <label className="checkbox-line">
+            <label className="checkbox-line" htmlFor="bt-include-sec-company-facts-scores">
               <input
+                id="bt-include-sec-company-facts-scores"
                 type="checkbox"
                 checked={Boolean(request.use_sec_companyfacts)}
                 onChange={(event) => setRequest({ ...request, use_sec_companyfacts: event.target.checked })}
@@ -416,18 +467,18 @@ export function BacktestLab({
             {request.include_sec_filings || request.use_sec_companyfacts ? (
               <div className="form-grid">
                 {request.include_sec_filings ? (
-                  <label>
+                  <label htmlFor="bt-sec-filing-forms">
                     SEC filing forms
-                    <input
+                    <input id="bt-sec-filing-forms"
                       value={(request.sec_filing_forms ?? ["8-K", "10-Q", "10-K"]).join(" ")}
                       onChange={(event) => setRequest({ ...request, sec_filing_forms: splitList(event.target.value).map((form) => form.toUpperCase()) })}
                       placeholder="8-K 10-Q 10-K"
                     />
                   </label>
                 ) : null}
-                <label>
+                <label htmlFor="bt-sec-user-agent">
                   SEC user agent
-                  <input
+                  <input id="bt-sec-user-agent"
                     value={request.edgar_user_agent ?? ""}
                     onChange={(event) => setRequest({ ...request, edgar_user_agent: event.target.value || null })}
                     placeholder="Your Name your@email.com"
@@ -447,91 +498,91 @@ export function BacktestLab({
                 For weak hardware, keep FinBERT off and use the lightweight fallback scorer.
               </p>
               <div className="form-grid">
-                <label>
+                <label htmlFor="bt-daily-sentiment-file">
                   Daily sentiment file
-                  <input
+                  <input id="bt-daily-sentiment-file"
                     value={stringParameter("daily_sentiment_file")}
                     onChange={(event) => updateParameter("daily_sentiment_file", event.target.value || null)}
                     placeholder="examples/daily_sentiment.sample.csv"
                   />
                   <small>Optional. Leave blank to fetch/score headlines from the selected providers.</small>
                 </label>
-                <label>
+                <label htmlFor="bt-news-providers">
                   News providers
-                  <input
+                  <input id="bt-news-providers"
                     value={Array.isArray(parsedParameters.news_provider_names) ? parsedParameters.news_provider_names.join(" ") : ""}
                     onChange={(event) => updateParameter("news_provider_names", splitList(event.target.value))}
                     placeholder="rss local_web local"
                   />
                   <small>Use rss local_web local for free no-key sources. Add GDELT web or API providers only when you need them.</small>
                 </label>
-                <label>
+                <label htmlFor="bt-rss-feeds">
                   RSS feeds
-                  <input
+                  <input id="bt-rss-feeds"
                     value={Array.isArray(parsedParameters.rss_feed_urls) ? parsedParameters.rss_feed_urls.join(" ") : ""}
                     onChange={(event) => updateParameter("rss_feed_urls", splitList(event.target.value))}
                     placeholder="optional; Yahoo ticker RSS is used by default"
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-local-web-search-feeds">
                   Local web-search feeds
-                  <input
+                  <input id="bt-local-web-search-feeds"
                     value={Array.isArray(parsedParameters.local_web_search_urls) ? parsedParameters.local_web_search_urls.join(" ") : ""}
                     onChange={(event) => updateParameter("local_web_search_urls", splitList(event.target.value))}
                     placeholder="optional RSS/Atom feeds or {ticker} templates"
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-local-web-cache-refresh-minutes">
                   Local web cache refresh minutes
-                  <input
+                  <input id="bt-local-web-cache-refresh-minutes"
                     type="number"
                     value={stringParameter("local_web_refresh_minutes") || "60"}
                     onChange={(event) => updateParameter("local_web_refresh_minutes", Number(event.target.value))}
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-website-domains-to-crawl">
                   Website domains to crawl
-                  <input
+                  <input id="bt-website-domains-to-crawl"
                     value={Array.isArray(parsedParameters.web_research_domains) ? parsedParameters.web_research_domains.join(" ") : ""}
                     onChange={(event) => updateParameter("web_research_domains", splitList(event.target.value))}
                     placeholder="reuters.com cnbc.com marketwatch.com"
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-website-pages-per-source">
                   Website pages per source
-                  <input
+                  <input id="bt-website-pages-per-source"
                     type="number"
                     value={stringParameter("local_web_max_pages_per_source") || "30"}
                     onChange={(event) => updateParameter("local_web_max_pages_per_source", Number(event.target.value))}
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-direct-web-urls">
                   Direct web URLs
-                  <input
+                  <input id="bt-direct-web-urls"
                     value={Array.isArray(parsedParameters.web_research_urls) ? parsedParameters.web_research_urls.join(" ") : ""}
                     onChange={(event) => updateParameter("web_research_urls", splitList(event.target.value))}
                     placeholder="optional article URLs or {ticker} templates"
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-web-articles-per-symbol">
                   Web articles per symbol
-                  <input
+                  <input id="bt-web-articles-per-symbol"
                     type="number"
                     value={stringParameter("web_research_max_articles") || "4"}
                     onChange={(event) => updateParameter("web_research_max_articles", Number(event.target.value))}
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-news-files">
                   News files
-                  <input
+                  <input id="bt-news-files"
                     value={Array.isArray(parsedParameters.news_files) ? parsedParameters.news_files.join(" ") : ""}
                     onChange={(event) => updateParameter("news_files", splitList(event.target.value))}
                     placeholder="examples/news_headlines.sample.csv"
                   />
                 </label>
-                <label>
+                <label htmlFor="bt-sentiment-window-days">
                   Sentiment window days
-                  <input
+                  <input id="bt-sentiment-window-days"
                     type="number"
                     value={stringParameter("sentiment_window_days") || "2"}
                     onChange={(event) => updateParameter("sentiment_window_days", Number(event.target.value))}
@@ -539,24 +590,27 @@ export function BacktestLab({
                   <small>How many prior calendar days of sentiment are blended into each event.</small>
                 </label>
               </div>
-              <label className="checkbox-line">
+              <label className="checkbox-line" htmlFor="bt-fetch-web-pages-and-create-lightweight-summaries">
                 <input
+                  id="bt-fetch-web-pages-and-create-lightweight-summaries"
                   type="checkbox"
                   checked={parsedParameters.web_research_fetch_article_text !== false}
                   onChange={(event) => updateParameter("web_research_fetch_article_text", event.target.checked)}
                 />
                 Fetch web pages and create lightweight summaries
               </label>
-              <label className="checkbox-line">
+              <label className="checkbox-line" htmlFor="bt-use-finbert-when-available-heavier">
                 <input
+                  id="bt-use-finbert-when-available-heavier"
                   type="checkbox"
                   checked={booleanParameter("use_finbert")}
                   onChange={(event) => updateParameter("use_finbert", event.target.checked)}
                 />
                 Use FinBERT when available (heavier)
               </label>
-              <label className="checkbox-line">
+              <label className="checkbox-line" htmlFor="bt-require-sentiment-coverage-before-pead-can-trade">
                 <input
+                  id="bt-require-sentiment-coverage-before-pead-can-trade"
                   type="checkbox"
                   checked={booleanParameter("require_sentiment")}
                   onChange={(event) => updateParameter("require_sentiment", event.target.checked)}
@@ -566,28 +620,30 @@ export function BacktestLab({
             </div>
           ) : null}
 
-          <div className="form-grid form-grid--tight">
-            <label>
-              Train bars
-              <input type="number" value={request.train_bars} onChange={(event) => setRequest({ ...request, train_bars: Number(event.target.value) })} />
-            </label>
-            <label>
-              Test bars
-              <input type="number" value={request.test_bars} onChange={(event) => setRequest({ ...request, test_bars: Number(event.target.value) })} />
-            </label>
-            <label>
-              Purge bars
-              <input type="number" value={request.purge_bars} onChange={(event) => setRequest({ ...request, purge_bars: Number(event.target.value) })} />
-            </label>
-            <label>
-              PBO partitions
-              <input type="number" value={request.pbo_partitions} onChange={(event) => setRequest({ ...request, pbo_partitions: Number(event.target.value) })} />
-            </label>
-          </div>
+          {!usesCommitteeSignals ? (
+            <div className="form-grid form-grid--tight">
+              <label htmlFor="bt-train-bars">
+                Train bars
+                <input id="bt-train-bars" type="number" value={request.train_bars} onChange={(event) => setRequest({ ...request, train_bars: Number(event.target.value) })} />
+              </label>
+              <label htmlFor="bt-test-bars">
+                Test bars
+                <input id="bt-test-bars" type="number" value={request.test_bars} onChange={(event) => setRequest({ ...request, test_bars: Number(event.target.value) })} />
+              </label>
+              <label htmlFor="bt-purge-bars">
+                Purge bars
+                <input id="bt-purge-bars" type="number" value={request.purge_bars} onChange={(event) => setRequest({ ...request, purge_bars: Number(event.target.value) })} />
+              </label>
+              <label htmlFor="bt-pbo-partitions">
+                PBO partitions
+                <input id="bt-pbo-partitions" type="number" value={request.pbo_partitions} onChange={(event) => setRequest({ ...request, pbo_partitions: Number(event.target.value) })} />
+              </label>
+            </div>
+          ) : null}
 
-          <label>
+          <label htmlFor="bt-parameters-json">
             Parameters JSON
-            <textarea rows={8} value={parametersText} onChange={(event) => setParametersText(event.target.value)} spellCheck={false} />
+            <textarea id="bt-parameters-json" rows={8} value={parametersText} onChange={(event) => setParametersText(event.target.value)} spellCheck={false} />
           </label>
 
           <div className="button-row">
@@ -757,6 +813,21 @@ export function BacktestLab({
                 <MetricCard label="Max DD" value={metricValue(summary, "max_drawdown", formatPercent)} tone={toneFromNumber(toNumber(summary.max_drawdown) * -1)} />
                 <MetricCard label="Turnover" value={metricValue(summary, "avg_turnover", formatPercent)} />
               </section>
+              {comparisonRows.length ? (
+                <DataTable
+                  rows={comparisonRows}
+                  empty="No mode comparison rows were returned."
+                  getKey={(row) => String(row.trading_mode ?? row.execution_interval ?? "mode")}
+                  columns={[
+                    { key: "mode", header: "Mode", render: (row) => <Badge label={String(row.trading_mode ?? "unknown")} tone={row.trading_mode === "short_term" ? "warn" : "info"} /> },
+                    { key: "interval", header: "Interval", render: (row) => String(row.execution_interval ?? "n/a") },
+                    { key: "sharpe", header: "Sharpe", align: "right", render: (row) => optionalNumber(row.sharpe) },
+                    { key: "return", header: "Return", align: "right", render: (row) => formatPercent(row.total_return) },
+                    { key: "drawdown", header: "Max DD", align: "right", render: (row) => formatPercent(row.max_drawdown) },
+                    { key: "verdict", header: "Verdict", render: (row) => String(row.verdict ?? "n/a") }
+                  ]}
+                />
+              ) : null}
               <div className="check-grid">
                 {result.decision.checks.map((check) => (
                   <div key={check.name} className={check.passed ? "check-card check-card--pass" : "check-card check-card--fail"}>

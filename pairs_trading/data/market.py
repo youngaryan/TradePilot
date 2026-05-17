@@ -10,6 +10,8 @@ from typing import Sequence
 import pandas as pd
 import yfinance as yf
 
+from ..core.timeframes import base_interval_for, is_derived_interval, normalize_market_interval, resample_close_prices
+
 
 @dataclass(frozen=True)
 class DataRequest:
@@ -27,12 +29,20 @@ class DataRequest:
         interval: str = "1d",
     ) -> "DataRequest":
         normalized_symbols = tuple(dict.fromkeys(symbols))
+        normalized_interval = normalize_market_interval(interval)
         return cls(
             symbols=normalized_symbols,
-            start=str(pd.Timestamp(start).strftime("%Y-%m-%d")),
-            end=str(pd.Timestamp(end).strftime("%Y-%m-%d")),
-            interval=interval,
+            start=cls._format_boundary(start, normalized_interval),
+            end=cls._format_boundary(end, normalized_interval),
+            interval=normalized_interval,
         )
+
+    @staticmethod
+    def _format_boundary(value: str | pd.Timestamp, interval: str) -> str:
+        timestamp = pd.Timestamp(value).tz_localize(None)
+        if interval in {"1h", "4h"} and any((timestamp.hour, timestamp.minute, timestamp.second, timestamp.microsecond)):
+            return timestamp.isoformat()
+        return timestamp.strftime("%Y-%m-%d")
 
     @property
     def cache_key(self) -> str:
@@ -68,11 +78,12 @@ class YahooFinanceProvider(MarketDataProvider):
         interval: str = "1d",
     ) -> pd.DataFrame:
         request = DataRequest.from_inputs(symbols=symbols, start=start, end=end, interval=interval)
+        provider_interval = base_interval_for(request.interval)
         raw = yf.download(
             list(request.symbols),
             start=request.start,
             end=request.end,
-            interval=request.interval,
+            interval=provider_interval,
             progress=False,
             auto_adjust=False,
             group_by="column",
@@ -91,6 +102,8 @@ class YahooFinanceProvider(MarketDataProvider):
         close = close.loc[:, list(request.symbols)].dropna(how="all").sort_index()
         close.index = pd.DatetimeIndex(close.index).tz_localize(None)
         close.columns = [str(column) for column in close.columns]
+        if provider_interval != request.interval:
+            close = resample_close_prices(close, request.interval)
         return close
 
 
@@ -180,6 +193,22 @@ class CachedParquetProvider(MarketDataProvider):
         compatible = self._find_compatible_cache(request)
         if compatible is not None:
             return compatible
+
+        if is_derived_interval(request.interval):
+            base_interval = base_interval_for(request.interval)
+            base_prices = self.get_close_prices(
+                symbols=request.symbols,
+                start=request.start,
+                end=request.end,
+                interval=base_interval,
+            )
+            derived = resample_close_prices(base_prices, request.interval)
+            if derived.empty:
+                raise ValueError(f"No price data remained after deriving {request.interval} bars from {base_interval}.")
+            derived.to_parquet(parquet_path)
+            with meta_path.open("w", encoding="utf-8") as handle:
+                json.dump(asdict(request), handle, indent=2)
+            return derived
 
         if self.upstream is None:
             raise FileNotFoundError(f"Missing cache entry {parquet_path} and no upstream provider is configured.")

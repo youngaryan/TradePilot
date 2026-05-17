@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
+from ..core.timeframes import TradingMode, normalize_trading_mode
 from ..platform import build_metadata_store
 from ..strategies import build_rule_based_strategy_factory
 from .config import BackendSettings
 
 
 CUSTOM_PIPELINE_PREFIX = "user_strategy:"
-SUPPORTED_TIMEFRAMES = {"1d", "daily"}
+SUPPORTED_TIMEFRAMES = {"1d", "daily", "1h", "4h", "hourly", "intraday", "short_term", "short-term"}
 SUPPORTED_RULE_KINDS = {
     "price_above_sma",
     "price_below_sma",
@@ -176,7 +177,9 @@ def _extract_timeframe(text: str) -> str | None:
     lowered = text.casefold()
     if any(token in lowered for token in ("1d", "daily", "day bars", "daily bars", "end of day")):
         return "1d"
-    if any(token in lowered for token in ("minute", "hour", "intraday", "tick", "5m", "15m", "1h")):
+    if any(token in lowered for token in ("hour", "intraday", "1h", "4h", "four-hour", "short-term", "short term")):
+        return "short_term"
+    if any(token in lowered for token in ("minute", "tick", "5m", "15m")):
         return "unsupported_intraday"
     return None
 
@@ -302,7 +305,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
     symbols = _extract_symbols(text)
     timeframe = _extract_timeframe(text)
     if timeframe == "unsupported_intraday":
-        return None, ["This builder currently supports daily close data only. Restate the strategy for daily bars or use an engine with intraday market-session data."], "rejected"
+        return None, ["The safe builder supports daily bars and short-term hourly/4-hour bars, but not minute or tick strategies."], "rejected"
 
     indicators, entry_rules, exit_rules, editable_params = _build_rule_spec(text)
     max_position = _extract_percent(text)
@@ -322,7 +325,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
     if not symbols:
         questions.append("What exact asset universe should this trade? Provide ticker symbols such as SPY QQQ TLT.")
     if not timeframe:
-        questions.append("What timeframe should be used? The current safe builder supports daily bars.")
+        questions.append("What timeframe should be used: daily or short-term hourly/4-hour bars?")
     if not entry_rules:
         questions.append("What exact entry condition should trigger a position? Supported examples include RSI thresholds, SMA/EMA crossovers, price-vs-moving-average, and MACD signal-line rules.")
     if not exit_rules:
@@ -345,7 +348,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
         "name": name,
         "summary": f"{name} on {', '.join(symbols)} using {', '.join(item['name'] for item in indicators) or 'approved technical rules'}.",
         "asset_universe": {"type": "explicit_symbols", "symbols": symbols},
-        "timeframe": "1d",
+        "timeframe": timeframe,
         "side": side,
         "required_indicators": indicators,
         "entry_rules": entry_rules,
@@ -361,7 +364,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
             "max_positions": max_positions,
         },
         "rebalancing": {
-            "frequency": "daily",
+            "frequency": "intraday" if timeframe == "short_term" else "daily",
             "execution_timing": "next_bar_close",
         },
         "costs": {
@@ -372,13 +375,13 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
             "delay_bars": 1,
         },
         "assumptions": [
-            "Signals are computed from historical daily close data only.",
+            "Signals are computed from historical daily close data." if timeframe == "1d" else "Signals use hourly execution bars with 4-hour confirmation in short-term mode.",
             "Execution uses the existing backtest engine's next-bar delayed close-to-close execution model.",
             "No arbitrary user code is generated or executed.",
         ],
         "limitations": [
             "The safe builder currently supports a constrained set of technical-indicator rule blocks.",
-            "Intraday sessions, custom external data, and discretionary text rules are not supported in this builder.",
+            "Minute bars, tick data, custom external data, and discretionary text rules are not supported in this builder.",
             "Backtest performance does not guarantee future results.",
         ],
         "editable_parameters": editable_params,
@@ -402,7 +405,14 @@ def validate_strategy_spec(spec: dict[str, Any]) -> SpecValidation:
     normalized = parsed.model_dump(mode="json")
     timeframe = str(normalized.get("timeframe") or "").casefold()
     if timeframe not in SUPPORTED_TIMEFRAMES:
-        errors.append("Only daily timeframe specs are currently supported.")
+        errors.append("Only daily and short-term hourly/4-hour timeframe specs are currently supported.")
+    else:
+        try:
+            mode = normalize_trading_mode(timeframe)
+        except ValueError:
+            errors.append("Only daily and short-term hourly/4-hour timeframe specs are currently supported.")
+        else:
+            normalized["timeframe"] = "short_term" if mode == TradingMode.SHORT_TERM else "1d"
     symbols = normalized.get("asset_universe", {}).get("symbols")
     if not isinstance(symbols, list) or not symbols:
         errors.append("asset_universe.symbols must contain at least one ticker.")

@@ -43,6 +43,9 @@ class WalkForwardConfig:
     bars_per_year: int = 252
     purge_bars: int = 0
     embargo_bars: int = 0
+    trading_mode: str = "daily"
+    execution_interval: str = "1d"
+    signal_intervals: tuple[str, ...] = ("1d",)
 
 
 @dataclass
@@ -296,6 +299,9 @@ class WalkForwardBacktester:
                 "experiment_id": experiment_id,
                 "folds": len(target_fold_frames),
                 "strategy": experiment_label,
+                "trading_mode": self.config.trading_mode,
+                "execution_interval": self.config.execution_interval,
+                "signal_intervals": list(self.config.signal_intervals),
                 "cost_model": asdict(self.cost_model),
                 "walk_forward_config": asdict(self.config),
                 "psr": validation_summary["psr"],

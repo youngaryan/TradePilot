@@ -1,20 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, BrainCircuit, ChevronDown, FileText, Loader2, Play, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
+import { AlertTriangle, BarChart3, BrainCircuit, ChevronDown, FileText, History, Layers, Loader2, Play, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
 
-import { getMarketResearchJob, getMarketResearchRuntime, listMarketResearchJobs, startMarketResearchJob } from "../api/client";
-import type { MarketResearchAgentOutput, MarketResearchJob, MarketResearchReport, MarketResearchRuntimeConfig, MarketResearchSignal } from "../api/types";
+import { getChartData, getMarketResearchJob, getMarketResearchRuntime, listMarketResearchJobs, startMarketResearchJob } from "../api/client";
+import type { MarketResearchAgentOutput, MarketResearchJob, MarketResearchReport, MarketResearchRuntimeConfig, MarketResearchSignal, MultiStockReport } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel } from "../components/Cards";
-import { formatDateTime, formatNumber, statusTone } from "../utils/format";
+import { decisionTone, formatDateTime, formatNumber, statusTone } from "../utils/format";
+import { DecisionHistoryPanel } from "./DecisionHistoryPanel";
+import { ResearchCharts } from "./ResearchCharts";
+import { StockUniversePanel } from "./StockUniversePanel";
 
 const DISCLAIMER = "For research and educational purposes only. Not financial advice.";
-
-function decisionTone(decision: string) {
-  if (decision === "BUY") return "good" as const;
-  if (decision === "SELL" || decision === "AVOID") return "bad" as const;
-  if (decision === "HOLD") return "info" as const;
-  return "neutral" as const;
-}
 
 function directionTone(direction: string) {
   if (direction === "bullish") return "good" as const;
@@ -385,12 +381,77 @@ function ReportView({ report }: { report: MarketResearchReport }) {
   );
 }
 
+function isMultiStockReport(value: MarketResearchJob["result"]): value is MultiStockReport {
+  return Boolean(value && Array.isArray((value as MultiStockReport).reports));
+}
+
+function isSingleStockReport(value: MarketResearchJob["result"]): value is MarketResearchReport {
+  return Boolean(value && !isMultiStockReport(value) && Array.isArray((value as MarketResearchReport).raw_agent_outputs));
+}
+
+function MultiReportView({ report }: { report: MultiStockReport }) {
+  const reports = report.reports ?? [];
+  const averageConfidence = reports.length
+    ? reports.reduce((total, item) => total + item.confidence, 0) / reports.length
+    : null;
+  const pairMetrics = report.cross_stock_analysis?.pair_metrics && typeof report.cross_stock_analysis.pair_metrics === "object"
+    ? report.cross_stock_analysis.pair_metrics as Record<string, unknown>
+    : null;
+
+  return (
+    <div className="market-research-report multi-stock-report">
+      <Panel title="Multi-Stock Committee Summary" subtitle={report.pair ? `Pair ${report.pair.replace(",", " / ")}` : `${report.tickers.length} selected tickers`}>
+        <p className="market-research-summary">{report.summary}</p>
+        <div className="metric-grid metric-grid--small">
+          <MetricCard label="Tickers" value={String(report.tickers.length)} detail={report.tickers.slice(0, 8).join(", ")} />
+          <MetricCard label="Reports" value={String(reports.length)} detail={report.horizon} />
+          {averageConfidence !== null ? (
+            <MetricCard label="Avg Confidence" value={`${formatNumber(averageConfidence, 0)}/100`} tone={averageConfidence >= 70 ? "good" : "info"} />
+          ) : null}
+          {report.cross_stock_analysis?.divergence ? (
+            <MetricCard label="Pair Divergence" value={String(report.cross_stock_analysis.divergence)} tone={report.cross_stock_analysis.divergence === "yes" ? "warn" : "neutral"} />
+          ) : null}
+        </div>
+        {pairMetrics ? (
+          <div className="decision-metrics">
+            {Object.entries(pairMetrics).map(([key, value]) => (
+              <span key={key} className="metric-tag">
+                <strong>{key.replace(/_/g, " ")}</strong>
+                <span>{typeof value === "number" ? formatNumber(value, 4) : String(value)}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </Panel>
+
+      {reports.map((item) => (
+        <section key={`${item.ticker}-${item.created_at_utc}`} className="multi-stock-report-section">
+          <h3>{item.ticker}</h3>
+          <ReportView report={item} />
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ResearchResultView({ result }: { result: MarketResearchReport | MultiStockReport }) {
+  if (isMultiStockReport(result)) return <MultiReportView report={result} />;
+  return <ReportView report={result} />;
+}
+
 export function MarketResearchLab() {
   const [tickerText, setTickerText] = useState("AAPL");
   const [analysisDate, setAnalysisDate] = useState("");
   const [horizon, setHorizon] = useState("swing");
   const [selectedModel, setSelectedModel] = useState("");
   const [showProgressTrace, setShowProgressTrace] = useState(false);
+  const [showUniverse, setShowUniverse] = useState(false);
+  const [showDecisions, setShowDecisions] = useState(false);
+  const [pairMode, setPairMode] = useState(false);
+  const [universeTickers, setUniverseTickers] = useState<string[]>([]);
+  const [universePair, setUniversePair] = useState("");
+  const [chartData, setChartData] = useState<Record<string, unknown>>({});
+  const [showCharts, setShowCharts] = useState(false);
   const [jobs, setJobs] = useState<MarketResearchJob[]>([]);
   const [activeJob, setActiveJob] = useState<MarketResearchJob | null>(null);
   const [runtime, setRuntime] = useState<MarketResearchRuntimeConfig | null>(null);
@@ -419,26 +480,57 @@ export function MarketResearchLab() {
   }
 
   async function runResearch() {
-    const ticker = normalizeTicker(tickerText);
-    if (!ticker) {
-      setError("Enter a valid ticker symbol.");
-      return;
-    }
-    setTickerText(ticker);
+    setChartData({});
+    setShowCharts(false);
     setError(null);
     setIsRunning(true);
+
     const [providerOverride, modelOverride] = selectedModel ? selectedModel.split("|", 2) : [null, null];
+
     try {
-      const job = await startMarketResearchJob({
-        ticker,
-        analysis_date: analysisDate || null,
-        horizon,
-        provider: providerOverride || null,
-        model: modelOverride || null,
-        options: {}
-      });
-      setActiveJob(job);
-      setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+      if (pairMode && universeTickers.length === 2) {
+        const job = await startMarketResearchJob({
+          ticker: universeTickers[0],
+          analysis_date: analysisDate || null,
+          horizon,
+          pair: `${universeTickers[0]},${universeTickers[1]}`,
+          provider: providerOverride || null,
+          model: modelOverride || null,
+          options: {},
+        });
+        setActiveJob(job);
+        setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+      } else if (universeTickers.length > 1) {
+        const job = await startMarketResearchJob({
+          ticker: universeTickers[0],
+          analysis_date: analysisDate || null,
+          horizon,
+          tickers: universeTickers,
+          provider: providerOverride || null,
+          model: modelOverride || null,
+          options: {},
+        });
+        setActiveJob(job);
+        setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+      } else {
+        const ticker = normalizeTicker(tickerText);
+        if (!ticker) {
+          setError("Enter a valid ticker symbol or select from universe.");
+          setIsRunning(false);
+          return;
+        }
+        setTickerText(ticker);
+        const job = await startMarketResearchJob({
+          ticker,
+          analysis_date: analysisDate || null,
+          horizon,
+          provider: providerOverride || null,
+          model: modelOverride || null,
+          options: {},
+        });
+        setActiveJob(job);
+        setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to start market research.");
       setIsRunning(false);
@@ -452,6 +544,12 @@ export function MarketResearchLab() {
 
   useEffect(() => {
     if (!activeJob || !["queued", "running"].includes(activeJob.status)) {
+      if (activeJob?.status === "completed" && activeJob.id) {
+        void getChartData(activeJob.id).then((cd) => {
+          setChartData(cd.charts);
+          setShowCharts(true);
+        }).catch(() => {});
+      }
       setIsRunning(false);
       return undefined;
     }
@@ -461,8 +559,16 @@ export function MarketResearchLab() {
         .then((job) => {
           setActiveJob(job);
           setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
-          if (!["queued", "running"].includes(job.status)) setIsRunning(false);
-          if (job.status === "failed" || job.status === "interrupted") setError(job.error || job.message || "Market research job failed.");
+          if (!["queued", "running"].includes(job.status)) {
+            setIsRunning(false);
+            if (job.status === "completed") {
+              void getChartData(job.id).then((cd) => {
+                setChartData(cd.charts);
+                setShowCharts(true);
+              }).catch(() => {});
+            }
+            if (job.status === "failed" || job.status === "interrupted") setError(job.error || job.message || "Market research job failed.");
+          }
         })
         .catch((caught) => {
           setIsRunning(false);
@@ -472,20 +578,52 @@ export function MarketResearchLab() {
     return () => window.clearInterval(timer);
   }, [activeJob?.id, activeJob?.status]);
 
-  const activeReport = activeJob?.result ?? null;
-  const report = activeReport ?? jobs.find((job) => job.result)?.result ?? null;
+  const activeResult = activeJob?.result ?? null;
+  const displayResult = activeResult ?? jobs.find((job) => job.result)?.result ?? null;
   const agentData = useMemo(() => {
-    if (!activeReport?.raw_agent_outputs) return {};
     const map: Record<string, MarketResearchAgentOutput> = {};
-    for (const agent of activeReport.raw_agent_outputs) {
-      map[agent.agent_name] = agent;
+    const outputs: MarketResearchAgentOutput[][] = [];
+
+    if (activeResult) {
+      if (isSingleStockReport(activeResult)) {
+        outputs.push(activeResult.raw_agent_outputs);
+      } else if (isMultiStockReport(activeResult)) {
+        for (const r of activeResult.reports) {
+          outputs.push(r.raw_agent_outputs);
+        }
+      }
+    }
+
+    for (const job of jobs) {
+      const jr = job.result;
+      if (!jr || jr === activeResult) continue;
+      if (isSingleStockReport(jr)) {
+        outputs.push(jr.raw_agent_outputs);
+      } else if (isMultiStockReport(jr)) {
+        for (const r of jr.reports) {
+          outputs.push(r.raw_agent_outputs);
+        }
+      }
+    }
+
+    for (const list of outputs) {
+      for (const agent of list) {
+        if (!map[agent.agent_name]) {
+          map[agent.agent_name] = agent;
+        }
+      }
     }
     return map;
-  }, [activeReport]);
+  }, [activeResult, jobs]);
   const jobProgress = Math.round((activeJob?.progress ?? (isRunning ? 0.04 : 0)) * 100);
-  const activeRequest = activeJob?.request as { ticker?: unknown; horizon?: unknown; analysis_date?: unknown } | undefined;
+  const activeRequest = activeJob?.request as { ticker?: unknown; tickers?: unknown; pair?: unknown; horizon?: unknown; analysis_date?: unknown } | undefined;
+  const activeRequestLabel = activeRequest?.pair
+    ? String(activeRequest.pair).replace(",", " / ")
+    : Array.isArray(activeRequest?.tickers) && activeRequest.tickers.length
+      ? activeRequest.tickers.slice(0, 4).map(String).join(", ")
+      : String(activeRequest?.ticker ?? "Ticker");
   const jobTitle = activeJob
-    ? `${String(activeRequest?.ticker ?? "Ticker")} | ${String(activeRequest?.horizon ?? "swing")}`
+    ? `${activeRequestLabel} | ${String(activeRequest?.horizon ?? "swing")}`
     : "No research job selected";
   const jobStatus = activeJob?.status ?? "idle";
   const progressEvents = activeJob?.progress_events ?? [];
@@ -511,27 +649,56 @@ export function MarketResearchLab() {
       </section>
 
       <div className="content-grid">
-        <Panel title="Research Committee" subtitle="Ticker, date, horizon, and runtime configuration">
+        <Panel title="Research Committee" subtitle="Ticker, date, horizon, universe, and runtime configuration">
           <div className="market-research-config-grid">
-            <label>
-              Ticker
-              <input value={tickerText} onChange={(event) => setTickerText(event.target.value.toUpperCase())} onBlur={() => setTickerText(normalizeTicker(tickerText))} />
+            <label htmlFor="mr-ticker">
+              {pairMode ? "Ticker A / Pair First" : "Ticker"}
+              <input
+                id="mr-ticker"
+                value={pairMode && universeTickers.length > 0 ? universeTickers[0] : tickerText}
+                onChange={(event) => {
+                  if (pairMode && universeTickers.length > 0) {
+                    setUniverseTickers([event.target.value.toUpperCase(), universeTickers[1] || ""].filter(Boolean));
+                  } else {
+                    setTickerText(event.target.value.toUpperCase());
+                  }
+                }}
+                onBlur={() => {
+                  if (!pairMode) setTickerText(normalizeTicker(tickerText));
+                }}
+                placeholder={pairMode ? "First ticker" : "e.g. AAPL"}
+              />
             </label>
-            <label>
+            {pairMode ? (
+              <label htmlFor="mr-ticker-b">
+                Ticker B / Pair Second
+                <input
+                  id="mr-ticker-b"
+                  value={universeTickers.length > 1 ? universeTickers[1] : ""}
+                  onChange={(event) => {
+                    const first = universeTickers[0] || tickerText;
+                    setUniverseTickers([first, event.target.value.toUpperCase()]);
+                    setUniversePair(`${first},${event.target.value.toUpperCase()}`);
+                  }}
+                  placeholder="Second ticker"
+                />
+              </label>
+            ) : null}
+            <label htmlFor="mr-analysis-date">
               Analysis date
-              <input value={analysisDate} onChange={(event) => setAnalysisDate(event.target.value)} placeholder="Defaults to today" />
+              <input id="mr-analysis-date" value={analysisDate} onChange={(event) => setAnalysisDate(event.target.value)} placeholder="Defaults to today" />
             </label>
-            <label>
+            <label htmlFor="mr-horizon">
               Horizon
-              <select value={horizon} onChange={(event) => setHorizon(event.target.value)}>
+              <select id="mr-horizon" value={horizon} onChange={(event) => setHorizon(event.target.value)}>
                 <option value="intraday">Intraday</option>
                 <option value="swing">Swing</option>
                 <option value="long-term">Long-term</option>
               </select>
             </label>
-            <label>
+            <label htmlFor="mr-llm-model">
               LLM model
-              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtime?.model_override_enabled}>
+              <select id="mr-llm-model" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!runtime?.model_override_enabled}>
                 <option value="">Server default</option>
                 {nvidiaModelOptions.map((model) => (
                   <option key={model.model} value={`${model.provider}|${model.model}`}>
@@ -539,6 +706,20 @@ export function MarketResearchLab() {
                   </option>
                 ))}
               </select>
+            </label>
+          </div>
+          <div className="button-row button-row--compact">
+            <label className="toggle-label" htmlFor="mr-pair-mode">
+              <input id="mr-pair-mode" type="checkbox" checked={pairMode} onChange={(e) => { setPairMode(e.target.checked); if (!e.target.checked) { setUniversePair(""); } }} />
+              Pair research mode
+            </label>
+            <label className="toggle-label" htmlFor="mr-show-universe">
+              <input id="mr-show-universe" type="checkbox" checked={showUniverse} onChange={(e) => setShowUniverse(e.target.checked)} />
+              <Layers size={14} /> Stock universe
+            </label>
+            <label className="toggle-label" htmlFor="mr-show-decisions">
+              <input id="mr-show-decisions" type="checkbox" checked={showDecisions} onChange={(e) => setShowDecisions(e.target.checked)} />
+              <History size={14} /> Decision history
             </label>
           </div>
           <div className="runtime-diagnostics">
@@ -611,8 +792,8 @@ export function MarketResearchLab() {
             </div>
             <small>{formatNumber(jobProgress, 0)}% complete</small>
           </div>
-          <label className="trace-toggle">
-            <input type="checkbox" checked={showProgressTrace} onChange={(event) => setShowProgressTrace(event.target.checked)} />
+          <label className="trace-toggle" htmlFor="mr-show-trace">
+            <input id="mr-show-trace" type="checkbox" checked={showProgressTrace} onChange={(event) => setShowProgressTrace(event.target.checked)} />
             Show progress trace
           </label>
           {showProgressTrace ? (
@@ -627,7 +808,7 @@ export function MarketResearchLab() {
               {latestJobs.map((job) => (
                 <button key={job.id} type="button" className={job.id === activeJob?.id ? "job-history-row job-history-row--active" : "job-history-row"} onClick={() => setActiveJob(job)}>
                   <FileText size={15} />
-                  <span>{String((job.request as { ticker?: unknown }).ticker ?? "ticker")}</span>
+                  <span>{jobLabel(job)}</span>
                   <Badge label={job.status} tone={statusTone(job.status)} />
                 </button>
               ))}
@@ -636,7 +817,47 @@ export function MarketResearchLab() {
         </Panel>
       </div>
 
-      {report ? <ReportView report={report} /> : null}
+      {showUniverse ? (
+        <div className="content-grid">
+          <StockUniversePanel
+            selectedTickers={universeTickers}
+            onSelectionChange={setUniverseTickers}
+            pairMode={pairMode}
+            onPairChange={(p) => {
+              setUniversePair(p);
+              const parts = p.split(",").filter(Boolean);
+              if (parts.length >= 2) {
+                setUniverseTickers(parts);
+              }
+            }}
+          />
+          <Panel title="Quick Stats" subtitle="Universe overview">
+            <div className="metric-grid metric-grid--small">
+              <MetricCard label="Selected" value={String(universeTickers.length)} detail={pairMode ? "pair mode" : "tickers"} />
+              {universeTickers.length >= 2 ? (
+                <MetricCard label="Mode" value={pairMode ? "Pair" : "Multi"} detail="Click run to start" tone="info" />
+              ) : null}
+            </div>
+          </Panel>
+        </div>
+      ) : null}
+
+      {showCharts && Object.keys(chartData).length > 0 ? (
+        <ResearchCharts charts={chartData} />
+      ) : null}
+
+      {showDecisions ? (
+        <DecisionHistoryPanel compact={true} />
+      ) : null}
+
+      {displayResult ? <ResearchResultView result={displayResult} /> : null}
     </div>
   );
+}
+
+function jobLabel(job: MarketResearchJob) {
+  const request = job.request as { ticker?: unknown; tickers?: unknown; pair?: unknown };
+  if (request.pair) return String(request.pair).replace(",", " / ");
+  if (Array.isArray(request.tickers) && request.tickers.length) return request.tickers.slice(0, 3).map(String).join(", ");
+  return String(request.ticker ?? "ticker");
 }

@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..core.timeframes import TradingMode
 from ..research.market_research_agents import ResearchHorizon
 
 
@@ -19,6 +20,7 @@ class MarketDataInterval(StrEnum):
     ONE_WEEK = "1wk"
     ONE_MONTH = "1mo"
     ONE_HOUR = "1h"
+    FOUR_HOUR = "4h"
 
 
 class SentimentProvider(StrEnum):
@@ -96,6 +98,14 @@ class BacktestRunRequest(BaseModel):
     start: str = Field(default="2018-01-01", description="Backtest start date, formatted as YYYY-MM-DD.")
     end: str = Field(default="2026-04-15", description="Backtest end date, formatted as YYYY-MM-DD.")
     interval: MarketDataInterval = Field(default=MarketDataInterval.ONE_DAY, description="Market data interval.")
+    trading_mode: TradingMode | None = Field(
+        default=None,
+        description="Optional trading mode. daily forces daily bars; short_term uses hourly execution with 4-hour signal context.",
+    )
+    compare_modes: bool = Field(
+        default=False,
+        description="When true, run daily and short-term simulations side by side for the same pipeline request.",
+    )
     experiment_name: str | None = Field(default=None, description="Optional experiment name.")
     artifact_root: Path | None = Field(default=None, description="Optional artifact root. Defaults to backend settings.")
     artifact_id: str | None = Field(default=None, description="Tenant-owned artifact id for production reads.")
@@ -110,7 +120,7 @@ class BacktestRunRequest(BaseModel):
         description="Official SEC filing forms to include when include_sec_filings is enabled.",
     )
     edgar_user_agent: str | None = Field(default=None, description="SEC EDGAR user-agent when SEC data is enabled.")
-    train_bars: int = Field(default=252, ge=20)
+    train_bars: int = Field(default=300, ge=1)
     test_bars: int = Field(default=63, ge=5)
     step_bars: int = Field(default=63, ge=1)
     bars_per_year: int = Field(default=252, ge=1)
@@ -157,11 +167,34 @@ class MarketResearchRunRequest(BaseModel):
     include_financial_events: bool = Field(default=True, description="Include existing financial-events provider data when available.")
     lookback_days: int | None = Field(default=None, ge=5, le=900, description="Optional data lookback window override.")
     options: dict[str, Any] = Field(default_factory=dict, description="Non-secret provider/model options for future providers.")
+    tickers: list[str] | None = Field(default=None, max_length=20, description="Multi-ticker research. The committee runs on each ticker.")
+    pair: str | None = Field(default=None, max_length=65, description="Pair research mode. Two tickers separated by comma, e.g. 'KO,PEP'.")
+    universe_filter: dict[str, Any] | None = Field(default=None, description="Filter stocks from the stock universe by sector/country/etc.")
 
     @field_validator("ticker")
     @classmethod
     def normalize_ticker(cls, value: str) -> str:
         return _normalized_symbols([value])[0]
+
+    @field_validator("pair")
+    @classmethod
+    def normalize_pair(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw_parts = [s.strip() for s in value.split(",") if s.strip()]
+        if not raw_parts:
+            return None
+        parts = _normalized_symbols(raw_parts)
+        if len(parts) != 2:
+            raise ValueError("pair must contain exactly two valid ticker symbols separated by a comma.")
+        return ",".join(parts)
+
+    @field_validator("tickers")
+    @classmethod
+    def normalize_tickers(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        return _normalized_symbols(values)
 
     @field_validator("analysis_date")
     @classmethod
@@ -191,6 +224,52 @@ class MarketResearchRunRequest(BaseModel):
                 raise ValueError("options must not contain raw secrets. Use environment or vault references for real providers.")
         walk(value)
         return value
+
+
+class StockUniverseItem(BaseModel):
+    ticker: str
+    company_name: str = ""
+    sector: str = "Unknown"
+    industry: str = ""
+    country: str = "US"
+    exchange: str = "NYSE"
+    currency: str = "USD"
+    market_cap_category: str = ""
+    avg_volume: int = 0
+    is_liquid: bool = True
+
+
+class StockUniverseResponse(BaseModel):
+    name: str = "default"
+    description: str = ""
+    total_stocks: int = 0
+    stocks: list[StockUniverseItem] = Field(default_factory=list)
+    sector_counts: list[dict[str, Any]] = Field(default_factory=list)
+    country_counts: list[dict[str, Any]] = Field(default_factory=list)
+    exchange_counts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CommitteeDecisionResponse(BaseModel):
+    id: str
+    ticker: str
+    pair_ticker: str | None = None
+    timestamp: str
+    analysis_date: str = ""
+    horizon: str = "swing"
+    decision: str = ""
+    confidence: int = 0
+    reasoning: str = ""
+    signals_summary: dict[str, Any] = Field(default_factory=dict)
+    market_metrics: dict[str, Any] = Field(default_factory=dict)
+    data_quality: dict[str, Any] = Field(default_factory=dict)
+    evaluation: dict[str, Any] = Field(default_factory=dict)
+    recommendation: str = ""
+    llm_provider: str = ""
+    llm_model: str = ""
+
+
+class ChartDataResponse(BaseModel):
+    charts: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyBuilderMessage(BaseModel):

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Building2, CalendarDays, CheckCircle2, Copy, Loader2, Newspaper, Play, Plus, Route, Trash2 } from "lucide-react";
+import { AlertTriangle, Building2, CalendarDays, CheckCircle2, Loader2, Newspaper, Play, Plus, Route } from "lucide-react";
 
 import { getPaperRunJob, listPaperRunJobs, startPaperRunJob } from "../api/client";
 import type { PaperAgentConfig, PaperDashboardPayload, PaperExecutionConfig, PaperRunJob, PaperRunRequest, StrategyCatalogItem } from "../api/types";
+import { AgentEditor, withDefaultSentiment } from "../components/AgentEditor";
 import { Badge } from "../components/Badge";
 import { ExposureBars, OrderNotionalBars, PortfolioEquityChart, RiskReturnMap } from "../components/Charts";
 import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
-import { formatCurrency, formatNumber, formatPercent, pipelineLabel, splitList, splitSymbols, statusTone } from "../utils/format";
+import { formatCurrency, formatNumber, formatPercent, statusTone } from "../utils/format";
 import { agentHasSentiment, defaultAgentId, getAllOrders, parseJsonObject } from "../utils/quant";
 
 type DateMode = "single" | "range";
@@ -20,30 +21,9 @@ const defaultExecution: PaperExecutionConfig = {
   weight_tolerance: 0.0025
 };
 
-const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local_web", "local"];
-const DEFAULT_NEWS_FILES = ["examples/news_headlines.sample.csv"];
-
-function withDefaultSentiment<T extends Partial<PaperAgentConfig>>(agent: T): T {
-  return {
-    ...agent,
-    news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : DEFAULT_SENTIMENT_PROVIDERS,
-    news_files: agent.news_files?.length ? agent.news_files : DEFAULT_NEWS_FILES,
-    local_web_search_urls: agent.local_web_search_urls ?? [],
-    local_web_refresh_minutes: agent.local_web_refresh_minutes ?? 60,
-    local_web_max_pages_per_source: agent.local_web_max_pages_per_source ?? 30,
-    web_research_urls: agent.web_research_urls ?? [],
-    web_research_domains: agent.web_research_domains ?? [],
-    web_research_query_terms: agent.web_research_query_terms ?? "",
-    web_research_max_articles: agent.web_research_max_articles ?? 4,
-    web_research_fetch_article_text: agent.web_research_fetch_article_text ?? true,
-    use_finbert: agent.use_finbert ?? false,
-    local_finbert_only: agent.local_finbert_only ?? true
-  };
-}
-
 function starterAgents(): PaperAgentConfig[] {
   return [
-    withDefaultSentiment({
+    {
       id: defaultAgentId(),
       name: "etf_trend_core",
       pipeline: "etf_trend",
@@ -51,8 +31,8 @@ function starterAgents(): PaperAgentConfig[] {
       interval: "1d",
       lookback_bars: 800,
       params: { top_n: 3, trend_window: 200, rebalance_bars: 21 }
-    }),
-    withDefaultSentiment({
+    },
+    {
       id: defaultAgentId(),
       name: "vol_target_trend_shadow",
       pipeline: "volatility_target_trend",
@@ -60,8 +40,8 @@ function starterAgents(): PaperAgentConfig[] {
       interval: "1d",
       lookback_bars: 360,
       params: { trend_window: 120, volatility_window: 20, target_volatility: 0.15, max_strategy_weight: 0.25 }
-    }),
-    withDefaultSentiment({
+    },
+    {
       id: defaultAgentId(),
       name: "residual_stat_arb_shadow",
       pipeline: "stat_arb",
@@ -70,7 +50,7 @@ function starterAgents(): PaperAgentConfig[] {
       lookback_bars: 620,
       sector_map_path: "examples/sector_map.sample.json",
       params: { include_residual_book: true, include_classic_pairs: true, top_n_pairs: 3, residual_lookback: 60 }
-    })
+    }
   ];
 }
 
@@ -90,337 +70,8 @@ function businessDayCount(start: string, end: string) {
 }
 
 function catalogLaunchItems(catalog: StrategyCatalogItem[]) {
-  const launchable = catalog.filter((item) => item.family === "Directional" || ["etf_trend", "stat_arb", "graph_stat_arb", "edgar_event", "pead_sentiment"].includes(item.id));
+  const launchable = catalog.filter((item) => item.family === "Directional" || ["etf_trend", "stat_arb", "graph_stat_arb", "edgar_event", "pead_sentiment", "committee_signal_follower"].includes(item.id));
   return launchable.length ? launchable : [];
-}
-
-function AgentEditor({
-  agent,
-  catalog,
-  paramsText,
-  onChange,
-  onParamsChange,
-  onClone,
-  onRemove
-}: {
-  agent: PaperAgentConfig;
-  catalog: StrategyCatalogItem[];
-  paramsText: string;
-  onChange: (agent: PaperAgentConfig) => void;
-  onParamsChange: (value: string) => void;
-  onClone: () => void;
-  onRemove: () => void;
-}) {
-  const sentimentEnabled = agentHasSentiment(agent);
-  const [symbolsText, setSymbolsText] = useState(agent.symbols.join(" "));
-
-  useEffect(() => {
-    setSymbolsText(agent.symbols.join(" "));
-  }, [agent.id]);
-
-  function updateSymbolsText(value: string) {
-    setSymbolsText(value);
-    onChange({ ...agent, symbols: splitSymbols(value) });
-  }
-
-  function commitSymbolsText() {
-    const nextSymbols = splitSymbols(symbolsText);
-    setSymbolsText(nextSymbols.join(" "));
-    onChange({ ...agent, symbols: nextSymbols });
-  }
-
-  function toggleProvider(provider: string, enabled: boolean) {
-    const current = agent.news_provider_names ?? [];
-    onChange({
-      ...agent,
-      news_provider_names: enabled
-        ? Array.from(new Set([...current, provider]))
-        : current.filter((item) => item !== provider)
-    });
-  }
-
-  function applyStrategy(pipeline: string) {
-    const item = catalog.find((candidate) => candidate.pipeline === pipeline || candidate.id === pipeline);
-    const example = item?.paper_config_example as {
-      symbols?: string[];
-      params?: Record<string, unknown>;
-      sector_map_path?: string;
-      event_file?: string;
-      use_sec_companyfacts?: boolean;
-      include_sec_filings?: boolean;
-      sec_filing_forms?: string[];
-      edgar_user_agent?: string;
-      lookback_bars?: number;
-    } | undefined;
-    const nextParams = example?.params ?? agent.params;
-    const nextSymbols = Array.isArray(example?.symbols) ? example.symbols : agent.symbols;
-    setSymbolsText(nextSymbols.join(" "));
-    onChange({
-      ...withDefaultSentiment(agent),
-      pipeline,
-      symbols: nextSymbols,
-      sector_map_path: example?.sector_map_path ?? agent.sector_map_path,
-      event_file: example?.event_file ?? agent.event_file,
-      use_sec_companyfacts: example?.use_sec_companyfacts ?? agent.use_sec_companyfacts,
-      include_sec_filings: example?.include_sec_filings ?? agent.include_sec_filings,
-      sec_filing_forms: example?.sec_filing_forms ?? agent.sec_filing_forms,
-      edgar_user_agent: example?.edgar_user_agent ?? agent.edgar_user_agent,
-      lookback_bars: example?.lookback_bars ?? agent.lookback_bars,
-      params: nextParams
-    });
-    onParamsChange(JSON.stringify(nextParams, null, 2));
-  }
-
-  function toggleSentiment(enabled: boolean) {
-    if (!enabled) {
-      onChange({
-        ...agent,
-        use_finbert: false,
-        local_finbert_only: false,
-        daily_sentiment_file: null,
-        news_provider_names: [],
-        news_files: [],
-        rss_feed_urls: [],
-        local_web_search_urls: [],
-        local_web_refresh_minutes: 60,
-        local_web_max_pages_per_source: 30,
-        web_research_urls: [],
-        web_research_domains: [],
-        web_research_query_terms: "",
-        web_research_max_articles: 4,
-        web_research_fetch_article_text: true,
-        newsapi_api_key: null,
-        news_topics: []
-      });
-      return;
-    }
-    onChange({
-      ...agent,
-      use_finbert: false,
-      news_provider_names: agent.news_provider_names?.length ? agent.news_provider_names : DEFAULT_SENTIMENT_PROVIDERS,
-      news_files: agent.news_files?.length ? agent.news_files : DEFAULT_NEWS_FILES,
-      local_web_search_urls: agent.local_web_search_urls ?? [],
-      local_web_refresh_minutes: agent.local_web_refresh_minutes ?? 60,
-      local_web_max_pages_per_source: agent.local_web_max_pages_per_source ?? 30,
-      web_research_max_articles: agent.web_research_max_articles ?? 4,
-      web_research_fetch_article_text: agent.web_research_fetch_article_text ?? true,
-      news_topics: agent.news_topics?.length ? agent.news_topics : ["earnings"]
-    });
-  }
-
-  function toggleOfficialEvents(enabled: boolean) {
-    const defaultForms = agent.sec_filing_forms?.length ? agent.sec_filing_forms : ["8-K", "10-Q", "10-K"];
-    onChange({
-      ...agent,
-      include_sec_filings: enabled,
-      sec_filing_forms: enabled ? defaultForms : agent.sec_filing_forms
-    });
-  }
-
-  return (
-    <article className="agent-card">
-      <div className="agent-card__header">
-        <div>
-          <strong>{agent.name}</strong>
-          <span>{pipelineLabel(agent.pipeline)} | {agent.interval}</span>
-        </div>
-        <div className="badge-row">
-          <Badge label={sentimentEnabled ? "sentiment on" : "price only"} tone={sentimentEnabled ? "good" : "neutral"} />
-          <Badge label={`${agent.lookback_bars} bars`} tone="info" />
-        </div>
-      </div>
-
-      <div className="form-grid">
-        <label>
-          Agent name
-          <input value={agent.name} onChange={(event) => onChange({ ...agent, name: event.target.value })} />
-        </label>
-        <label>
-          Method
-          <select value={agent.pipeline} onChange={(event) => applyStrategy(event.target.value)}>
-            {catalog.map((item) => (
-              <option key={item.id} value={item.pipeline}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Timeframe
-          <select value={agent.interval} onChange={(event) => onChange({ ...agent, interval: event.target.value })}>
-            <option value="1d">Daily bars</option>
-            <option value="1wk">Weekly bars</option>
-            <option value="1h">Hourly bars</option>
-            <option value="30m">30 minute bars</option>
-          </select>
-        </label>
-        <label>
-          Lookback bars
-          <input type="number" value={agent.lookback_bars} onChange={(event) => onChange({ ...agent, lookback_bars: Number(event.target.value) })} />
-        </label>
-      </div>
-
-      <label>
-        Symbols
-        <input value={symbolsText} onChange={(event) => updateSymbolsText(event.target.value)} onBlur={commitSymbolsText} placeholder="SPY QQQ TLT GLD" />
-        <small>ETF, event, and directional methods trade symbols directly. Stat-arb can use the sector map instead.</small>
-      </label>
-
-      <div className="form-grid">
-        <label>
-          Sector map
-          <input value={agent.sector_map_path ?? ""} onChange={(event) => onChange({ ...agent, sector_map_path: event.target.value || null })} placeholder="examples/sector_map.sample.json" />
-        </label>
-        <label>
-          Event file
-          <input value={agent.event_file ?? ""} onChange={(event) => onChange({ ...agent, event_file: event.target.value || null })} placeholder="examples/events.sample.csv" />
-        </label>
-      </div>
-
-      <div className="sentiment-panel official-events-panel">
-        <label className="checkbox-line">
-          <input type="checkbox" checked={Boolean(agent.include_sec_filings)} onChange={(event) => toggleOfficialEvents(event.target.checked)} />
-          Add official SEC filing events
-        </label>
-        <p>
-          Adds auditable company events from SEC EDGAR, including earnings 8-K filings, 10-Q quarterly reports, and 10-K annual reports.
-          Use this with the event-driven method when you want official filing dates considered.
-        </p>
-        <label className="checkbox-line">
-          <input type="checkbox" checked={Boolean(agent.use_sec_companyfacts)} onChange={(event) => onChange({ ...agent, use_sec_companyfacts: event.target.checked })} />
-          Add SEC company facts scores too
-        </label>
-        {agent.include_sec_filings || agent.use_sec_companyfacts ? (
-          <div className="form-grid">
-            {agent.include_sec_filings ? (
-              <label>
-                SEC filing forms
-                <input
-                  value={(agent.sec_filing_forms ?? ["8-K", "10-Q", "10-K"]).join(" ")}
-                  onChange={(event) => onChange({ ...agent, sec_filing_forms: splitList(event.target.value).map((form) => form.toUpperCase()) })}
-                  placeholder="8-K 10-Q 10-K"
-                />
-              </label>
-            ) : null}
-            <label>
-              SEC user agent
-              <input
-                value={agent.edgar_user_agent ?? ""}
-                onChange={(event) => onChange({ ...agent, edgar_user_agent: event.target.value || null })}
-                placeholder="Your Name your@email.com"
-              />
-              <small>SEC asks automated API clients to identify themselves with contact information.</small>
-            </label>
-          </div>
-        ) : null}
-      </div>
-
-      <div className="sentiment-panel">
-        <label className="checkbox-line">
-          <input type="checkbox" checked={sentimentEnabled} onChange={(event) => toggleSentiment(event.target.checked)} />
-          Add news/sentiment overlay
-        </label>
-        <p>Enabled by default. Unselect sources you do not want. Stat-arb uses this for ranking/conviction, and PEAD blends it with event scores.</p>
-        {sentimentEnabled ? (
-          <div className="form-grid">
-            <label>
-              Daily sentiment file
-              <input value={agent.daily_sentiment_file ?? ""} onChange={(event) => onChange({ ...agent, daily_sentiment_file: event.target.value || null })} placeholder="data/sentiment/daily.parquet" />
-            </label>
-            <label>
-              News providers
-              <input value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="rss local_web local newsapi alphavantage benzinga" />
-            </label>
-            <div className="provider-check-grid provider-check-grid--compact">
-              {["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga"].map((provider) => (
-                <label key={provider} className="checkbox-line">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(agent.news_provider_names?.includes(provider))}
-                    onChange={(event) => toggleProvider(provider, event.target.checked)}
-                  />
-                  {provider}
-                </label>
-              ))}
-            </div>
-            <label>
-              RSS feeds
-              <input value={(agent.rss_feed_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, rss_feed_urls: splitList(event.target.value) })} placeholder="optional; default Yahoo template is used for rss" />
-            </label>
-            <label>
-              Local web-search feeds
-              <input value={(agent.local_web_search_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, local_web_search_urls: splitList(event.target.value) })} placeholder="optional RSS/Atom feeds or {ticker} templates" />
-            </label>
-            <label>
-              Local web cache refresh minutes
-              <input type="number" min={0} max={1440} value={agent.local_web_refresh_minutes ?? 60} onChange={(event) => onChange({ ...agent, local_web_refresh_minutes: Number(event.target.value) })} />
-            </label>
-            <label>
-              Website domains to crawl
-              <input value={(agent.web_research_domains ?? []).join(" ")} onChange={(event) => onChange({ ...agent, web_research_domains: splitList(event.target.value) })} placeholder="optional trusted domains: reuters.com cnbc.com" />
-            </label>
-            <label>
-              Website pages per source
-              <input type="number" min={1} max={250} value={agent.local_web_max_pages_per_source ?? 30} onChange={(event) => onChange({ ...agent, local_web_max_pages_per_source: Number(event.target.value) })} />
-            </label>
-            <label>
-              Direct web URLs
-              <input value={(agent.web_research_urls ?? []).join(" ")} onChange={(event) => onChange({ ...agent, web_research_urls: splitList(event.target.value) })} placeholder="optional article URLs or {ticker} templates" />
-            </label>
-            <label>
-              Web query terms
-              <input value={agent.web_research_query_terms ?? ""} onChange={(event) => onChange({ ...agent, web_research_query_terms: event.target.value })} placeholder="earnings OR guidance" />
-            </label>
-            <label>
-              Web articles per symbol
-              <input type="number" min={1} max={25} value={agent.web_research_max_articles ?? 4} onChange={(event) => onChange({ ...agent, web_research_max_articles: Number(event.target.value) })} />
-            </label>
-            <label>
-              News files
-              <input value={(agent.news_files ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_files: splitList(event.target.value) })} placeholder="data/news/headlines.csv" />
-            </label>
-            <label>
-              NewsAPI key
-              <input value={agent.newsapi_api_key ?? ""} onChange={(event) => onChange({ ...agent, newsapi_api_key: event.target.value || null })} placeholder="optional; or set NEWSAPI_API_KEY in the backend environment" />
-            </label>
-            <label>
-              News topics
-              <input value={(agent.news_topics ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_topics: splitList(event.target.value) })} placeholder="earnings macro" />
-            </label>
-            <label className="checkbox-line">
-              <input type="checkbox" checked={agent.web_research_fetch_article_text ?? true} onChange={(event) => onChange({ ...agent, web_research_fetch_article_text: event.target.checked })} />
-              Fetch web pages and summarize lightly
-            </label>
-            <label className="checkbox-line">
-              <input type="checkbox" checked={Boolean(agent.use_finbert)} onChange={(event) => onChange({ ...agent, use_finbert: event.target.checked })} />
-              Use FinBERT when available (heavier)
-            </label>
-            <label className="checkbox-line">
-              <input type="checkbox" checked={Boolean(agent.local_finbert_only)} onChange={(event) => onChange({ ...agent, local_finbert_only: event.target.checked })} />
-              Require local FinBERT cache
-            </label>
-          </div>
-        ) : null}
-      </div>
-
-      <label>
-        Method parameters JSON
-        <textarea rows={7} value={paramsText} onChange={(event) => onParamsChange(event.target.value)} spellCheck={false} />
-        <small>This is passed to the backend strategy spec. Invalid JSON blocks deployment before it touches ledgers.</small>
-      </label>
-
-      <div className="button-row">
-        <button type="button" className="ghost-button" onClick={onClone}>
-          <Copy size={16} />
-          Clone
-        </button>
-        <button type="button" className="danger-button" onClick={onRemove}>
-          <Trash2 size={16} />
-          Remove
-        </button>
-      </div>
-    </article>
-  );
 }
 
 export function LiveOps({
@@ -601,21 +252,21 @@ export function LiveOps({
       <div className="content-grid">
         <Panel title="1. Fake Account And Dates" subtitle="Simple controls first">
           <div className="form-grid">
-            <label>
+            <label htmlFor="lo-initial-cash">
               Initial cash
-              <input type="number" value={execution.initial_cash} onChange={(event) => setExecution({ ...execution, initial_cash: Number(event.target.value) })} />
+              <input id="lo-initial-cash" type="number" value={execution.initial_cash} onChange={(event) => setExecution({ ...execution, initial_cash: Number(event.target.value) })} />
             </label>
-            <label>
+            <label htmlFor="lo-commission-bps">
               Commission bps
-              <input type="number" value={execution.commission_bps} onChange={(event) => setExecution({ ...execution, commission_bps: Number(event.target.value) })} />
+              <input id="lo-commission-bps" type="number" value={execution.commission_bps} onChange={(event) => setExecution({ ...execution, commission_bps: Number(event.target.value) })} />
             </label>
-            <label>
+            <label htmlFor="lo-slippage-bps">
               Slippage bps
-              <input type="number" value={execution.slippage_bps} onChange={(event) => setExecution({ ...execution, slippage_bps: Number(event.target.value) })} />
+              <input id="lo-slippage-bps" type="number" value={execution.slippage_bps} onChange={(event) => setExecution({ ...execution, slippage_bps: Number(event.target.value) })} />
             </label>
-            <label>
+            <label htmlFor="lo-min-trade-notional">
               Min trade notional
-              <input type="number" value={execution.min_trade_notional} onChange={(event) => setExecution({ ...execution, min_trade_notional: Number(event.target.value) })} />
+              <input id="lo-min-trade-notional" type="number" value={execution.min_trade_notional} onChange={(event) => setExecution({ ...execution, min_trade_notional: Number(event.target.value) })} />
             </label>
           </div>
 
@@ -625,19 +276,19 @@ export function LiveOps({
           </div>
 
           {dateMode === "single" ? (
-            <label>
+            <label htmlFor="lo-as-of-date">
               As-of date
-              <input value={asofDate} onChange={(event) => setAsofDate(event.target.value)} placeholder="YYYY-MM-DD or blank for today" />
+              <input id="lo-as-of-date" value={asofDate} onChange={(event) => setAsofDate(event.target.value)} placeholder="YYYY-MM-DD or blank for today" />
             </label>
           ) : (
             <div className="form-grid">
-              <label>
+              <label htmlFor="lo-replay-start">
                 Replay start
-                <input value={asofStart} onChange={(event) => setAsofStart(event.target.value)} placeholder="YYYY-MM-DD" />
+                <input id="lo-replay-start" value={asofStart} onChange={(event) => setAsofStart(event.target.value)} placeholder="YYYY-MM-DD" />
               </label>
-              <label>
+              <label htmlFor="lo-replay-end">
                 Replay end
-                <input value={asofEnd} onChange={(event) => setAsofEnd(event.target.value)} placeholder="YYYY-MM-DD" />
+                <input id="lo-replay-end" value={asofEnd} onChange={(event) => setAsofEnd(event.target.value)} placeholder="YYYY-MM-DD" />
               </label>
             </div>
           )}

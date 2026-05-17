@@ -52,6 +52,13 @@ export function toneFromNumber(value: unknown): "good" | "bad" | "neutral" {
   return "neutral";
 }
 
+export function decisionTone(decision: string | null | undefined): "good" | "bad" | "info" | "neutral" {
+  if (decision === "BUY") return "good";
+  if (decision === "SELL" || decision === "AVOID") return "bad";
+  if (decision === "HOLD") return "info";
+  return "neutral";
+}
+
 export function statusTone(status: string | null | undefined): "good" | "bad" | "warn" | "neutral" {
   if (status === "completed" || status === "ok" || status === "succeeded" || status === "active" || status === "running_ok") return "good";
   if (status === "failed" || status === "interrupted") return "bad";

@@ -54,6 +54,20 @@ class MarketDataCacheTests(unittest.TestCase):
         expected = data.loc[(data.index >= pd.Timestamp("2024-01-02")) & (data.index < pd.Timestamp("2024-01-05")), ["AAA"]]
         pd.testing.assert_frame_equal(subset, expected, check_freq=False)
 
+    def test_cached_parquet_provider_derives_four_hour_bars_from_hourly_cache(self) -> None:
+        index = pd.date_range("2024-01-01 09:00", periods=8, freq="h")
+        data = pd.DataFrame({"AAA": [float(value) for value in range(8)]}, index=index)
+        upstream = DummyProvider(data=data)
+        cache_dir = fresh_test_dir("artifacts/test_cache/market_data_4h")
+
+        provider = CachedParquetProvider(upstream=upstream, cache_dir=cache_dir)
+        derived = provider.get_close_prices(["AAA"], "2024-01-01", "2024-01-02", interval="4h")
+
+        self.assertEqual(upstream.calls, 1)
+        self.assertTrue(cache_dir.joinpath("4h").exists())
+        self.assertLess(len(derived), len(data))
+        self.assertEqual(float(derived["AAA"].iloc[-1]), 7.0)
+
 
 if __name__ == "__main__":
     unittest.main()

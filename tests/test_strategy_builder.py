@@ -180,6 +180,34 @@ class StrategyBuilderTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("Unsupported rule kind" in error for error in result.errors))
 
+    def test_strategy_builder_accepts_short_term_hourly_specs(self) -> None:
+        from pairs_trading.backend.strategy_builder import validate_strategy_spec
+
+        result = validate_strategy_spec(
+            {
+                "schema_version": "strategy_spec/v1",
+                "name": "Short Term EMA Strategy",
+                "summary": "Trades an hourly EMA crossover with four-hour confirmation.",
+                "asset_universe": {"type": "explicit_symbols", "symbols": ["SPY"]},
+                "timeframe": "short_term",
+                "side": "long_only",
+                "required_indicators": [{"name": "EMA 12", "kind": "ema", "parameters": {"window": 12}}],
+                "entry_rules": [{"kind": "ema_cross_above", "parameters": {"fast_window": 12, "slow_window": 48}}],
+                "exit_rules": [{"kind": "ema_cross_below", "parameters": {"fast_window": 12, "slow_window": 48}}],
+                "position_sizing": {"method": "equal_weight", "max_position_per_symbol": 1.0, "max_gross_exposure": 1.0},
+                "risk_controls": {"stop_loss_pct": 0.1, "max_positions": 1},
+                "rebalancing": {"frequency": "intraday", "execution_timing": "next_bar_close"},
+                "costs": {"commission_bps": 0.5, "spread_bps": 1.0, "slippage_bps": 0.75},
+                "assumptions": [],
+                "limitations": [],
+                "editable_parameters": [],
+                "compatibility": {"supported": True},
+            }
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.spec["timeframe"], "short_term")
+
     def test_rule_based_strategy_applies_close_based_stop_loss(self) -> None:
         import pandas as pd
 

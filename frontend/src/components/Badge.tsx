@@ -1,6 +1,8 @@
+import { memo } from "react";
+
 export type Tone = "good" | "bad" | "warn" | "info" | "neutral";
 
-export function Badge({
+export const Badge = memo(function Badge({
   label,
   tone = "neutral"
 }: {
@@ -8,4 +10,4 @@ export function Badge({
   tone?: Tone;
 }) {
   return <span className={`badge badge--${tone}`}>{label}</span>;
-}
+});

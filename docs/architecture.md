@@ -21,6 +21,15 @@ For the full backend/frontend walkthrough, read [backend_frontend_tutorial.md](b
 - `apps/`: future-facing deployment facades for API, worker, and web app boundaries.
 - `frontend/`: React TypeScript UI. Keep API calls in `frontend/src/api/` and domain UI in `frontend/src/features/`.
 
+## Trading Modes
+
+The system has two first-class trading modes instead of assuming daily bars everywhere:
+
+- `daily`: uses `1d` market data for longer-term signal generation, strategy execution, walk-forward validation, reporting, and swing/long-term agent decisions.
+- `short_term`: uses `1h` execution data and `4h` signal context for shorter-term opportunities. The 4-hour close matrix is derived from cached hourly bars when the upstream provider does not expose native 4-hour data.
+
+Shared mode definitions live in `pairs_trading/core/timeframes.py`. Market data ingestion normalizes intervals in `pairs_trading/data/market.py`, backtests persist mode metadata through `WalkForwardConfig`, and directional short-term strategies apply a 4-hour confirmation layer before portfolio allocation. Backend backtest requests can set `trading_mode` for a single simulation or `compare_modes=true` to run daily and short-term simulations side by side with a comparison leaderboard.
+
 ## Frontend Boundary
 
 The frontend should not read raw ledger files directly. Backend routes should use read-model helpers such as:

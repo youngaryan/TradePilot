@@ -101,7 +101,7 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_symbol_inputs_preserve_raw_text_while_typing_spaces(self) -> None:
         sentiment_source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
-        live_source = PROJECT_ROOT.joinpath("frontend/src/features/LiveOps.tsx").read_text(encoding="utf-8")
+        agent_source = PROJECT_ROOT.joinpath("frontend/src/components/AgentEditor.tsx").read_text(encoding="utf-8")
 
         self.assertIn("const [symbolsText, setSymbolsText]", sentiment_source)
         self.assertIn("function updateSymbolsText(value: string)", sentiment_source)
@@ -110,12 +110,12 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("onBlur={commitSymbolsText}", sentiment_source)
         self.assertNotIn('value={request.symbols.join(" ")} onChange={(event) => setRequest({ ...request, symbols: splitSymbols(event.target.value) })}', sentiment_source)
 
-        self.assertIn("const [symbolsText, setSymbolsText] = useState(agent.symbols.join(\" \"))", live_source)
-        self.assertIn("function updateSymbolsText(value: string)", live_source)
-        self.assertIn("function commitSymbolsText()", live_source)
-        self.assertIn("setSymbolsText(nextSymbols.join(\" \"))", live_source)
-        self.assertIn("value={symbolsText}", live_source)
-        self.assertNotIn('value={agent.symbols.join(" ")} onChange={(event) => onChange({ ...agent, symbols: splitSymbols(event.target.value) })}', live_source)
+        self.assertIn("const [symbolsText, setSymbolsText] = useState(agent.symbols.join(\" \"))", agent_source)
+        self.assertIn("function updateSymbolsText(value: string)", agent_source)
+        self.assertIn("function commitSymbolsText()", agent_source)
+        self.assertIn("setSymbolsText(nextSymbols.join(\" \"))", agent_source)
+        self.assertIn("value={symbolsText}", agent_source)
+        self.assertNotIn('value={agent.symbols.join(" ")} onChange={(event) => onChange({ ...agent, symbols: splitSymbols(event.target.value) })}', agent_source)
 
     def test_sentiment_stored_warnings_are_contextual_not_fresh_alerts(self) -> None:
         source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
@@ -153,6 +153,7 @@ class FrontendContractTests(unittest.TestCase):
     def test_lightweight_web_sentiment_controls_are_available_without_finbert_default(self) -> None:
         lab_source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
         live_source = PROJECT_ROOT.joinpath("frontend/src/features/LiveOps.tsx").read_text(encoding="utf-8")
+        agent_source = PROJECT_ROOT.joinpath("frontend/src/components/AgentEditor.tsx").read_text(encoding="utf-8")
         backtest_source = PROJECT_ROOT.joinpath("frontend/src/features/BacktestLab.tsx").read_text(encoding="utf-8")
         type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
 
@@ -178,13 +179,13 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("job-progress-card--warning", lab_source)
         self.assertIn("job-step-row", lab_source)
 
-        self.assertIn('const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local_web", "local"]', live_source)
-        self.assertIn('["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga"]', live_source)
+        self.assertIn('const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local_web", "local"]', agent_source)
+        self.assertIn('["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga"]', agent_source)
         self.assertIn("local_web_search_urls", live_source)
         self.assertIn("local_web_refresh_minutes", live_source)
         self.assertIn("local_web_max_pages_per_source", live_source)
         self.assertIn("web_research_fetch_article_text", live_source)
-        self.assertIn("Use FinBERT when available (heavier)", live_source)
+        self.assertIn("Use FinBERT when available (heavier)", agent_source)
 
         self.assertIn("const SENTIMENT_PIPELINES = new Set", backtest_source)
         self.assertIn("DEFAULT_SENTIMENT_PARAMETERS", backtest_source)
@@ -240,6 +241,7 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_frontend_exposes_admin_pricing_and_payment_wall_contracts(self) -> None:
         app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        login_source = PROJECT_ROOT.joinpath("frontend/src/features/LoginScreen.tsx").read_text(encoding="utf-8")
         admin_source = PROJECT_ROOT.joinpath("frontend/src/features/AdminDashboard.tsx").read_text(encoding="utf-8")
         pricing_source = PROJECT_ROOT.joinpath("frontend/src/features/PricingPage.tsx").read_text(encoding="utf-8")
         client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
@@ -254,8 +256,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("viewFromLocationHash", app_source)
         self.assertIn("hashchange", app_source)
         self.assertIn("#/app/", app_source)
-        self.assertIn("Use admin demo", app_source)
-        self.assertIn("Use free user demo", app_source)
+        self.assertIn("Use admin demo", login_source)
+        self.assertIn("Use free user demo", login_source)
         self.assertIn("logoutRequest", app_source)
 
         self.assertIn("AdminDashboard", admin_source)
@@ -288,13 +290,14 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_landing_page_default_sections_and_analytics_contract(self) -> None:
         app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        login_source = PROJECT_ROOT.joinpath("frontend/src/features/LoginScreen.tsx").read_text(encoding="utf-8")
         admin_source = PROJECT_ROOT.joinpath("frontend/src/features/AdminDashboard.tsx").read_text(encoding="utf-8")
         type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
         style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
 
         self.assertIn("return <LoginScreen onLogin={handleLogin} />", app_source)
         for section in ('"features"', '"examples"', '"pricing"', '"faq"', '"login"', '"signup"'):
-            self.assertIn(section, app_source)
+            self.assertIn(section, login_source)
         for event_name in (
             "landing_page_view",
             "landing_section_view",
@@ -305,11 +308,11 @@ class FrontendContractTests(unittest.TestCase):
             "auth_login_started",
             "auth_login_completed",
         ):
-            self.assertIn(event_name, app_source)
-        self.assertIn("IntersectionObserver", app_source)
-        self.assertIn("landingVisitorId", app_source)
-        self.assertIn("Create a free workspace", app_source)
-        self.assertIn("Northstar Quant Lab", app_source)
+            self.assertIn(event_name, login_source)
+        self.assertIn("IntersectionObserver", login_source)
+        self.assertIn("landingVisitorId", login_source)
+        self.assertIn("Create a free workspace", login_source)
+        self.assertIn("Northstar Quant Lab", login_source)
         self.assertIn("landing_analytics", type_source)
         self.assertIn("visitors_by_country", type_source)
         self.assertIn("Landing page analytics", admin_source)
@@ -353,14 +356,14 @@ class FrontendContractTests(unittest.TestCase):
     def test_frontend_telemetry_charts_explain_observability_contract(self) -> None:
         source = PROJECT_ROOT.joinpath("frontend/src/components/Charts.tsx").read_text(encoding="utf-8")
 
-        self.assertIn("export function TelemetryTimelineChart", source)
+        self.assertIn("export const TelemetryTimelineChart", source)
         self.assertIn('aria-label="Telemetry events over time"', source)
         self.assertIn("Stacked by product, refresh, engineering, other, and error events", source)
-        self.assertIn("export function TelemetryLatencyChart", source)
+        self.assertIn("export const TelemetryLatencyChart", source)
         self.assertIn("latency_ms, duration_ms, elapsed_ms, response_ms, or runtime_ms", source)
-        self.assertIn("export function TelemetryCategoryBars", source)
-        self.assertIn("export function TelemetryConsentBars", source)
-        self.assertIn("export function TelemetryTopEventsBars", source)
+        self.assertIn("export const TelemetryCategoryBars", source)
+        self.assertIn("export const TelemetryConsentBars", source)
+        self.assertIn("export const TelemetryTopEventsBars", source)
 
     def test_backtest_lab_exposes_realtime_baseline_chart_contract(self) -> None:
         lab_source = PROJECT_ROOT.joinpath("frontend/src/features/BacktestLab.tsx").read_text(encoding="utf-8")

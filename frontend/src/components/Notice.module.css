@@ -1,0 +1,15 @@
+.dismiss {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.6;
+  padding: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.dismiss:hover {
+  opacity: 1;
+}
