@@ -99,6 +99,14 @@ jobs:
       - name: Frontend audit
         working-directory: frontend
         run: npm audit --omit=dev
+      - name: Prepare env for Docker Compose
+        run: |
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> .env
+          echo "MINIO_ROOT_PASSWORD=$(openssl rand -hex 16)" >> .env
+          echo "S3_SECRET_ACCESS_KEY=$(openssl rand -hex 16)" >> .env
+          echo "SESSION_SECRET=$(openssl rand -hex 16)" >> .env
+          echo "CSRF_SECRET=$(openssl rand -hex 16)" >> .env
+          echo "APP_ENV=development" >> .env
       - name: Docker Compose config smoke
         run: docker compose config --quiet
       - name: Docker API build
