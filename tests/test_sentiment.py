@@ -7,10 +7,12 @@ import pandas as pd
 
 from pairs_trading.features.sentiment import (
     BaseSentimentModel,
+    EnsembleSentimentModel,
     FinBERTSentimentModel,
     NewsSentimentAggregator,
     RuleBasedFinancialSentimentModel,
     SentimentConfig,
+    VaderSentimentModel,
     adjust_pair_rankings_with_sentiment,
     apply_sentiment_overlay,
     build_pair_sentiment_overlay,
@@ -70,6 +72,112 @@ class SentimentModelTests(unittest.TestCase):
         self.assertAlmostEqual(scores.loc[0, "score"], 0.70, places=6)
         self.assertEqual(scores.loc[1, "label"], "negative")
         self.assertAlmostEqual(scores.loc[1, "score"], -0.80, places=6)
+
+
+class VaderSentimentModelTests(unittest.TestCase):
+    def test_vader_scores_financial_text(self) -> None:
+        model = VaderSentimentModel()
+        scores = model.score_texts(
+            [
+                "This stock is great and earnings are strong",
+                "This company is terrible and faces bankruptcy",
+            ]
+        )
+
+        self.assertGreater(scores.loc[0, "score"], 0.0)
+        self.assertEqual(scores.loc[0, "label"], "positive")
+        self.assertLess(scores.loc[1, "score"], 0.0)
+        self.assertEqual(scores.loc[1, "label"], "negative")
+
+    def test_vader_returns_correct_columns(self) -> None:
+        model = VaderSentimentModel()
+        result = model.score_texts(["neutral statement about markets"])
+
+        self.assertIn("label", result.columns)
+        self.assertIn("score", result.columns)
+        self.assertIn("confidence", result.columns)
+        self.assertIn("positive_prob", result.columns)
+        self.assertIn("negative_prob", result.columns)
+        self.assertIn("neutral_prob", result.columns)
+
+    def test_vader_handles_empty_and_edge_texts(self) -> None:
+        model = VaderSentimentModel()
+        scores = model.score_texts(["", "   ", None])
+        self.assertEqual(len(scores), 3)
+        self.assertTrue(all(scores["score"].notna()))
+
+
+class EnsembleSentimentModelTests(unittest.TestCase):
+    def test_ensemble_blends_two_models_with_weights(self) -> None:
+        primary = FixedSentimentModel(
+            rows=[
+                {
+                    "label": "positive",
+                    "score": 0.8,
+                    "confidence": 0.9,
+                    "positive_prob": 0.85,
+                    "negative_prob": 0.05,
+                    "neutral_prob": 0.10,
+                }
+            ]
+        )
+        secondary = FixedSentimentModel(
+            rows=[
+                {
+                    "label": "negative",
+                    "score": -0.4,
+                    "confidence": 0.6,
+                    "positive_prob": 0.15,
+                    "negative_prob": 0.55,
+                    "neutral_prob": 0.30,
+                }
+            ]
+        )
+        ensemble = EnsembleSentimentModel(
+            primary=primary,
+            secondary=secondary,
+            primary_weight=0.7,
+        )
+        result = ensemble.score_texts(["test"])
+
+        expected_score = 0.7 * 0.8 + 0.3 * (-0.4)
+        self.assertAlmostEqual(float(result.loc[0, "score"]), expected_score, places=6)
+        expected_confidence = 0.7 * 0.9 + 0.3 * 0.6
+        self.assertAlmostEqual(float(result.loc[0, "confidence"]), expected_confidence, places=6)
+        expected_positive = 0.7 * 0.85 + 0.3 * 0.15
+        self.assertAlmostEqual(float(result.loc[0, "positive_prob"]), expected_positive, places=6)
+
+    def test_ensemble_primary_only_when_weight_is_one(self) -> None:
+        primary = FixedSentimentModel(
+            rows=[
+                {
+                    "label": "positive",
+                    "score": 0.5,
+                    "confidence": 0.8,
+                    "positive_prob": 0.7,
+                    "negative_prob": 0.1,
+                    "neutral_prob": 0.2,
+                }
+            ]
+        )
+        ensemble = EnsembleSentimentModel(
+            primary=primary,
+            secondary=FixedSentimentModel(
+                rows=[
+                    {
+                        "label": "negative",
+                        "score": -0.5,
+                        "confidence": 0.8,
+                        "positive_prob": 0.1,
+                        "negative_prob": 0.7,
+                        "neutral_prob": 0.2,
+                    }
+                ]
+            ),
+            primary_weight=1.0,
+        )
+        result = ensemble.score_texts(["test"])
+        self.assertAlmostEqual(float(result.loc[0, "score"]), 0.5, places=6)
 
 
 class SentimentAggregationTests(unittest.TestCase):

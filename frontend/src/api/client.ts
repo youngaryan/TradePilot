@@ -29,6 +29,7 @@ import type {
   SentimentAccumulationRequest,
   SentimentAccumulationJob,
   SentimentDatasetPayload,
+  SentimentEvalResult,
   FinancialEventsPayload,
   PaperStrategy,
   PricingPayload,
@@ -397,6 +398,23 @@ export function deleteAdminUserStrategy(strategyId: string) {
   return requestJson<UserStrategyRecord>(`/api/admin/user-strategies/${encodeURIComponent(strategyId)}`, {
     method: "DELETE"
   });
+}
+
+export function getSentimentEvaluation(params?: { dataset?: string; models?: string; max_samples?: number }) {
+  const q = new URLSearchParams();
+  if (params?.dataset) q.set("dataset", params.dataset);
+  if (params?.models) q.set("models", params.models);
+  if (params?.max_samples) q.set("max_samples", String(params.max_samples));
+  const qs = q.toString();
+  return requestJson<SentimentEvalResult>(`/api/admin/sentiment-evaluation${qs ? `?${qs}` : ""}`);
+}
+
+export function getSentimentDatasets() {
+  return requestJson<SentimentDatasetInfo[]>("/api/admin/sentiment-datasets");
+}
+
+export function getSentimentModels() {
+  return requestJson<SentimentModelInfo[]>("/api/admin/sentiment-models");
 }
 
 export function getBacktestTemplates() {

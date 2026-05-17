@@ -36,7 +36,10 @@ backend = [
   "uvicorn[standard]>=0.34",
 ]
 sentiment = [
+  "datasets>=2.14",
   "huggingface_hub>=0.22",
+  "nltk>=3.8",
+  "spacy>=3.7",
   "torch>=2.2",
   "transformers>=4.39",
 ]

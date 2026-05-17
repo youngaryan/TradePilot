@@ -1903,6 +1903,45 @@ def run_committee_signal_follower_pipeline(
     )
 
 
+def run_eval_sentiment(
+    dataset: str = "financial_phrasebank",
+    max_samples: int = 500,
+    models: str = "",
+    output: str = "",
+    output_format: str = "markdown",
+) -> None:
+    from ..features.datasets import REGISTRY, load_dataset
+    from ..features.evaluator import report_to_json, report_to_markdown, run_evaluation
+
+    model_list = [m.strip() for m in models.split(",") if m.strip()] if models else None
+    report = run_evaluation(dataset_name=dataset, max_samples=max_samples, model_types=model_list)
+
+    if output_format == "json":
+        text = report_to_json(report)
+    else:
+        text = report_to_markdown(report)
+
+    if output:
+        Path(output).write_text(text, encoding="utf-8")
+        print(f"Evaluation report saved to: {output}")
+    else:
+        print(text)
+
+
+def _add_eval_subparser(subparsers) -> None:
+    from ..features.datasets import REGISTRY
+
+    eval_parser = subparsers.add_parser("eval", help="Run evaluation tools.")
+    eval_sub = eval_parser.add_subparsers(dest="eval_tool", required=True)
+
+    sentiment_parser = eval_sub.add_parser("sentiment", help="Benchmark sentiment models against labeled datasets.")
+    sentiment_parser.add_argument("--dataset", default="financial_phrasebank", help=f"Dataset key. Available: {', '.join(sorted(REGISTRY))}")
+    sentiment_parser.add_argument("--max-samples", type=int, default=500, help="Max samples per model (50-20000).")
+    sentiment_parser.add_argument("--models", default="", help="Comma-separated model types (finbert,vader,rule_based,ensemble). Defaults to all.")
+    sentiment_parser.add_argument("--output", default="", help="File path to write the report (prints to stdout if omitted).")
+    sentiment_parser.add_argument("--format", dest="output_format", default="markdown", choices=["markdown", "json"], help="Output format.")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the quant walk-forward research pipeline.")
     parser.add_argument(
@@ -2020,12 +2059,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scale-in-confidence-delta", type=int, default=10, help="Confidence increase needed to scale into a repeated signal.")
     parser.add_argument("--scale-out-on-opposite", action=argparse.BooleanOptionalAction, default=True, help="Flatten when an opposite signal arrives.")
     parser.add_argument("--flat-on-avoid", action=argparse.BooleanOptionalAction, default=True, help="Flatten position when AVOID signal is received.")
+    _add_eval_subparser(parser.add_subparsers(dest="command"))
     return parser
 
 
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.command == "eval":
+        if args.eval_tool == "sentiment":
+            run_eval_sentiment(
+                dataset=args.dataset,
+                max_samples=args.max_samples,
+                models=args.models,
+                output=args.output,
+                output_format=args.output_format,
+            )
+        return
 
     if args.deploy_paper_config:
         from ..operations.paper_trading import run_paper_batch

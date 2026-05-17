@@ -368,6 +368,73 @@ class RuleBasedFinancialSentimentModel(BaseSentimentModel):
         return pd.DataFrame([self._score_text(text or "") for text in texts])
 
 
+class VaderSentimentModel(BaseSentimentModel):
+    def __init__(self) -> None:
+        try:
+            from nltk.sentiment.vader import SentimentIntensityAnalyzer
+        except ImportError:
+            raise ImportError(
+                "VaderSentimentModel requires 'nltk'. "
+                "Install it in the project venv to use VADER sentiment."
+            )
+        try:
+            self._analyzer = SentimentIntensityAnalyzer()
+        except LookupError:
+            import nltk
+            nltk.download("vader_lexicon", quiet=True)
+            self._analyzer = SentimentIntensityAnalyzer()
+
+    def score_texts(self, texts: Sequence[str]) -> pd.DataFrame:
+        rows = []
+        for text in texts:
+            scores = self._analyzer.polarity_scores(str(text or ""))
+            compound = float(scores["compound"])
+            pos = float(scores["pos"])
+            neg = float(scores["neg"])
+            neu = float(scores["neu"])
+            if compound > 0.15:
+                label = "positive"
+            elif compound < -0.15:
+                label = "negative"
+            else:
+                label = "neutral"
+            rows.append(
+                {
+                    "label": label,
+                    "score": compound,
+                    "confidence": max(pos, neg, neu),
+                    "positive_prob": pos,
+                    "negative_prob": neg,
+                    "neutral_prob": neu,
+                }
+            )
+        return pd.DataFrame(rows)
+
+
+class EnsembleSentimentModel(BaseSentimentModel):
+    def __init__(
+        self,
+        primary: BaseSentimentModel,
+        secondary: BaseSentimentModel,
+        primary_weight: float = 0.8,
+    ) -> None:
+        self.primary = primary
+        self.secondary = secondary
+        self.primary_weight = primary_weight
+
+    def score_texts(self, texts: Sequence[str]) -> pd.DataFrame:
+        primary_scores = self.primary.score_texts(texts)
+        secondary_scores = self.secondary.score_texts(texts)
+        w = self.primary_weight
+        combined = primary_scores.copy()
+        combined["score"] = w * primary_scores["score"] + (1 - w) * secondary_scores["score"]
+        combined["confidence"] = w * primary_scores["confidence"] + (1 - w) * secondary_scores["confidence"]
+        for prob in ("positive_prob", "negative_prob", "neutral_prob"):
+            combined[prob] = w * primary_scores[prob] + (1 - w) * secondary_scores[prob]
+        combined["label"] = combined[["positive_prob", "negative_prob", "neutral_prob"]].idxmax(axis=1).str.replace("_prob", "", regex=False)
+        return combined
+
+
 class NewsSentimentAggregator:
     def __init__(
         self,
@@ -466,11 +533,18 @@ class NewsSentimentAggregator:
 
 def build_best_available_sentiment_model() -> BaseSentimentModel:
     try:
-        model = FinBERTSentimentModel(local_files_only=True)
-        model.score_texts(["earnings beat expectations"])
-        return model
+        finbert = FinBERTSentimentModel(local_files_only=True)
+        finbert.score_texts(["earnings beat expectations"])
+        try:
+            vader = VaderSentimentModel()
+            return EnsembleSentimentModel(primary=finbert, secondary=vader, primary_weight=0.8)
+        except Exception:
+            return finbert
     except Exception:
-        return RuleBasedFinancialSentimentModel()
+        try:
+            return VaderSentimentModel()
+        except Exception:
+            return RuleBasedFinancialSentimentModel()
 
 
 def _wide_sentiment_view(daily_sentiment: pd.DataFrame, value_col: str) -> pd.DataFrame:

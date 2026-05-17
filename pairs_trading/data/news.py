@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 
 from ..features.sentiment import BaseSentimentModel, NewsSentimentAggregator
+from ..features.ticker_extractor import TickerExtractor
 
 
 FX_CURRENCY_CODES = {
@@ -677,9 +678,10 @@ class RSSHeadlineProvider(RemoteHeadlineProvider):
 
     @staticmethod
     def _infer_tickers(text: str, requested: set[str]) -> list[str]:
-        tokens = {token.upper() for token in re.findall(r"\$?[A-Z]{1,5}(?:\.[A-Z])?", text)}
-        tokens |= {token[1:] for token in tokens if token.startswith("$")}
-        return sorted(ticker for ticker in requested if ticker in tokens)
+        if not text or not text.strip():
+            return []
+        extractor = TickerExtractor.default()
+        return extractor.extract_tickers(text, requested=requested)
 
     def _urls_for_request(self, request: NewsRequest) -> list[tuple[str, str | None]]:
         urls: list[tuple[str, str | None]] = []
@@ -1164,26 +1166,18 @@ class LocalWebSearchHeadlineProvider(RemoteHeadlineProvider):
         return self._normalize_index_frame(pd.DataFrame(rows))
 
     def _row_score(self, row: pd.Series, ticker: str) -> float:
-        row_ticker = str(row.get("ticker", "")).upper()
-        if row_ticker and row_ticker != ticker:
-            return 0.0
-        if row_ticker == ticker:
-            return max(float(row.get("relevance", 0.7)), 0.8)
-
-        text = " ".join(str(row.get(column, "")) for column in ("headline", "title", "summary", "source")).lower()
-        alias_score = 0.0
-        for alias in self._ticker_aliases(ticker):
-            if self._token_match(text, alias):
-                alias_score = max(alias_score, 0.95 if alias.upper().strip("$") == ticker else 0.72)
-        query_bonus = 0.0
-        for token in self._query_tokens(self.query_terms):
-            if self._token_match(text, token):
-                query_bonus = min(query_bonus + 0.04, 0.16)
-        if alias_score:
-            return min(alias_score + query_bonus, 1.0)
-        if self.assign_single_ticker_when_unmatched and len(self._active_request_tickers) == 1 and bool(row.get("is_direct_url")):
-            return 0.55 + query_bonus
-        return 0.0
+        extractor = TickerExtractor.default()
+        score = extractor.score_row(row, ticker)
+        if score > 0:
+            text = " ".join(str(row.get(column, "")) for column in ("headline", "title", "summary", "source")).lower()
+            query_bonus = 0.0
+            for token in self._query_tokens(self.query_terms):
+                if self._token_match(text, token):
+                    query_bonus = min(query_bonus + 0.04, 0.16)
+            score = min(score + query_bonus, 1.0)
+        if score <= 0.0 and self.assign_single_ticker_when_unmatched and len(self._active_request_tickers) == 1 and bool(row.get("is_direct_url")):
+            return 0.55
+        return score
 
     def _search_index(self, frame: pd.DataFrame, request: NewsRequest) -> pd.DataFrame:
         if frame.empty:

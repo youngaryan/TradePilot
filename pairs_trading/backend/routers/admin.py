@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..authz import require_admin_context, require_csrf
 from ..config import BackendSettings
+from ...features.sentiment_eval import list_available_datasets, list_available_models, run_sentiment_evaluation
 from ..saas import AdminService, RequestContext
 from ..schemas import AdminStrategyStatusUpdateRequest, AdminUserUpdateRequest
 from ..strategy_builder import StrategyBuilderService
@@ -97,6 +98,24 @@ def build_admin_router(settings: BackendSettings) -> APIRouter:
     @router.get("/system-health")
     def system_health(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:
         return admin_service.system_health()
+
+    @router.get("/sentiment-evaluation")
+    def sentiment_evaluation(
+        dataset: str = Query(default="financial_phrasebank", max_length=60),
+        models: str | None = Query(default=None, max_length=200),
+        max_samples: int = Query(default=500, ge=50, le=20000),
+        _: RequestContext = Depends(admin_context),
+    ) -> dict[str, Any]:
+        model_list = models.split(",") if models else None
+        return run_sentiment_evaluation(max_samples=max_samples, dataset=dataset, model_types=model_list)
+
+    @router.get("/sentiment-datasets")
+    def sentiment_datasets(_: RequestContext = Depends(admin_context)) -> list[dict[str, Any]]:
+        return list_available_datasets()
+
+    @router.get("/sentiment-models")
+    def sentiment_models(_: RequestContext = Depends(admin_context)) -> list[dict[str, Any]]:
+        return list_available_models()
 
     @router.get("/quotas")
     def quotas(_: RequestContext = Depends(admin_context)) -> dict[str, Any]:

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Ban, CheckCircle2, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, UserCog, UserX } from "lucide-react";
 
-import { deleteAdminUserStrategy, getAdminOverview, listAdminUserStrategies, listAdminUsers, updateAdminUser, updateAdminUserStrategy } from "../api/client";
-import type { AdminOverviewPayload, AdminUserRecord, AuthResponse, UserStrategyRecord } from "../api/types";
+import { deleteAdminUserStrategy, getAdminOverview, getSentimentDatasets, getSentimentEvaluation, getSentimentModels, listAdminUserStrategies, listAdminUsers, updateAdminUser, updateAdminUserStrategy } from "../api/client";
+import type { AdminOverviewPayload, AdminUserRecord, AuthResponse, SentimentDatasetInfo, SentimentEvalResult, SentimentModelInfo, UserStrategyRecord } from "../api/types";
 import { Badge } from "../components/Badge";
 import { MetricCard, Panel, SectionHeader } from "../components/Cards";
 import { HorizontalBars, TelemetryTimelineChart } from "../components/Charts";
@@ -31,6 +31,12 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
   const [isLoading, setIsLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [evalResult, setEvalResult] = useState<SentimentEvalResult | null>(null);
+  const [evalLoading, setEvalLoading] = useState(false);
+  const [evalDatasets, setEvalDatasets] = useState<SentimentDatasetInfo[]>([]);
+  const [evalModelInfos, setEvalModelInfos] = useState<SentimentModelInfo[]>([]);
+  const [selectedDataset, setSelectedDataset] = useState("financial_phrasebank");
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set(["finbert", "vader", "rule_based", "ensemble"]));
 
   async function load() {
     setIsLoading(true);
@@ -67,6 +73,10 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
 
   useEffect(() => {
     void load();
+    void Promise.all([
+      getSentimentDatasets().then(setEvalDatasets).catch(() => {}),
+      getSentimentModels().then(setEvalModelInfos).catch(() => {}),
+    ]);
   }, []);
 
   const userSummary = useMemo(() => {
@@ -133,6 +143,27 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function runEvaluation() {
+    setEvalLoading(true);
+    setError(null);
+    try {
+      const models = Array.from(selectedModels).join(",");
+      const result = await getSentimentEvaluation({ dataset: selectedDataset, models, max_samples: 500 });
+      setEvalResult(result);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not run sentiment evaluation.");
+    } finally {
+      setEvalLoading(false);
+    }
+  }
+
+  function evalMetricColor(value: number | null): string {
+    if (value === null) return "var(--text-muted)";
+    if (value >= 0.8) return "var(--positive)";
+    if (value >= 0.6) return "var(--warn)";
+    return "var(--negative)";
   }
 
   async function deleteStrategy(strategy: UserStrategyRecord) {
@@ -355,6 +386,163 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
             }
           ]}
         />
+      </Panel>
+
+      <Panel title="Sentiment model evaluation" subtitle="Benchmark sentiment models against labeled datasets. FinBERT was trained on Financial PhraseBank — scores may be inflated.">
+        <div className="admin-toolbar admin-toolbar--wide">
+          <label htmlFor="eval-dataset">
+            Dataset
+            <select id="eval-dataset" value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)}>
+              {evalDatasets.map((ds) => (
+                <option key={ds.key} value={ds.key}>{ds.name}</option>
+              ))}
+            </select>
+          </label>
+          <fieldset className="eval-model-checkboxes">
+            <legend>Models</legend>
+            {evalModelInfos.map((m) => (
+              <label key={m.type}>
+                <input
+                  type="checkbox"
+                  checked={selectedModels.has(m.type)}
+                  onChange={() => setSelectedModels((prev) => { const next = new Set(prev); if (next.has(m.type)) next.delete(m.type); else next.add(m.type); return next; })}
+                />
+                {m.name}
+              </label>
+            ))}
+          </fieldset>
+          <button type="button" className="primary-button" onClick={() => void runEvaluation()} disabled={evalLoading || selectedModels.size === 0}>
+            {evalLoading ? <RefreshCw size={16} className="spin" /> : null}
+            {evalLoading ? "Evaluating…" : "Run evaluation"}
+          </button>
+        </div>
+        {evalResult ? (
+          <div>
+            <div className="metric-grid metric-grid--compact" style={{ marginBottom: "16px" }}>
+              <MetricCard label="Dataset" value={evalResult.dataset} detail={`${evalResult.dataset_size} samples`} />
+              <MetricCard label="Label distribution" value={JSON.stringify(evalResult.label_distribution)} />
+              <MetricCard label="Evaluated at" value={formatDateTime(evalResult.evaluated_at)} />
+            </div>
+            <table className="eval-matrix-table">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Accuracy</th>
+                  <th>Precision (macro)</th>
+                  <th>Recall (macro)</th>
+                  <th>F1 (macro)</th>
+                  <th>Per-class F1</th>
+                  <th>Timing</th>
+                </tr>
+              </thead>
+              <tbody>
+                {evalResult.models.map((model) => (
+                  <tr key={model.model_name} className={model.error ? "eval-matrix-row--errored" : ""}>
+                    <td><strong>{model.model_name}</strong></td>
+                    {model.error ? (
+                      <td colSpan={6} style={{ color: "var(--negative)" }}>{model.error}</td>
+                    ) : (
+                      <>
+                        <td style={{ color: evalMetricColor(model.accuracy), fontWeight: 700 }}>
+                          {model.accuracy !== null ? formatPercent(model.accuracy) : "—"}
+                        </td>
+                        <td style={{ color: evalMetricColor(model.macro_precision) }}>
+                          {model.macro_precision !== null ? formatPercent(model.macro_precision) : "—"}
+                        </td>
+                        <td style={{ color: evalMetricColor(model.macro_recall) }}>
+                          {model.macro_recall !== null ? formatPercent(model.macro_recall) : "—"}
+                        </td>
+                        <td style={{ color: evalMetricColor(model.macro_f1), fontWeight: 700 }}>
+                          {model.macro_f1 !== null ? formatPercent(model.macro_f1) : "—"}
+                        </td>
+                        <td>
+                          {model.f1 ? (
+                            <span className="eval-per-class">
+                              {["positive", "negative", "neutral"].map((cls) => (
+                                <span key={cls} style={{ color: evalMetricColor(model.f1![cls] ?? null) }}>
+                                  {cls}: {formatPercent(model.f1![cls] ?? 0)}
+                                </span>
+                              ))}
+                            </span>
+                          ) : "—"}
+                        </td>
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                          {model.timing_ms !== null ? `${model.timing_ms.toFixed(0)} ms` : "—"}
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="eval-detail-section">
+              <div>
+                {evalResult.models.filter((m) => !m.error).map((model) => (
+                  <details key={model.model_name} className="eval-confusion-details">
+                    <summary>Confusion matrix — {model.model_name}</summary>
+                    {model.confusion_matrix ? (
+                      <table className="eval-confusion-table">
+                        <thead>
+                          <tr>
+                            <th>True \ Pred</th>
+                            {["positive", "negative", "neutral"].map((cls) => (
+                              <th key={cls}>{cls}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {["positive", "negative", "neutral"].map((trueCls) => (
+                            <tr key={trueCls}>
+                              <td><strong>{trueCls}</strong></td>
+                              {["positive", "negative", "neutral"].map((predCls) => (
+                                <td key={predCls}>
+                                  {model.confusion_matrix![trueCls]?.[predCls] ?? 0}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : null}
+                  </details>
+                ))}
+              </div>
+              <div>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    const text = [
+                      `# Sentiment Model Evaluation: ${evalResult.dataset}`,
+                      "",
+                      `- **Samples**: ${evalResult.dataset_size}`,
+                      `- **Label distribution**: ${JSON.stringify(evalResult.label_distribution)}`,
+                      `- **Evaluated at**: ${evalResult.evaluated_at}`,
+                      "",
+                      "| Model | Accuracy | Precision (macro) | Recall (macro) | F1 (macro) | Timing (ms) |",
+                      "|-------|----------|-------------------|----------------|------------|-------------|",
+                      ...evalResult.models.map((m) =>
+                        m.error
+                          ? `| ${m.model_name} | ERROR: ${m.error} | — | — | — | — |`
+                          : `| ${m.model_name} | ${m.accuracy !== null ? formatPercent(m.accuracy) : "—"} | ${m.macro_precision !== null ? formatPercent(m.macro_precision) : "—"} | ${m.macro_recall !== null ? formatPercent(m.macro_recall) : "—"} | ${m.macro_f1 !== null ? formatPercent(m.macro_f1) : "—"} | ${m.timing_ms !== null ? `${m.timing_ms.toFixed(0)}` : "—"} |`
+                      ),
+                      "",
+                    ].join("\n");
+                    const blob = new Blob([text], { type: "text/markdown" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `sentiment-eval-${selectedDataset}.md`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  Download markdown report
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </Panel>
 
       <div className="grid-two">

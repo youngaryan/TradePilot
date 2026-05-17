@@ -502,6 +502,41 @@ export interface AdminOverviewPayload {
   recent_jobs: Record<string, Array<Record<string, unknown>>>;
 }
 
+export interface SentimentModelEval {
+  model_name: string;
+  accuracy: number | null;
+  precision: Record<string, number> | null;
+  recall: Record<string, number> | null;
+  f1: Record<string, number> | null;
+  macro_precision: number | null;
+  macro_recall: number | null;
+  macro_f1: number | null;
+  confusion_matrix: Record<string, Record<string, number>> | null;
+  timing_ms: number | null;
+  error?: string;
+}
+
+export interface SentimentDatasetInfo {
+  name: string;
+  key: string;
+  description: string;
+  max_samples_default: number;
+}
+
+export interface SentimentModelInfo {
+  name: string;
+  type: string;
+  default: boolean;
+}
+
+export interface SentimentEvalResult {
+  dataset: string;
+  dataset_size: number;
+  label_distribution: Record<string, number>;
+  evaluated_at: string;
+  models: SentimentModelEval[];
+}
+
 export interface StrategyCatalogItem {
   id: string;
   name: string;

@@ -2959,6 +2959,89 @@ button.warning-item-header {
   font-size: 0.82rem;
 }
 
+.admin-toolbar--wide {
+  grid-template-columns: minmax(180px, 220px) auto auto;
+  justify-content: start;
+}
+.eval-model-checkboxes {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+.eval-model-checkboxes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.eval-detail-section {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 16px;
+}
+.eval-detail-section > div:first-child {
+  flex: 1;
+}
+.eval-detail-section > div:last-child {
+  flex-shrink: 0;
+}
+.eval-matrix-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.eval-matrix-table th,
+.eval-matrix-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.eval-matrix-table th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.eval-matrix-row--errored td {
+  font-style: italic;
+}
+.eval-per-class {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.eval-per-class span {
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+.eval-confusion-details {
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+.eval-confusion-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 6px 0;
+}
+.eval-confusion-table {
+  margin: 8px 0 16px;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.eval-confusion-table th,
+.eval-confusion-table td {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  text-align: center;
+}
+.eval-confusion-table th {
+  font-weight: 600;
+}
+
 .reports-workspace {
   display: grid;
   gap: 16px;
