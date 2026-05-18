@@ -78,10 +78,28 @@ class FrontendContractTests(unittest.TestCase):
         source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
 
         self.assertIn("tickers: selectedTickers", source)
+        self.assertIn("sourceGroup: selectedSourceGroup", source)
         self.assertIn("!selectedTickers.includes(String(point.ticker).toUpperCase())", source)
         self.assertIn("rowMatchesFilters(row, tableFilters)", source)
         self.assertIn("selectedTickers.join(\" + \")", source)
         self.assertIn("SentimentHeatmapChart points={filteredDailyPoints}", source)
+
+    def test_sentiment_explorer_exposes_source_group_filtering(self) -> None:
+        lab_source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+
+        self.assertIn("const SOURCE_GROUP_OPTIONS", lab_source)
+        self.assertIn("proper_news", lab_source)
+        self.assertIn("generic_web", lab_source)
+        self.assertIn("const [selectedSourceGroup, setSelectedSourceGroup] = useState(\"ALL\")", lab_source)
+        self.assertIn("sourceGroupOfRow(row)", lab_source)
+        self.assertIn("Source group", lab_source)
+        self.assertIn("Exact source", lab_source)
+        self.assertIn("filteredSourceGroupSummary", lab_source)
+        self.assertIn("Groups with zero rows are still selectable", lab_source)
+        self.assertNotIn("Only group:", lab_source)
+        self.assertIn("source_group?: string", type_source)
+        self.assertIn("source_group_summary?: SentimentSourceSummary[]", type_source)
 
     def test_sentiment_lab_shows_financial_events_matrix_and_analysis(self) -> None:
         lab_source = PROJECT_ROOT.joinpath("frontend/src/features/SentimentLab.tsx").read_text(encoding="utf-8")
@@ -180,7 +198,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("job-step-row", lab_source)
 
         self.assertIn('const DEFAULT_SENTIMENT_PROVIDERS = ["rss", "local_web", "local"]', agent_source)
-        self.assertIn('["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga"]', agent_source)
+        self.assertIn('["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga", "stocktwits"]', agent_source)
         self.assertIn("local_web_search_urls", live_source)
         self.assertIn("local_web_refresh_minutes", live_source)
         self.assertIn("local_web_max_pages_per_source", live_source)

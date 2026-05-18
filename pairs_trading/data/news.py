@@ -74,6 +74,171 @@ TOPIC_ALIASES = {
     "VIX": ("volatility index", "market volatility", "fear gauge"),
 }
 
+SOURCE_GROUP_LABELS = {
+    "proper_news": "Proper news",
+    "generic_web": "Generic web",
+    "social": "Social",
+    "local_files": "Local files",
+    "unknown": "Unknown",
+}
+
+SOURCE_GROUP_DESCRIPTIONS = {
+    "proper_news": "Editorial or market-data news providers and known financial publishers.",
+    "generic_web": "Broad RSS, GDELT, local web crawl, and direct web discovery sources.",
+    "social": "Crowd-sourced message boards and social feeds.",
+    "local_files": "Uploaded CSV/parquet files, sample data, and manually curated local rows.",
+    "unknown": "Rows without enough provider metadata to classify.",
+}
+
+_SOURCE_GROUP_PRIORITY = {
+    "proper_news": 0,
+    "social": 1,
+    "generic_web": 2,
+    "local_files": 3,
+    "unknown": 4,
+}
+
+_PROPER_NEWS_PROVIDERS = {
+    "alphavantagenewsprovider",
+    "benzinganewsprovider",
+    "newsapiheadlineprovider",
+}
+
+_LOCAL_FILE_PROVIDERS = {
+    "localnewsfileprovider",
+}
+
+_GENERIC_WEB_PROVIDERS = {
+    "rssheadlineprovider",
+    "localwebsearchheadlineprovider",
+    "webresearchheadlineprovider",
+}
+
+_SOCIAL_PROVIDERS = {
+    "stocktwitsheadlineprovider",
+}
+
+_PROPER_NEWS_DOMAINS = {
+    "apnews.com",
+    "barrons.com",
+    "benzinga.com",
+    "bloomberg.com",
+    "businesswire.com",
+    "cnbc.com",
+    "finance.yahoo.com",
+    "financialpost.com",
+    "ft.com",
+    "globenewswire.com",
+    "investors.com",
+    "marketwatch.com",
+    "morningstar.com",
+    "nasdaq.com",
+    "prnewswire.com",
+    "reuters.com",
+    "seekingalpha.com",
+    "thefly.com",
+    "wsj.com",
+    "zacks.com",
+}
+
+_SOCIAL_DOMAINS = {
+    "reddit.com",
+    "stocktwits.com",
+    "x.com",
+    "twitter.com",
+}
+
+
+def source_group_label(source_group: str) -> str:
+    return SOURCE_GROUP_LABELS.get(str(source_group).strip().lower(), SOURCE_GROUP_LABELS["unknown"])
+
+
+def source_group_description(source_group: str) -> str:
+    return SOURCE_GROUP_DESCRIPTIONS.get(str(source_group).strip().lower(), SOURCE_GROUP_DESCRIPTIONS["unknown"])
+
+
+def preferred_source_group(groups: Sequence[str]) -> str:
+    normalized = [str(group).strip().lower() for group in groups if str(group).strip()]
+    if not normalized:
+        return "unknown"
+    return min(normalized, key=lambda group: _SOURCE_GROUP_PRIORITY.get(group, _SOURCE_GROUP_PRIORITY["unknown"]))
+
+
+def _host_from_value(value: str) -> str:
+    raw = str(value).strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        raw = parsed.netloc or parsed.path
+    raw = raw.removeprefix("www.")
+    return raw.split("/")[0].split(":")[0]
+
+
+def _source_host(source: str, url: str) -> str:
+    raw_source = str(source).strip().lower()
+    for prefix in ("web:", "local-web:"):
+        if raw_source.startswith(prefix):
+            return _host_from_value(raw_source.removeprefix(prefix))
+    if raw_source.startswith("reddit:"):
+        return "reddit.com"
+    source_host = _host_from_value(raw_source)
+    if "." in source_host and " " not in source_host:
+        return source_host
+    return _host_from_value(str(url))
+
+
+def _host_matches(host: str, domains: set[str]) -> bool:
+    if not host:
+        return False
+    return any(host == domain or host.endswith(f".{domain}") for domain in domains)
+
+
+def classify_source_group(source: str = "", provider_name: str = "", url: str = "") -> str:
+    provider = str(provider_name).strip().lower()
+    source_text = str(source).strip().lower()
+    host = _source_host(source_text, str(url))
+
+    if provider in _SOCIAL_PROVIDERS or source_text.startswith("reddit:") or _host_matches(host, _SOCIAL_DOMAINS):
+        return "social"
+    if provider in _LOCAL_FILE_PROVIDERS:
+        return "local_files"
+    if _host_matches(host, _PROPER_NEWS_DOMAINS) or provider in _PROPER_NEWS_PROVIDERS:
+        return "proper_news"
+    if provider in _GENERIC_WEB_PROVIDERS or source_text.startswith(("web:", "local-web:")):
+        return "generic_web"
+    if not source_text and not provider and not host:
+        return "unknown"
+    return "generic_web"
+
+
+def _string_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column in frame.columns:
+        return frame[column].fillna("").astype(str)
+    return pd.Series([""] * len(frame), index=frame.index, dtype="object")
+
+
+def annotate_source_groups(frame: pd.DataFrame) -> pd.DataFrame:
+    annotated = frame.copy()
+    if annotated.empty:
+        if "source_group" not in annotated.columns:
+            annotated["source_group"] = pd.Series(dtype="object")
+        if "source_group_label" not in annotated.columns:
+            annotated["source_group_label"] = pd.Series(dtype="object")
+        return annotated
+
+    sources = _string_column(annotated, "source")
+    providers = _string_column(annotated, "provider_name")
+    urls = _string_column(annotated, "url")
+    existing = _string_column(annotated, "source_group")
+    groups: list[str] = []
+    for source, provider, url, current_group in zip(sources, providers, urls, existing):
+        normalized = current_group.strip().lower()
+        groups.append(normalized if normalized in SOURCE_GROUP_LABELS else classify_source_group(source, provider, url))
+    annotated["source_group"] = groups
+    annotated["source_group_label"] = [source_group_label(group) for group in groups]
+    return annotated
+
 
 def _compact_fx_pair(value: str) -> str | None:
     compact = str(value).upper().strip().removesuffix("=X").replace("/", "").replace("-", "").replace("_", "")
@@ -179,6 +344,8 @@ class DailySentimentProvider(ABC):
         - confidence
         - article_count
         - positive_prob / negative_prob / neutral_prob
+        - sample_urls (optional, pipe-separated article URLs for this ticker-day)
+        - sample_headlines (optional, pipe-separated headline texts)
         """
 
 
@@ -224,6 +391,7 @@ def deduplicate_headlines(headlines: pd.DataFrame, config: HeadlineDedupConfig =
     if "summary" not in frame.columns:
         frame["summary"] = ""
     frame["summary"] = frame["summary"].fillna("").astype(str)
+    frame = annotate_source_groups(frame)
 
     frame["_url_key"] = frame["url"].str.strip().str.lower()
     frame["_text_key"] = frame["title"].where(frame["title"].str.len() > 0, frame["headline"]).map(_normalize_text_key)
@@ -258,9 +426,15 @@ def deduplicate_headlines(headlines: pd.DataFrame, config: HeadlineDedupConfig =
             sources = {str(new_row.get("source", ""))} if new_row.get("source") else set()
             providers = {str(new_row.get("provider_name", ""))} if new_row.get("provider_name") else set()
             urls = {str(new_row.get("url", ""))} if new_row.get("url") else set()
+            source_groups = {str(new_row.get("source_group", ""))} if new_row.get("source_group") else {"unknown"}
+            source_group = preferred_source_group(source_groups)
+            new_row["source_group"] = source_group
+            new_row["source_group_label"] = source_group_label(source_group)
             new_row["source_list"] = _as_sorted_csv(sources)
             new_row["provider_list"] = _as_sorted_csv(providers)
             new_row["url_list"] = _as_sorted_csv(urls)
+            new_row["source_group_list"] = _as_sorted_csv(source_groups)
+            new_row["source_group_count"] = len(source_groups)
             new_row["source_count"] = len(sources) or 1
             new_row["duplicate_count"] = 1
             merged_rows.append(new_row)
@@ -279,16 +453,23 @@ def deduplicate_headlines(headlines: pd.DataFrame, config: HeadlineDedupConfig =
             source_set = set(filter(None, str(existing.get("source_list", "")).split(",")))
             provider_set = set(filter(None, str(existing.get("provider_list", "")).split(",")))
             url_set = set(filter(None, str(existing.get("url_list", "")).split(",")))
+            source_group_set = set(filter(None, str(existing.get("source_group_list", "")).split(",")))
             if row.get("source"):
                 source_set.add(str(row["source"]))
             if row.get("provider_name"):
                 provider_set.add(str(row["provider_name"]))
             if row.get("url"):
                 url_set.add(str(row["url"]))
+            if row.get("source_group"):
+                source_group_set.add(str(row["source_group"]))
 
             existing["source_list"] = _as_sorted_csv(source_set)
             existing["provider_list"] = _as_sorted_csv(provider_set)
             existing["url_list"] = _as_sorted_csv(url_set)
+            existing["source_group_list"] = _as_sorted_csv(source_group_set)
+            existing["source_group"] = preferred_source_group(source_group_set)
+            existing["source_group_label"] = source_group_label(str(existing["source_group"]))
+            existing["source_group_count"] = len(source_group_set) if source_group_set else 1
             existing["source_count"] = len(source_set) if source_set else 1
             existing["duplicate_count"] = int(existing.get("duplicate_count", 1)) + 1
             if not existing.get("source") and row.get("source"):
@@ -345,6 +526,7 @@ def _provider_display_label(provider: HeadlineProvider) -> str:
         "LocalWebSearch": "Local web search",
         "NewsAPI": "NewsAPI",
         "RSS": "RSS",
+        "StockTwits": "StockTwits",
         "WebResearch": "Web research",
     }
     if label.endswith("LocalWebSearch"):
@@ -548,7 +730,35 @@ class LightweightExtractiveSummarizer:
         return summary[: self.max_summary_chars]
 
 
+def _extract_article_bs4(html_text: str, max_text_chars: int = 12_000) -> dict[str, str]:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_text, "lxml")
+    for tag in soup.find_all(["script", "style", "noscript", "svg", "canvas", "form", "nav", "footer"]):
+        tag.decompose()
+
+    title = soup.title.string.strip() if soup.title and soup.title.string else ""
+
+    description = ""
+    for attr_name in ("name", "property"):
+        for attr_val in ("description", "og:description", "twitter:description"):
+            tag = soup.find("meta", attrs={attr_name: attr_val})
+            if tag and tag.get("content"):
+                description = _strip_markup(tag["content"])
+                break
+        if description:
+            break
+
+    text = soup.get_text(separator="\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text)[:max_text_chars]
+    return {"title": title, "description": description, "body": text}
+
+
 def _extract_article(html_text: str, max_text_chars: int = 12_000) -> dict[str, str]:
+    try:
+        return _extract_article_bs4(html_text, max_text_chars=max_text_chars)
+    except ImportError:
+        pass
     extractor = _HTMLArticleExtractor(max_text_chars=max_text_chars)
     extractor.feed(html_text)
     return {
@@ -1898,6 +2108,8 @@ class LocalNewsFileProvider(HeadlineProvider):
             filtered["relevance"] = 1.0
         if "source" not in filtered.columns:
             filtered["source"] = self.path.stem
+        if "provider_name" not in filtered.columns:
+            filtered["provider_name"] = self.__class__.__name__
         return filtered
 
 

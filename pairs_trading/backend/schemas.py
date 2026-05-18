@@ -31,6 +31,7 @@ class SentimentProvider(StrEnum):
     NEWSAPI = "newsapi"
     ALPHAVANTAGE = "alphavantage"
     BENZINGA = "benzinga"
+    STOCKTWITS = "stocktwits"
 
 
 def _normalized_date(value: str, *, field_name: str) -> str:
@@ -318,6 +319,7 @@ class SentimentAccumulationRequest(BaseModel):
     newsapi_api_key: str | None = Field(default=None, description="Optional NewsAPI.org key. Backend env NEWSAPI_API_KEY is also supported.")
     alphavantage_api_key: str | None = Field(default=None, description="Optional Alpha Vantage key. Backend env ALPHAVANTAGE_API_KEY is also supported.")
     benzinga_api_key: str | None = Field(default=None, description="Optional Benzinga key. Backend env BENZINGA_API_KEY is also supported.")
+    stocktwits_access_token: str | None = Field(default=None, description="Personal access token for StockTwits API (stocktwits.com/settings/apps). Backend env STOCKTWITS_ACCESS_TOKEN is also supported.")
     output_dir: Path | None = Field(default=None, description="Development-only output directory. Production rejects raw paths and registers tenant dataset ids.")
     use_finbert: bool = Field(default=False, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
     local_finbert_only: bool = Field(default=True, description="Do not download FinBERT during UI runs.")

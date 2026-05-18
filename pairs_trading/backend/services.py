@@ -29,7 +29,19 @@ from ..apps.cli import (
     run_stat_arb_pipeline,
 )
 from ..operations.paper_trading import run_paper_batch
-from ..data.news import AlphaVantageNewsProvider, BenzingaNewsProvider, CompositeHeadlineProvider, LocalNewsFileProvider, LocalWebSearchHeadlineProvider, NewsAPIHeadlineProvider, RSSHeadlineProvider, WebResearchHeadlineProvider
+from ..data.news import (
+    AlphaVantageNewsProvider,
+    BenzingaNewsProvider,
+    CompositeHeadlineProvider,
+    LocalNewsFileProvider,
+    LocalWebSearchHeadlineProvider,
+    NewsAPIHeadlineProvider,
+    RSSHeadlineProvider,
+    WebResearchHeadlineProvider,
+    annotate_source_groups,
+    source_group_description,
+)
+from ..data.stocktwits import StockTwitsHeadlineProvider
 from ..data.sentiment_accumulator import ShadowSentimentAccumulator
 from ..features.sentiment import FinBERTSentimentModel, build_best_available_sentiment_model
 from ..platform import build_metadata_store
@@ -1766,6 +1778,12 @@ class SentimentService:
                 raise ValueError("Benzinga accumulation requires a Benzinga key or BENZINGA_API_KEY.")
             providers.append(BenzingaNewsProvider(api_key=api_key))
 
+        if "stocktwits" in selected:
+            token = request.stocktwits_access_token or os.getenv("STOCKTWITS_ACCESS_TOKEN")
+            if not token:
+                raise ValueError("StockTwits accumulation requires a stocktwits_access_token or STOCKTWITS_ACCESS_TOKEN.")
+            providers.append(StockTwitsHeadlineProvider(access_token=token))
+
         if not providers:
             raise ValueError("Choose at least one sentiment source.")
         return CompositeHeadlineProvider(providers, skip_errors=True)
@@ -1972,10 +1990,13 @@ class SentimentService:
             scored["timestamp"] = self._naive_timestamp(scored["timestamp"])
         if not daily.empty and "date" in daily.columns:
             daily["date"] = self._naive_timestamp(daily["date"]).dt.normalize()
+        raw = annotate_source_groups(raw)
+        scored = annotate_source_groups(scored)
 
         daily_points: list[dict[str, Any]] = []
         ticker_summary: list[dict[str, Any]] = []
         source_summary: list[dict[str, Any]] = []
+        source_group_summary: list[dict[str, Any]] = []
 
         if not daily.empty:
             daily = daily.sort_values(["date", "ticker"]).reset_index(drop=True)
@@ -1997,13 +2018,23 @@ class SentimentService:
         if not raw.empty:
             source_col = "source" if "source" in raw.columns else "provider_name"
             if source_col in raw.columns:
+                group_cols = ["source_group", "source_group_label", source_col]
                 source_summary = json_ready(
-                    raw.groupby(source_col, dropna=False)
+                    raw.groupby(group_cols, dropna=False)
                     .size()
                     .reset_index(name="headline_count")
                     .rename(columns={source_col: "source"})
                     .sort_values("headline_count", ascending=False)
                     .to_dict("records")
+                )
+                grouped_sources = (
+                    raw.groupby(["source_group", "source_group_label"], dropna=False)
+                    .size()
+                    .reset_index(name="headline_count")
+                )
+                grouped_sources["description"] = grouped_sources["source_group"].map(source_group_description)
+                source_group_summary = json_ready(
+                    grouped_sources.sort_values("headline_count", ascending=False).to_dict("records")
                 )
 
         headlines = self._headline_preview_frame(raw, metadata)
@@ -2048,10 +2079,12 @@ class SentimentService:
                 "daily_rows": int(len(daily)),
                 "ticker_count": int(daily["ticker"].nunique()) if not daily.empty and "ticker" in daily.columns else 0,
                 "source_count": int(raw["source"].nunique()) if not raw.empty and "source" in raw.columns else 0,
+                "source_group_count": int(raw["source_group"].nunique()) if not raw.empty and "source_group" in raw.columns else 0,
             },
             "daily_points": daily_points,
             "ticker_summary": ticker_summary,
             "source_summary": source_summary,
+            "source_group_summary": source_group_summary,
             "headlines": json_ready(headlines.to_dict("records")),
             "scored_headlines": json_ready(scored_tail.to_dict("records")),
         }

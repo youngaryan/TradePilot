@@ -12,14 +12,24 @@ import { formatDateTime, formatNumber, formatPercent, splitList, splitSymbols, s
 const DEFAULT_NEWS_FILE = "examples/news_headlines.sample.csv";
 const TABLE_PAGE_SIZE = 12;
 const SOURCE_OPTIONS = [
-  { id: "rss", label: "RSS firehose", detail: "Free ticker RSS feeds; default source for live headline flow." },
-  { id: "local_web", label: "Local web search", detail: "Cached RSS/page index; avoids hosted search API rate limits." },
-  { id: "web", label: "GDELT web research", detail: "Broad web discovery; optional because public search APIs can throttle." },
-  { id: "local", label: "Local files", detail: "CSV/parquet headline files; useful for samples and accumulated dumps." },
-  { id: "newsapi", label: "NewsAPI", detail: "Optional API-key supplement for broader publisher coverage." },
-  { id: "alphavantage", label: "Alpha Vantage", detail: "Optional free-tier news sentiment source for top-priority tickers." },
-  { id: "benzinga", label: "Benzinga", detail: "Optional market-news API source when you have a key." }
+  { id: "rss", label: "RSS firehose", group: "generic_web", detail: "Free ticker RSS feeds; source domain may later classify as proper news." },
+  { id: "local_web", label: "Local web search", group: "generic_web", detail: "Cached RSS/page index; avoids hosted search API rate limits." },
+  { id: "web", label: "GDELT web research", group: "generic_web", detail: "Broad web discovery; optional because public search APIs can throttle." },
+  { id: "local", label: "Local files", group: "local_files", detail: "CSV/parquet headline files; useful for samples and accumulated dumps." },
+  { id: "newsapi", label: "NewsAPI", group: "proper_news", detail: "Optional API-key supplement for broader publisher coverage." },
+  { id: "alphavantage", label: "Alpha Vantage", group: "proper_news", detail: "Optional free-tier news sentiment source for top-priority tickers." },
+  { id: "benzinga", label: "Benzinga", group: "proper_news", detail: "Optional market-news API source when you have a key." },
+  { id: "stocktwits", label: "StockTwits", group: "social", detail: "Crowd-sourced social sentiment from StockTwits messages." }
 ];
+const SOURCE_GROUP_OPTIONS = [
+  { id: "ALL", label: "All source groups", detail: "Professional, generic web, social, and local sources together." },
+  { id: "proper_news", label: "Proper news", detail: "Editorial market news providers and known financial publishers." },
+  { id: "generic_web", label: "Generic web", detail: "Broad RSS, local crawl, GDELT, and direct web pages." },
+  { id: "social", label: "Social", detail: "StockTwits, Reddit, and other crowd-sourced messages." },
+  { id: "local_files", label: "Local files", detail: "Uploaded or sample CSV/parquet files." },
+  { id: "unknown", label: "Unknown", detail: "Rows without enough provider metadata to classify." }
+];
+const SOURCE_GROUP_LABELS = new Map(SOURCE_GROUP_OPTIONS.map((group) => [group.id, group.label]));
 
 function isoDate(daysFromToday = 0) {
   const date = new Date();
@@ -51,6 +61,7 @@ function defaultRequest(): SentimentAccumulationRequest {
     newsapi_api_key: null,
     alphavantage_api_key: null,
     benzinga_api_key: null,
+    stocktwits_access_token: null,
     use_finbert: false,
     local_finbert_only: true
   };
@@ -65,24 +76,36 @@ function dateKey(value: unknown) {
   return String(value ?? "").slice(0, 10);
 }
 
+function sourceGroupLabel(value: unknown) {
+  const key = String(value ?? "unknown").trim() || "unknown";
+  return SOURCE_GROUP_LABELS.get(key) ?? key.replaceAll("_", " ");
+}
+
+function sourceGroupOfRow(row: { source_group?: unknown }) {
+  return String(row.source_group ?? "unknown").trim() || "unknown";
+}
+
 function rowMatchesFilters(
   row: Record<string, unknown>,
   filters: {
     tickers: string[];
     start: string;
     end: string;
+    sourceGroup: string;
     source: string;
     text: string;
   }
 ) {
   const ticker = String(row.ticker ?? "").toUpperCase();
   const source = String(row.source ?? row.provider_name ?? "");
+  const sourceGroup = sourceGroupOfRow(row);
   const rowDate = dateKey(row.timestamp ?? row.date);
   const text = [row.headline, row.title, row.summary, row.label].map((value) => String(value ?? "")).join(" ").toLowerCase();
 
   if (filters.tickers.length && !filters.tickers.includes(ticker)) return false;
   if (filters.start && rowDate && rowDate < filters.start) return false;
   if (filters.end && rowDate && rowDate > filters.end) return false;
+  if (filters.sourceGroup !== "ALL" && sourceGroup !== filters.sourceGroup) return false;
   if (filters.source !== "ALL" && source !== filters.source) return false;
   if (filters.text.trim() && !text.includes(filters.text.trim().toLowerCase())) return false;
   return true;
@@ -326,6 +349,7 @@ export function SentimentLab() {
   const [error, setError] = useState<string | null>(null);
   const [selectedTickers, setSelectedTickers] = useState<string[]>([]);
   const [tickerSearch, setTickerSearch] = useState("");
+  const [selectedSourceGroup, setSelectedSourceGroup] = useState("ALL");
   const [selectedSource, setSelectedSource] = useState("ALL");
   const [chartStart, setChartStart] = useState("");
   const [chartEnd, setChartEnd] = useState("");
@@ -535,18 +559,49 @@ export function SentimentLab() {
     for (const row of dataset?.scored_headlines ?? []) if (row.ticker) tickers.add(String(row.ticker).toUpperCase());
     return Array.from(tickers).sort();
   }, [dataset]);
-  const availableSources = useMemo(() => {
+  const availableSourcesForGroup = useMemo(() => {
     const sources = new Set<string>();
-    for (const row of dataset?.headlines ?? []) if (row.source) sources.add(String(row.source));
+    for (const summary of dataset?.source_summary ?? []) {
+      if (selectedSourceGroup !== "ALL" && sourceGroupOfRow(summary) !== selectedSourceGroup) continue;
+      if (summary.source) sources.add(String(summary.source));
+    }
+    if (sources.size) return Array.from(sources).sort();
+    for (const row of dataset?.headlines ?? []) {
+      if (selectedSourceGroup !== "ALL" && sourceGroupOfRow(row) !== selectedSourceGroup) continue;
+      if (row.source) sources.add(String(row.source));
+    }
     return Array.from(sources).sort();
-  }, [dataset]);
-  const sourceCounts = useMemo(() => {
+  }, [dataset, selectedSourceGroup]);
+  const sourceGroupCounts = useMemo(() => {
+    if (dataset?.source_group_summary?.length) {
+      return dataset.source_group_summary.reduce((map, row) => {
+        const sourceGroup = sourceGroupOfRow(row);
+        map.set(sourceGroup, (map.get(sourceGroup) ?? 0) + Number(row.headline_count ?? 0));
+        return map;
+      }, new Map<string, number>());
+    }
     return (dataset?.headlines ?? []).reduce((map, row) => {
+      const sourceGroup = sourceGroupOfRow(row);
+      map.set(sourceGroup, (map.get(sourceGroup) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>());
+  }, [dataset]);
+  const sourceCountsForGroup = useMemo(() => {
+    if (dataset?.source_summary?.length) {
+      return dataset.source_summary.reduce((map, row) => {
+        if (selectedSourceGroup !== "ALL" && sourceGroupOfRow(row) !== selectedSourceGroup) return map;
+        const source = String(row.source ?? "unknown");
+        map.set(source, (map.get(source) ?? 0) + Number(row.headline_count ?? 0));
+        return map;
+      }, new Map<string, number>());
+    }
+    return (dataset?.headlines ?? []).reduce((map, row) => {
+      if (selectedSourceGroup !== "ALL" && sourceGroupOfRow(row) !== selectedSourceGroup) return map;
       const source = String(row.source ?? "unknown");
       map.set(source, (map.get(source) ?? 0) + 1);
       return map;
     }, new Map<string, number>());
-  }, [dataset]);
+  }, [dataset, selectedSourceGroup]);
   const availableDateRange = useMemo(() => {
     const dates = [
       ...(dataset?.daily_points ?? []).map((point) => dateKey(point.date)),
@@ -593,10 +648,11 @@ export function SentimentLab() {
       tickers: selectedTickers,
       start: chartStart,
       end: chartEnd,
+      sourceGroup: selectedSourceGroup,
       source: selectedSource,
       text: headlineSearch
     }),
-    [selectedTickers, chartStart, chartEnd, selectedSource, headlineSearch]
+    [selectedTickers, chartStart, chartEnd, selectedSourceGroup, selectedSource, headlineSearch]
   );
   const filteredHeadlines = useMemo(
     () => (dataset?.headlines ?? []).filter((row) => rowMatchesFilters(row, tableFilters)),
@@ -613,6 +669,19 @@ export function SentimentLab() {
       return map;
     }, new Map<string, number>());
     return Array.from(counts, ([source, headline_count]) => ({ source, headline_count })).sort((a, b) => b.headline_count - a.headline_count);
+  }, [filteredHeadlines]);
+  const filteredSourceGroupSummary = useMemo(() => {
+    const counts = filteredHeadlines.reduce((map, row) => {
+      const sourceGroup = sourceGroupOfRow(row);
+      map.set(sourceGroup, (map.get(sourceGroup) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>());
+    return Array.from(counts, ([source_group, headline_count]) => ({
+      source: sourceGroupLabel(source_group),
+      source_group,
+      source_group_label: sourceGroupLabel(source_group),
+      headline_count
+    })).sort((a, b) => b.headline_count - a.headline_count);
   }, [filteredHeadlines]);
   const headlinePagination = paginate(filteredHeadlines, headlinePage);
   const scoredPagination = paginate(filteredScoredHeadlines, scoredPage);
@@ -637,10 +706,10 @@ export function SentimentLab() {
   }, [availableTickers]);
 
   useEffect(() => {
-    if (availableSources.length <= 1 || (selectedSource !== "ALL" && !availableSources.includes(selectedSource))) {
+    if (availableSourcesForGroup.length <= 1 || (selectedSource !== "ALL" && !availableSourcesForGroup.includes(selectedSource))) {
       setSelectedSource("ALL");
     }
-  }, [availableSources, selectedSource]);
+  }, [availableSourcesForGroup, selectedSource]);
 
   useEffect(() => {
     if (!chartStart && availableDateRange.start) setChartStart(availableDateRange.start);
@@ -679,7 +748,7 @@ export function SentimentLab() {
     setHeadlinePage(1);
     setScoredPage(1);
     setFinancialEventsPage(1);
-  }, [selectedTickers, selectedSource, chartStart, chartEnd, headlineSearch, dataset]);
+  }, [selectedTickers, selectedSourceGroup, selectedSource, chartStart, chartEnd, headlineSearch, dataset]);
 
   return (
     <div className="page-stack">
@@ -720,6 +789,7 @@ export function SentimentLab() {
                   onChange={(event) => setRequest({ ...request, providers: toggleValue(request.providers, source.id, event.target.checked) })}
                 />
                 <strong>{source.label}</strong>
+                <span className="provider-group-tag">{sourceGroupLabel(source.group)}</span>
                 <span>{source.detail}</span>
               </label>
             ))}
@@ -787,6 +857,10 @@ export function SentimentLab() {
             <label htmlFor="sl-benzinga-key">
               Benzinga key
               <input id="sl-benzinga-key" value={request.benzinga_api_key ?? ""} onChange={(event) => setRequest({ ...request, benzinga_api_key: event.target.value || null })} placeholder="Optional unless Benzinga is selected" />
+            </label>
+            <label htmlFor="sl-stocktwits-token">
+              StockTwits token
+              <input id="sl-stocktwits-token" value={request.stocktwits_access_token ?? ""} onChange={(event) => setRequest({ ...request, stocktwits_access_token: event.target.value || null })} placeholder="Optional unless StockTwits is selected" />
             </label>
           </div>
           <div className="hint-card">
@@ -912,16 +986,30 @@ export function SentimentLab() {
             Chart end
             <input id="sl-chart-end" value={chartEnd} onChange={(event) => setChartEnd(event.target.value)} placeholder={availableDateRange.end || "YYYY-MM-DD"} />
           </label>
+          <label htmlFor="sl-source-group-filter">
+            Source group
+            <select id="sl-source-group-filter" value={selectedSourceGroup} onChange={(event) => setSelectedSourceGroup(event.target.value)}>
+              <option value="ALL">All source groups ({formatNumber(dataset?.summary.headline_count ?? 0, 0)} headlines)</option>
+              {SOURCE_GROUP_OPTIONS.filter((group) => group.id !== "ALL").map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.label} ({formatNumber(sourceGroupCounts.get(group.id) ?? 0, 0)})
+                </option>
+              ))}
+            </select>
+            <small>Groups with zero rows are still selectable so you can check whether a run collected that source type.</small>
+          </label>
           <label htmlFor="sl-source-filter">
-            Source filter
-            {availableSources.length <= 1 ? (
-              <input id="sl-source-filter" value={availableSources.length === 1 ? `Only source: ${availableSources[0]}` : "No sources loaded yet"} disabled />
+            Exact source
+            {availableSourcesForGroup.length <= 1 ? (
+              <input id="sl-source-filter" value={availableSourcesForGroup.length === 1 ? `Only source: ${availableSourcesForGroup[0]}` : "No sources loaded yet"} disabled />
             ) : (
               <select id="sl-source-filter" value={selectedSource} onChange={(event) => setSelectedSource(event.target.value)}>
-                <option value="ALL">All sources ({formatNumber(dataset?.summary.headline_count ?? 0, 0)} headlines)</option>
-                {availableSources.map((source) => (
+                <option value="ALL">
+                  All sources in group ({formatNumber(selectedSourceGroup === "ALL" ? dataset?.summary.headline_count ?? 0 : sourceGroupCounts.get(selectedSourceGroup) ?? 0, 0)} headlines)
+                </option>
+                {availableSourcesForGroup.map((source) => (
                   <option key={source} value={source}>
-                    {source} ({formatNumber(sourceCounts.get(source) ?? 0, 0)})
+                    {source} ({formatNumber(sourceCountsForGroup.get(source) ?? 0, 0)})
                   </option>
                 ))}
               </select>
@@ -969,6 +1057,7 @@ export function SentimentLab() {
             className="pill"
             onClick={() => {
               setSelectedTickers([]);
+              setSelectedSourceGroup("ALL");
               setSelectedSource("ALL");
               setHeadlineSearch("");
               setTickerSearch("");
@@ -983,6 +1072,7 @@ export function SentimentLab() {
           <span>{formatNumber(filteredDailyPoints.length, 0)} daily points</span>
           <span>{formatNumber(filteredHeadlines.length, 0)} raw headlines</span>
           <span>{formatNumber(filteredScoredHeadlines.length, 0)} scored headlines</span>
+          <span>{selectedSourceGroup === "ALL" ? "All source groups" : sourceGroupLabel(selectedSourceGroup)}</span>
           <span>{formatNumber(returnedHeadlineCount, 0)} returned rows</span>
           <span>
             Available range {availableDateRange.start || "-"} to {availableDateRange.end || "-"}
@@ -994,7 +1084,7 @@ export function SentimentLab() {
         <SentimentTimelineChart
           points={filteredDailyPoints}
           title={selectedTickers.length ? `${selectedTickerLabel} sentiment timeline` : "All selected sentiment symbols"}
-          detail={`${chartStart || "start"} to ${chartEnd || "end"} | source filter applies to headline tables`}
+          detail={`${chartStart || "start"} to ${chartEnd || "end"} | source group filters apply to headline tables`}
         />
       </Panel>
 
@@ -1035,6 +1125,9 @@ export function SentimentLab() {
           <SentimentTickerBars points={filteredDailyPoints} />
         </Panel>
         <Panel title="News Source Mix" subtitle="Where raw headlines came from">
+          <div className="chart-section-label">Source groups</div>
+          <SentimentSourceBars sources={filteredSourceGroupSummary} />
+          <div className="chart-section-label">Exact sources</div>
           <SentimentSourceBars sources={filteredSourceSummary} />
         </Panel>
       </div>
@@ -1051,8 +1144,10 @@ export function SentimentLab() {
           columns={[
             { key: "timestamp", header: "Time", render: (row) => String(row.timestamp ?? "-").slice(0, 19) },
             { key: "ticker", header: "Ticker", render: (row) => row.ticker ?? "-" },
+            { key: "source_group", header: "Group", render: (row) => sourceGroupLabel(row.source_group) },
             { key: "source", header: "Source", render: (row) => row.source ?? "-" },
             { key: "headline", header: "Headline", render: (row) => row.headline ?? row.title ?? "-" },
+            { key: "url", header: "Link", render: (row) => row.url ? <a href={row.url} target="_blank" rel="noopener noreferrer">Open ↗</a> : "-" },
             { key: "relevance", header: "Relevance", align: "right", render: (row) => formatNumber(row.relevance ?? 0) }
           ]}
         />
@@ -1070,10 +1165,12 @@ export function SentimentLab() {
           columns={[
             { key: "timestamp", header: "Time", render: (row) => String(row.timestamp ?? "-").slice(0, 19) },
             { key: "ticker", header: "Ticker", render: (row) => row.ticker ?? "-" },
+            { key: "source_group", header: "Group", render: (row) => sourceGroupLabel(row.source_group) },
             { key: "label", header: "Label", render: (row) => <Badge label={String(row.label ?? "n/a")} tone={Number(row.score ?? 0) >= 0 ? "good" : "bad"} /> },
             { key: "score", header: "Score", align: "right", render: (row) => formatNumber(row.score ?? 0) },
             { key: "confidence", header: "Confidence", align: "right", render: (row) => formatNumber(row.confidence ?? 0) },
-            { key: "headline", header: "Headline", render: (row) => row.headline ?? row.title ?? "-" }
+            { key: "headline", header: "Headline", render: (row) => row.headline ?? row.title ?? "-" },
+            { key: "url", header: "Link", render: (row) => row.url ? <a href={row.url} target="_blank" rel="noopener noreferrer">Open ↗</a> : "-" }
           ]}
         />
       </Panel>

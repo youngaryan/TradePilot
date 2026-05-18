@@ -497,6 +497,7 @@ class NewsSentimentAggregator:
                     "positive_prob",
                     "negative_prob",
                     "neutral_prob",
+                    "sample_urls",
                 ]
             )
 
@@ -506,6 +507,31 @@ class NewsSentimentAggregator:
                 return 0.0
             clipped_weights = weights.loc[valid].clip(lower=1e-6)
             return float(np.average(values.loc[valid], weights=clipped_weights))
+
+        def collect_urls(group: pd.DataFrame) -> str:
+            urls: list[str] = []
+            if "url" in group.columns:
+                for u in group["url"].dropna().unique():
+                    u = str(u).strip()
+                    if u:
+                        urls.append(u)
+            if "url_list" in group.columns:
+                for ul in group["url_list"].dropna():
+                    for u in str(ul).split(","):
+                        u = u.strip()
+                        if u and u not in urls:
+                            urls.append(u)
+            return " | ".join(sorted(urls))
+
+        def collect_headlines(group: pd.DataFrame) -> str:
+            samples: list[str] = []
+            for h in group["headline"].dropna().unique():
+                h = str(h).strip()
+                if h:
+                    samples.append(h)
+                if len(samples) >= 5:
+                    break
+            return " | ".join(samples)
 
         rows: list[dict[str, float | str | pd.Timestamp]] = []
         grouped = scored_headlines.groupby(["date", self.ticker_col], sort=True)
@@ -522,6 +548,8 @@ class NewsSentimentAggregator:
                     "positive_prob": weighted_average(group["positive_prob"], weights),
                     "negative_prob": weighted_average(group["negative_prob"], weights),
                     "neutral_prob": weighted_average(group["neutral_prob"], weights),
+                    "sample_urls": collect_urls(group),
+                    "sample_headlines": collect_headlines(group),
                 }
             )
 

@@ -11,6 +11,10 @@ import pandas as pd
 from ..core.portfolio import PortfolioManager
 from ..core.timeframes import TimeframeSpec, TradingMode, resolve_timeframe_spec
 from ..data.events import CachedEventProvider, CompositeEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
+from ..data.fred import FredEventProvider
+from ..data.sec_mda import SecMDAEventProvider
+from ..data.stocktwits import StockTwitsHeadlineProvider
+from ..data.transcripts import AlphaVantageTranscriptProvider, LocalTranscriptFileProvider
 from ..data.market import CachedParquetProvider, YahooFinanceProvider
 from ..data.news import (
     AlphaVantageNewsProvider,
@@ -55,6 +59,7 @@ from ..pipelines import (
 )
 from ..reporting.experiment import ExperimentVisualizer
 from ..research import GraphClusterConfig, PairScreenConfig
+from ..features.regime_overlay import RegimeOverlayConfig
 from ..features.sentiment import FinBERTSentimentModel, SentimentConfig, build_best_available_sentiment_model
 from ..strategies import (
     AdaptiveRegimeStrategy,
@@ -236,6 +241,7 @@ def load_daily_sentiment(
     web_research_query_terms: str = "",
     web_research_max_articles: int = 4,
     web_research_fetch_article_text: bool = True,
+    stocktwits_access_token: str | None = None,
 ):
     def coerce_list(value) -> list[str] | None:
         if value is None:
@@ -314,6 +320,12 @@ def load_daily_sentiment(
             )
         )
 
+    if "stocktwits" in provider_names:
+        token = stocktwits_access_token or os.getenv("STOCKTWITS_ACCESS_TOKEN")
+        if not token:
+            raise ValueError("StockTwits requires --stocktwits-access-token or STOCKTWITS_ACCESS_TOKEN.")
+        providers.append(StockTwitsHeadlineProvider(access_token=token))
+
     if not providers:
         return None
 
@@ -338,18 +350,24 @@ def load_events(
     use_sec_companyfacts: bool,
     include_sec_filings: bool = False,
     sec_filing_forms: list[str] | None = None,
+    use_sec_mda: bool = False,
+    use_transcripts: bool = False,
+    transcript_file: str | None = None,
+    alphavantage_api_key: str | None = None,
 ) -> pd.DataFrame | None:
     providers = []
     if event_file:
         providers.append(LocalEventFileProvider(event_file))
 
-    if not use_sec_companyfacts and not include_sec_filings:
+    sec_sources = use_sec_companyfacts or include_sec_filings or use_sec_mda
+    use_any_events = sec_sources or use_transcripts
+    if not use_any_events:
         if not providers:
             return None
         provider = providers[0] if len(providers) == 1 else CompositeEventProvider(providers)
         return provider.get_events(tickers=tickers, start=start, end=end)
 
-    if (use_sec_companyfacts or include_sec_filings) and not edgar_user_agent:
+    if sec_sources and not edgar_user_agent:
         raise ValueError("SEC EDGAR event loading requires --edgar-user-agent when official SEC event sources are enabled.")
 
     sec_cache_dir = Path(event_cache_dir) / "sec"
@@ -375,6 +393,32 @@ def load_events(
                 cache_dir=Path(event_cache_dir) / "filing_events",
             )
         )
+
+    if use_sec_mda:
+        providers.append(
+            CachedEventProvider(
+                upstream=SecMDAEventProvider(
+                    user_agent=edgar_user_agent or "",
+                    cache_dir=sec_cache_dir,
+                ),
+                cache_dir=Path(event_cache_dir) / "mda_events",
+            )
+        )
+
+    if use_transcripts:
+        if alphavantage_api_key:
+            providers.append(
+                CachedEventProvider(
+                    upstream=AlphaVantageTranscriptProvider(api_key=alphavantage_api_key),
+                    cache_dir=Path(event_cache_dir) / "transcripts",
+                )
+            )
+        elif transcript_file:
+            providers.append(LocalTranscriptFileProvider(transcript_file))
+        else:
+            raise ValueError(
+                "--use-transcripts requires --alphavantage-api-key (premium) or --transcript-file."
+            )
 
     if not providers:
         return None
@@ -791,6 +835,8 @@ def _build_stat_arb_trial_grid(
     *,
     sector_map: Mapping[str, str],
     daily_sentiment: pd.DataFrame | None,
+    fred_events: pd.DataFrame | None = None,
+    regime_config: RegimeOverlayConfig | None = None,
     experiment_name: str,
 ) -> dict[str, SectorStatArbPipeline]:
     common_kwargs = {
@@ -811,6 +857,8 @@ def _build_stat_arb_trial_grid(
         ),
         "daily_sentiment": daily_sentiment,
         "sentiment_config": SentimentConfig() if daily_sentiment is not None else None,
+        "fred_events": fred_events,
+        "regime_config": regime_config,
     }
     return {
         f"{experiment_name}_trial_base": SectorStatArbPipeline(
@@ -944,6 +992,7 @@ def run_stat_arb_pipeline(
     experiment_name: str = "serious_stat_arb",
     price_cache_dir: str = "data/cache",
     sentiment_cache_dir: str = "data/sentiment_cache",
+    event_cache_dir: str = "data/event_cache",
     artifact_root: str = "artifacts/experiments",
     news_provider_names: list[str] | None = None,
     news_files: list[str] | None = None,
@@ -964,6 +1013,9 @@ def run_stat_arb_pipeline(
     web_research_query_terms: str = "",
     web_research_max_articles: int = 4,
     web_research_fetch_article_text: bool = True,
+    stocktwits_access_token: str | None = None,
+    fred_api_key: str | None = None,
+    fred_series: list[str] | None = None,
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
@@ -1009,7 +1061,18 @@ def run_stat_arb_pipeline(
         web_research_query_terms=web_research_query_terms,
         web_research_max_articles=web_research_max_articles,
         web_research_fetch_article_text=web_research_fetch_article_text,
+        stocktwits_access_token=stocktwits_access_token,
     )
+
+    fred_events: pd.DataFrame | None = None
+    regime_config: RegimeOverlayConfig | None = None
+    if fred_api_key:
+        fred_provider = CachedEventProvider(
+            upstream=FredEventProvider(api_key=fred_api_key, series=fred_series),
+            cache_dir=Path(event_cache_dir) / "fred",
+        )
+        fred_events = fred_provider.get_events(tickers=["MACRO"], start=start, end=end)
+        regime_config = RegimeOverlayConfig()
 
     pipeline = SectorStatArbPipeline(
         sector_map=sector_map,
@@ -1039,6 +1102,8 @@ def run_stat_arb_pipeline(
         ),
         daily_sentiment=daily_sentiment,
         sentiment_config=SentimentConfig() if daily_sentiment is not None else None,
+        fred_events=fred_events,
+        regime_config=regime_config,
         name=experiment_name,
     )
 
@@ -1068,6 +1133,8 @@ def run_stat_arb_pipeline(
     trial_strategies = _build_stat_arb_trial_grid(
         sector_map=sector_map,
         daily_sentiment=daily_sentiment,
+        fred_events=fred_events,
+        regime_config=regime_config,
         experiment_name=experiment_name,
     )
     return _run_pipeline_with_validation(
@@ -1555,6 +1622,7 @@ def run_event_driven_pipeline(
     use_sec_companyfacts: bool = False,
     include_sec_filings: bool = False,
     sec_filing_forms: list[str] | None = None,
+    use_sec_mda: bool = False,
     purge_bars: int = 5,
     embargo_bars: int = 0,
     pbo_partitions: int = 8,
@@ -1583,9 +1651,10 @@ def run_event_driven_pipeline(
         use_sec_companyfacts=use_sec_companyfacts,
         include_sec_filings=include_sec_filings,
         sec_filing_forms=sec_filing_forms,
+        use_sec_mda=use_sec_mda,
     )
     if events is None:
-        raise ValueError("Event-driven backtests require --event-file, --use-sec-companyfacts, or --include-sec-filings with --edgar-user-agent.")
+        raise ValueError("Event-driven backtests require --event-file, --use-sec-companyfacts, --include-sec-filings, or --use-sec-mda with --edgar-user-agent.")
 
     pipeline = EventDrivenPipeline(
         events=events,
@@ -1655,6 +1724,7 @@ def run_pead_sentiment_pipeline(
     use_sec_companyfacts: bool = False,
     include_sec_filings: bool = False,
     sec_filing_forms: list[str] | None = None,
+    use_sec_mda: bool = False,
     news_provider_names: list[str] | None = None,
     news_files: list[str] | None = None,
     daily_sentiment_file: str | None = None,
@@ -1709,9 +1779,10 @@ def run_pead_sentiment_pipeline(
         use_sec_companyfacts=use_sec_companyfacts,
         include_sec_filings=include_sec_filings,
         sec_filing_forms=sec_filing_forms,
+        use_sec_mda=use_sec_mda,
     )
     if events is None:
-        raise ValueError("PEAD + Sentiment requires --event-file, --use-sec-companyfacts, or --include-sec-filings with --edgar-user-agent.")
+        raise ValueError("PEAD + Sentiment requires --event-file, --use-sec-companyfacts, --include-sec-filings, or --use-sec-mda with --edgar-user-agent.")
 
     daily_sentiment = load_daily_sentiment(
         tickers=symbols,
@@ -1971,9 +2042,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--news-provider",
         nargs="+",
-        choices=["local", "rss", "local_web", "web", "newsapi", "alphavantage", "benzinga"],
+        choices=["local", "rss", "local_web", "web", "newsapi", "alphavantage", "benzinga", "stocktwits"],
         help="One or more news sources to use before sentiment scoring.",
     )
+    parser.add_argument("--stocktwits-access-token", help="Personal access token for StockTwits API.")
     parser.add_argument("--news-file", nargs="*", help="One or more CSV/parquet files of raw news headlines.")
     parser.add_argument("--rss-feed", nargs="*", help="Optional RSS feed URLs. Use {ticker} in a URL for per-symbol feeds.")
     parser.add_argument("--local-web-search-feed", nargs="*", help="Optional RSS/Atom feed URLs for cached local web search. Use {ticker} for per-symbol feeds.")
@@ -1995,8 +2067,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event-file", help="CSV or parquet of standardized event data.")
     parser.add_argument("--use-sec-companyfacts", action="store_true", help="Build EDGAR events from SEC company facts.")
     parser.add_argument("--include-sec-filings", action="store_true", help="Add official SEC filing events such as 8-K earnings releases, 10-Qs, and 10-Ks.")
+    parser.add_argument("--use-sec-mda", action="store_true", help="Extract and score MD&A sections from SEC 10-K/10-Q filings with the Loughran-McDonald dictionary.")
+    parser.add_argument("--use-transcripts", action="store_true", help="Score earnings call transcripts for event-driven pipelines using the LM dictionary.")
+    parser.add_argument("--transcript-file", help="Path to parquet or CSV of pre-downloaded earnings call transcripts. Requires columns: timestamp, ticker, transcript_text.")
     parser.add_argument("--sec-filing-forms", nargs="*", help="SEC filing forms to include for official event timestamps, e.g. 8-K 10-Q 10-K.")
     parser.add_argument("--edgar-user-agent", help="User-Agent string for SEC requests, e.g. 'YourName [email@example.com]'.")
+    parser.add_argument("--fred-api-key", help="API key for FRED (Federal Reserve Economic Data).")
+    parser.add_argument("--fred-series", nargs="*", default=None, help="FRED series to fetch (default: all). Options: GDP, UNEMPLOYMENT, FEDFUNDS, CPI, RECESSION_PROB, YIELD_CURVE, PMI, INDUSTRIAL_PROD, CONSUMER_SENT.")
     parser.add_argument("--pead-holding-period-bars", type=int, default=5, help="Post-event holding period for PEAD + sentiment.")
     parser.add_argument("--pead-entry-threshold", type=float, default=0.20, help="Combined event/sentiment threshold for PEAD + sentiment.")
     parser.add_argument("--pead-event-weight", type=float, default=0.45, help="Weight on event/fundamental proxy score in PEAD + sentiment.")
@@ -2106,6 +2183,7 @@ def main() -> None:
             experiment_name=experiment_name,
             price_cache_dir=args.price_cache_dir,
             sentiment_cache_dir=args.sentiment_cache_dir,
+            event_cache_dir=args.event_cache_dir,
             artifact_root=args.artifact_root,
             news_provider_names=args.news_provider,
             news_files=args.news_file,
@@ -2126,10 +2204,14 @@ def main() -> None:
             web_research_query_terms=args.web_research_query_terms,
             web_research_max_articles=args.web_research_max_articles,
             web_research_fetch_article_text=not args.web_research_metadata_only,
+            stocktwits_access_token=args.stocktwits_access_token,
+            fred_api_key=args.fred_api_key,
+            fred_series=args.fred_series,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,
         )
+
     elif args.pipeline == "graph_stat_arb":
         run_output = run_graph_stat_arb_pipeline(
             sector_map_path=args.sector_map,
@@ -2183,6 +2265,7 @@ def main() -> None:
             use_sec_companyfacts=args.use_sec_companyfacts,
             include_sec_filings=args.include_sec_filings,
             sec_filing_forms=args.sec_filing_forms,
+            use_sec_mda=args.use_sec_mda,
             news_provider_names=args.news_provider,
             news_files=args.news_file,
             daily_sentiment_file=args.daily_sentiment_file,
@@ -2229,6 +2312,7 @@ def main() -> None:
             use_sec_companyfacts=args.use_sec_companyfacts,
             include_sec_filings=args.include_sec_filings,
             sec_filing_forms=args.sec_filing_forms,
+            use_sec_mda=args.use_sec_mda,
             purge_bars=args.validation_purge_bars,
             embargo_bars=args.validation_embargo_bars,
             pbo_partitions=args.validation_pbo_partitions,

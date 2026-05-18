@@ -14,6 +14,11 @@ from ..features.sentiment import (
     apply_sentiment_overlay,
     build_pair_sentiment_overlay,
 )
+from ..features.regime_overlay import (
+    RegimeOverlayConfig,
+    apply_regime_overlay,
+    build_regime_overlay,
+)
 from ..strategies import KalmanPairsStrategy, SectorResidualMeanReversionStrategy
 
 
@@ -69,6 +74,8 @@ class SectorStatArbPipeline(WalkForwardStrategy):
         stat_arb_config: StatArbConfig = StatArbConfig(),
         daily_sentiment: pd.DataFrame | None = None,
         sentiment_config: SentimentConfig | None = None,
+        fred_events: pd.DataFrame | None = None,
+        regime_config: RegimeOverlayConfig | None = None,
         name: str = "sector_stat_arb",
     ) -> None:
         self.sector_map = dict(sector_map)
@@ -77,6 +84,8 @@ class SectorStatArbPipeline(WalkForwardStrategy):
         self.stat_arb_config = stat_arb_config
         self.daily_sentiment = daily_sentiment
         self.sentiment_config = sentiment_config
+        self.fred_events = fred_events
+        self.regime_config = regime_config
         self.name = name
 
     def _flat_output(self, index: pd.Index, reason: str) -> StrategyOutput:
@@ -180,6 +189,19 @@ class SectorStatArbPipeline(WalkForwardStrategy):
                         sentiment_overlay=overlay,
                         config=self.sentiment_config,
                     )
+
+        if self.fred_events is not None and self.regime_config is not None:
+            regime_overlay = build_regime_overlay(
+                fred_events=self.fred_events,
+                index=test_data.index,
+                config=self.regime_config,
+            )
+            for pair_name in list(pair_outputs.keys()):
+                pair_outputs[pair_name] = apply_regime_overlay(
+                    strategy_output=pair_outputs[pair_name],
+                    regime_overlay=regime_overlay,
+                    config=self.regime_config,
+                )
 
         return pair_outputs, ranked_pairs, selected_pairs, residual_symbols
 

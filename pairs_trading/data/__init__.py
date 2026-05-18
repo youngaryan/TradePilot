@@ -1,7 +1,10 @@
 """Market, news, and event data provider interfaces."""
 
 from .events import CachedEventProvider, CompositeEventProvider, LocalEventFileProvider, SecCompanyFactsEventProvider, SecCompanyFilingsEventProvider
+from .fred import FredEventProvider
 from .market import CachedParquetProvider, MarketDataProvider, YahooFinanceProvider
+from .stocktwits import StockTwitsHeadlineProvider
+from .transcripts import AlphaVantageTranscriptProvider, LocalTranscriptFileProvider
 from .news import (
     AlphaVantageNewsProvider,
     BenzingaNewsProvider,
@@ -19,6 +22,7 @@ from .sentiment_accumulator import ShadowSentimentAccumulator, SentimentAccumula
 
 __all__ = [
     "AlphaVantageNewsProvider",
+    "AlphaVantageTranscriptProvider",
     "BenzingaNewsProvider",
     "CachedEventProvider",
     "CachedNewsSentimentProvider",
@@ -26,10 +30,12 @@ __all__ = [
     "CompositeEventProvider",
     "CompositeHeadlineProvider",
     "DailySentimentFileProvider",
+    "FredEventProvider",
     "HeadlineDedupConfig",
     "HeadlineProvider",
     "LocalEventFileProvider",
     "LocalNewsFileProvider",
+    "LocalTranscriptFileProvider",
     "MarketDataProvider",
     "NewsAPIHeadlineProvider",
     "RSSHeadlineProvider",
@@ -37,6 +43,7 @@ __all__ = [
     "SecCompanyFilingsEventProvider",
     "SentimentAccumulationResult",
     "ShadowSentimentAccumulator",
+    "StockTwitsHeadlineProvider",
     "YahooFinanceProvider",
     "deduplicate_headlines",
 ]

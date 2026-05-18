@@ -1210,10 +1210,35 @@ textarea:focus {
   line-height: 1.35;
 }
 
+.provider-check .provider-group-tag {
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #0f4f5f;
+  background: rgba(224, 242, 254, 0.86);
+  border: 1px solid rgba(14, 116, 144, 0.2);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .sentiment-filter-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.chart-section-label {
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chart-section-label + div {
+  margin-bottom: 14px;
 }
 
 .matrix-comparison-grid {

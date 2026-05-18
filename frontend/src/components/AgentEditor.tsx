@@ -262,10 +262,10 @@ export function AgentEditor({
             </label>
             <label htmlFor="lo-news-providers">
               News providers
-              <input id="lo-news-providers" value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="rss local_web local newsapi alphavantage benzinga" />
+              <input id="lo-news-providers" value={(agent.news_provider_names ?? []).join(" ")} onChange={(event) => onChange({ ...agent, news_provider_names: splitList(event.target.value) })} placeholder="rss local_web local newsapi alphavantage benzinga stocktwits" />
             </label>
             <div className="provider-check-grid provider-check-grid--compact">
-              {["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga"].map((provider) => (
+              {["rss", "local_web", "web", "local", "newsapi", "alphavantage", "benzinga", "stocktwits"].map((provider) => (
                 <label key={provider} className="checkbox-line" htmlFor={`lo-${provider}`}>
                   <input
                     id={`lo-${provider}`}
@@ -316,6 +316,10 @@ export function AgentEditor({
             <label htmlFor="lo-newsapi-key">
               NewsAPI key
               <input id="lo-newsapi-key" value={agent.newsapi_api_key ?? ""} onChange={(event) => onChange({ ...agent, newsapi_api_key: event.target.value || null })} placeholder="optional; or set NEWSAPI_API_KEY in the backend environment" />
+            </label>
+            <label htmlFor="lo-stocktwits-token">
+              StockTwits token
+              <input id="lo-stocktwits-token" value={agent.stocktwits_access_token ?? ""} onChange={(event) => onChange({ ...agent, stocktwits_access_token: event.target.value || null })} placeholder="optional; or set STOCKTWITS_ACCESS_TOKEN in the backend environment" />
             </label>
             <label htmlFor="lo-news-topics">
               News topics

@@ -10,6 +10,8 @@ from .evaluator import (
     report_to_markdown,
     run_evaluation,
 )
+from .lm_dict import LoughranMcDonaldScorer
+from .regime_overlay import RegimeOverlayConfig, apply_regime_overlay, build_regime_overlay
 from .sentiment import (
     BaseSentimentModel,
     EnsembleSentimentModel,
@@ -43,6 +45,10 @@ __all__ = [
     "get_dataset",
     "list_datasets",
     "load_dataset",
+    "LoughranMcDonaldScorer",
+    "RegimeOverlayConfig",
+    "apply_regime_overlay",
+    "build_regime_overlay",
     "report_to_dict",
     "report_to_json",
     "report_to_markdown",

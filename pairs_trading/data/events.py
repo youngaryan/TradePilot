@@ -5,12 +5,47 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
+import time
+from threading import Lock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
+
+
+class _RateLimiter:
+    """Rate-limits requests and retries with exponential backoff on 429/503."""
+
+    def __init__(self, requests_per_second: float = 8.0, max_retries: int = 3, base_backoff: float = 1.0) -> None:
+        self.min_interval = 1.0 / requests_per_second
+        self.max_retries = max_retries
+        self.base_backoff = base_backoff
+        self._last_call = 0.0
+        self._lock = Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            elapsed = time.monotonic() - self._last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last_call = time.monotonic()
+
+    def fetch_json(self, url: str, user_agent: str, timeout: float) -> dict:
+        for attempt in range(self.max_retries):
+            self.wait()
+            try:
+                request = Request(url, headers={"User-Agent": user_agent})
+                with urlopen(request, timeout=timeout) as response:
+                    payload = response.read().decode("utf-8")
+                return json.loads(payload)
+            except HTTPError as e:
+                if e.code in (429, 503) and attempt < self.max_retries - 1:
+                    time.sleep(self.base_backoff * (2 ** attempt))
+                    continue
+                raise
+        raise RuntimeError("Exhausted retries")
 
 
 EVENT_COLUMNS = [
@@ -234,12 +269,10 @@ class SecCompanyFactsEventProvider(EventProvider):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.timeout_seconds = timeout_seconds
+        self._rate_limiter = _RateLimiter()
 
     def _fetch_json(self, url: str) -> dict:
-        request = Request(url, headers={"User-Agent": self.user_agent})
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            payload = response.read().decode("utf-8")
-        return json.loads(payload)
+        return self._rate_limiter.fetch_json(url, self.user_agent, self.timeout_seconds)
 
     def _ticker_map_path(self) -> Path:
         return self.cache_dir / "company_tickers.json"
@@ -498,12 +531,10 @@ class SecCompanyFilingsEventProvider(EventProvider):
         self.forms = tuple(dict.fromkeys((forms or self.DEFAULT_FORMS)))
         self.timeout_seconds = timeout_seconds
         self.include_historical_files = include_historical_files
+        self._rate_limiter = _RateLimiter()
 
     def _fetch_json(self, url: str) -> dict:
-        request = Request(url, headers={"User-Agent": self.user_agent})
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            payload = response.read().decode("utf-8")
-        return json.loads(payload)
+        return self._rate_limiter.fetch_json(url, self.user_agent, self.timeout_seconds)
 
     def _ticker_map_path(self) -> Path:
         return self.cache_dir / "company_tickers.json"

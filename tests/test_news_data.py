@@ -12,6 +12,8 @@ from pairs_trading.data.news import (
     DailySentimentFileProvider,
     HeadlineProvider,
     LocalNewsFileProvider,
+    annotate_source_groups,
+    classify_source_group,
 )
 from pairs_trading.data.sentiment_accumulator import ShadowSentimentAccumulator
 from pairs_trading.features.sentiment import BaseSentimentModel
@@ -63,6 +65,7 @@ class NewsProviderTests(unittest.TestCase):
         self.assertEqual(list(headlines["ticker"].unique()), ["AAA"])
         self.assertEqual(len(headlines), 2)
         self.assertEqual(headlines["headline"].tolist(), ["A", "C"])
+        self.assertEqual(headlines["provider_name"].unique().tolist(), ["LocalNewsFileProvider"])
 
     def test_cached_news_sentiment_provider_builds_and_reuses_daily_sentiment(self) -> None:
         data_dir = fresh_test_dir("artifacts/test_news/cache")
@@ -150,6 +153,62 @@ class NewsProviderTests(unittest.TestCase):
         self.assertEqual(int(headlines.loc[0, "duplicate_count"]), 2)
         self.assertIn("source_one", headlines.loc[0, "source_list"])
         self.assertIn("source_two", headlines.loc[0, "source_list"])
+
+    def test_headline_source_groups_distinguish_news_web_social_and_local_rows(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "source": ["web:reuters.com", "web:example-blog.test", "StockTwits", "manual_upload"],
+                "provider_name": [
+                    "WebResearchHeadlineProvider",
+                    "WebResearchHeadlineProvider",
+                    "StockTwitsHeadlineProvider",
+                    "LocalNewsFileProvider",
+                ],
+                "url": [
+                    "https://www.reuters.com/markets/story",
+                    "https://example-blog.test/story",
+                    "https://stocktwits.com/symbol/AAA",
+                    "",
+                ],
+            }
+        )
+
+        grouped = annotate_source_groups(frame)
+
+        self.assertEqual(grouped["source_group"].tolist(), ["proper_news", "generic_web", "social", "local_files"])
+        self.assertEqual(classify_source_group(source="finance.yahoo.com"), "proper_news")
+
+    def test_deduped_story_keeps_auditable_source_group_list(self) -> None:
+        frame_one = pd.DataFrame(
+            {
+                "timestamp": ["2024-01-01 09:00:00"],
+                "ticker": ["AAA"],
+                "headline": ["AAA beats estimates and raises guidance"],
+                "title": ["AAA beats estimates"],
+                "source": ["web:reuters.com"],
+                "url": ["https://example.com/syndicated-story"],
+                "relevance": [0.9],
+            }
+        )
+        frame_two = pd.DataFrame(
+            {
+                "timestamp": ["2024-01-01 09:02:00"],
+                "ticker": ["AAA"],
+                "headline": ["AAA beats estimates and raises guidance"],
+                "title": ["AAA beats estimates"],
+                "source": ["web:example-blog.test"],
+                "url": ["https://example.com/syndicated-story"],
+                "relevance": [0.7],
+            }
+        )
+
+        provider = CompositeHeadlineProvider([StubHeadlineProvider(frame_one), StubHeadlineProvider(frame_two)])
+        headlines = provider.get_headlines(["AAA"], "2024-01-01", "2024-01-02")
+
+        self.assertEqual(len(headlines), 1)
+        self.assertEqual(headlines.loc[0, "source_group"], "proper_news")
+        self.assertIn("proper_news", headlines.loc[0, "source_group_list"])
+        self.assertIn("generic_web", headlines.loc[0, "source_group_list"])
 
     def test_shadow_accumulator_persists_raw_scored_and_daily_sentiment(self) -> None:
         data_dir = fresh_test_dir("artifacts/test_news/accumulator")

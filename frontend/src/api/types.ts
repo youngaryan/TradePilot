@@ -129,6 +129,9 @@ export interface PaperAgentConfig {
   web_research_max_articles?: number;
   web_research_fetch_article_text?: boolean;
   newsapi_api_key?: string | null;
+  alphavantage_api_key?: string | null;
+  benzinga_api_key?: string | null;
+  stocktwits_access_token?: string | null;
   use_finbert?: boolean;
   local_finbert_only?: boolean;
   news_topics?: string[];
@@ -1170,6 +1173,7 @@ export interface SentimentAccumulationRequest {
   newsapi_api_key?: string | null;
   alphavantage_api_key?: string | null;
   benzinga_api_key?: string | null;
+  stocktwits_access_token?: string | null;
   use_finbert: boolean;
   local_finbert_only: boolean;
 }
@@ -1214,6 +1218,9 @@ export interface SentimentTickerSummary {
 export interface SentimentSourceSummary {
   source: string;
   headline_count: number;
+  source_group?: string;
+  source_group_label?: string;
+  description?: string;
 }
 
 export interface SentimentHeadline {
@@ -1223,6 +1230,8 @@ export interface SentimentHeadline {
   title?: string;
   summary?: string;
   source?: string;
+  source_group?: string;
+  source_group_label?: string;
   url?: string;
   relevance?: number;
   score?: number;
@@ -1312,10 +1321,12 @@ export interface SentimentDatasetPayload {
     daily_rows: number;
     ticker_count: number;
     source_count: number;
+    source_group_count?: number;
   };
   daily_points: SentimentDailyPoint[];
   ticker_summary: SentimentTickerSummary[];
   source_summary: SentimentSourceSummary[];
+  source_group_summary?: SentimentSourceSummary[];
   headlines: SentimentHeadline[];
   scored_headlines: SentimentHeadline[];
 }
