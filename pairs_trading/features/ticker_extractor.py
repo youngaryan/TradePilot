@@ -128,15 +128,21 @@ def _load_kb() -> dict[str, list[str]]:
     return kb
 
 
-def _install_spacy_model(model: str) -> None:
+def _install_spacy_model(model: str) -> bool:
     try:
         import spacy  # noqa: F401
         spacy.load(model)
+        return True
     except (ImportError, OSError):
-        logger.info("Downloading spaCy model '%s'...", model)
-        subprocess.check_call(
-            [sys.executable, "-m", "spacy", "download", model],
-        )
+        try:
+            logger.info("Downloading spaCy model '%s'...", model)
+            subprocess.check_call(
+                [sys.executable, "-m", "spacy", "download", model],
+            )
+            return True
+        except (subprocess.CalledProcessError, ImportError, OSError):
+            logger.warning("spaCy model '%s' unavailable — falling back to regex-only mode", model)
+            return False
 
 
 class TickerExtractor:
@@ -144,9 +150,11 @@ class TickerExtractor:
     _lock = Lock()
 
     def __init__(self, model: str = "en_core_web_sm") -> None:
-        _install_spacy_model(model)
-        import spacy
-        self.nlp = spacy.load(model)
+        if _install_spacy_model(model):
+            import spacy
+            self.nlp = spacy.load(model)
+        else:
+            self.nlp = None
         self._kb = _load_kb()
         self._kb_lower: dict[str, list[str]] = {k.lower(): v for k, v in self._kb.items()}
         self._ticker_regions: dict[str, str] = self._build_ticker_regions()
@@ -201,36 +209,42 @@ class TickerExtractor:
         if not text or not text.strip():
             return []
         found: set[str] = set()
-        doc = self.nlp(text.strip()[:10_000])
-        for ent in doc.ents:
-            if ent.label_ in ("ORG", "PERSON"):
-                kb_tickers = self._kb_lookup(ent.text)
-                found.update(kb_tickers)
-        found.update(self._regex_tickers(text, requested=None))
-        uk_orgs = [
-            ent.text for ent in doc.ents
-            if ent.label_ in ("ORG", "GPE")
-            and any(word in ent.text.lower() for word in ("ltd", "limited", "plc", "llp"))
-        ]
-        for name in uk_orgs:
-            found.update(self._kb_lookup(name))
-        known_exchanges = {"NYSE", "NASDAQ", "AMEX", "TSX", "LSE", "TSE"}
-        for token in doc:
-            raw = token.text
-            up = raw.upper()
-            if up in known_exchanges:
-                continue
-            if token.like_num:
-                continue
-            lower = raw.lower()
-            if lower in _COMMON_WORDS:
-                continue
-            if raw == lower:
-                continue
-            if _TICKER_REGEX.fullmatch(up) and len(up) <= 5:
-                kb_tickers = self._kb_lookup(raw)
-                if kb_tickers and len(kb_tickers) <= 3:
+        if self.nlp is not None:
+            doc = self.nlp(text.strip()[:10_000])
+            for ent in doc.ents:
+                if ent.label_ in ("ORG", "PERSON"):
+                    kb_tickers = self._kb_lookup(ent.text)
                     found.update(kb_tickers)
+            uk_orgs = [
+                ent.text for ent in doc.ents
+                if ent.label_ in ("ORG", "GPE")
+                and any(word in ent.text.lower() for word in ("ltd", "limited", "plc", "llp"))
+            ]
+            for name in uk_orgs:
+                found.update(self._kb_lookup(name))
+            known_exchanges = {"NYSE", "NASDAQ", "AMEX", "TSX", "LSE", "TSE"}
+            for token in doc:
+                raw = token.text
+                up = raw.upper()
+                if up in known_exchanges:
+                    continue
+                if token.like_num:
+                    continue
+                lower = raw.lower()
+                if lower in _COMMON_WORDS:
+                    continue
+                if raw == lower:
+                    continue
+                if _TICKER_REGEX.fullmatch(up) and len(up) <= 5:
+                    kb_tickers = self._kb_lookup(raw)
+                    if kb_tickers and len(kb_tickers) <= 3:
+                        found.update(kb_tickers)
+        else:
+            text_lower = text.strip().lower()
+            for token in _TOKEN_REGEX.findall(text_lower):
+                if token not in _COMMON_WORDS:
+                    found.update(self._kb_lookup(token))
+        found.update(self._regex_tickers(text, requested=None))
         found.discard("")
         if requested is not None:
             found &= requested
@@ -243,13 +257,14 @@ class TickerExtractor:
         tickers_in_text = self.extract_tickers(text, requested=None)
         if ticker in tickers_in_text:
             return 0.85
-        doc = self.nlp(text.strip()[:10_000])
-        ticker_lower = ticker.lower()
-        for ent in doc.ents:
-            if ent.label_ == "ORG":
-                name_lower = ent.text.lower()
-                if ticker_lower in name_lower or name_lower in ticker_lower:
-                    return 0.65
+        if self.nlp is not None:
+            doc = self.nlp(text.strip()[:10_000])
+            ticker_lower = ticker.lower()
+            for ent in doc.ents:
+                if ent.label_ == "ORG":
+                    name_lower = ent.text.lower()
+                    if ticker_lower in name_lower or name_lower in ticker_lower:
+                        return 0.65
         alias_score = 0.0
         for alias in self._ticker_aliases(ticker):
             if self._token_match(text_lower, alias):
@@ -257,6 +272,9 @@ class TickerExtractor:
                 break
         if alias_score > 0:
             return alias_score
+        for token in _TOKEN_REGEX.findall(text_lower):
+            if token in self._kb_lower and any(v.lower() == ticker.lower() for v in self._kb_lower[token]):
+                return 0.60
         return 0.0
 
     def score_row(self, row: pd.Series, ticker: str) -> float:

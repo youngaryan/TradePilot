@@ -45,6 +45,9 @@ sentiment = [
   "torch>=2.2",
   "transformers>=4.39",
 ]
+test = [
+  "pytest>=8",
+]
 
 [project.scripts]
 pairs-trading = "pairs_trading.apps.cli:main"

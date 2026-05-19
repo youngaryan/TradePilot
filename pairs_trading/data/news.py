@@ -733,7 +733,10 @@ class LightweightExtractiveSummarizer:
 def _extract_article_bs4(html_text: str, max_text_chars: int = 12_000) -> dict[str, str]:
     from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html_text, "lxml")
+    try:
+        soup = BeautifulSoup(html_text, "lxml")
+    except ValueError:
+        soup = BeautifulSoup(html_text, "html.parser")
     for tag in soup.find_all(["script", "style", "noscript", "svg", "canvas", "form", "nav", "footer"]):
         tag.decompose()
 
@@ -757,7 +760,7 @@ def _extract_article_bs4(html_text: str, max_text_chars: int = 12_000) -> dict[s
 def _extract_article(html_text: str, max_text_chars: int = 12_000) -> dict[str, str]:
     try:
         return _extract_article_bs4(html_text, max_text_chars=max_text_chars)
-    except ImportError:
+    except Exception:
         pass
     extractor = _HTMLArticleExtractor(max_text_chars=max_text_chars)
     extractor.feed(html_text)
