@@ -469,7 +469,8 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         headlines = provider.get_headlines(["GLD", "AAPL"], "2026-04-20", "2026-04-29")
 
         self.assertEqual(provider.urls, ["https://www.reddit.com/r/Gold/.rss"])
-        self.assertTrue(headlines.empty)
+        self.assertEqual(len(headlines), 1)
+        self.assertEqual(headlines.loc[0, "ticker"], "GLD")
 
     def test_rss_adapter_maps_fx_pair_to_yahoo_alias_but_stores_requested_symbol(self) -> None:
         provider = StubForexRSSProvider()
