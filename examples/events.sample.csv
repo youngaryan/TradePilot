@@ -1,0 +1,9 @@
+timestamp,ticker,event_score,confidence,event_type
+2024-01-30,AAPL,0.42,0.90,company_facts
+2024-01-31,MSFT,0.36,0.88,company_facts
+2024-02-06,NVDA,0.51,0.92,company_facts
+2024-02-08,AMZN,0.28,0.80,company_facts
+2024-02-13,GOOGL,-0.24,0.75,company_facts
+2024-02-20,META,0.18,0.70,company_facts
+2024-02-22,JPM,-0.12,0.65,company_facts
+2024-02-27,XOM,0.14,0.68,company_facts

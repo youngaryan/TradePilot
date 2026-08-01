@@ -1,0 +1,188 @@
+name: production-image-release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release-ref:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reject malformed release tags
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use exact vMAJOR.MINOR.PATCH syntax." >&2
+            exit 2
+          fi
+
+  quality-gate:
+    needs: validate-release-ref
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            dockerfile: Dockerfile.api
+          - component: web
+            dockerfile: Dockerfile.web
+    steps:
+      # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Define immutable image identity
+        shell: bash
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          image="ghcr.io/${repository}/${{ matrix.component }}"
+          sha_tag="${image}:sha-${GITHUB_SHA}"
+          tags="${sha_tag}"
+          release_tag=""
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="${image}:${GITHUB_REF_NAME}"
+            tags="${tags},${release_tag}"
+          fi
+          echo "IMAGE=${image}" >> "${GITHUB_ENV}"
+          echo "IMAGE_TAG=${sha_tag}" >> "${GITHUB_ENV}"
+          echo "IMAGE_TAGS=${tags}" >> "${GITHUB_ENV}"
+          echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
+
+      # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite an existing immutable tag
+        shell: bash
+        run: |
+          IFS=',' read -ra tags <<< "${IMAGE_TAGS}"
+          for tag in "${tags[@]}"; do
+            if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
+              echo "Refusing to overwrite existing image tag: ${tag}" >&2
+              exit 2
+            fi
+          done
+
+      - name: Build and push multi-architecture image
+        id: build
+        # v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_TAGS }}
+          labels: |
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Generate reviewable SPDX SBOM
+        # v0.24.0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: ${{ matrix.component }}.spdx.json
+          upload-artifact: false
+
+      - name: Block high and critical image vulnerabilities
+        # v0.33.1
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: ${{ matrix.component }}.trivy.sarif
+          exit-code: "1"
+          ignore-unfixed: false
+          severity: HIGH,CRITICAL
+
+      - name: Install cosign
+        # v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+
+      - name: Keyless-sign the published digest
+        shell: bash
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: Publish GitHub build provenance
+        # v2
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record deployment identity
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          component = "${{ matrix.component }}"
+          document = {
+              "component": component,
+              "digest": os.environ["IMAGE_DIGEST"],
+              "image": os.environ["IMAGE"],
+              "immutable_tag": os.environ["IMAGE_TAG"],
+              "release_tag": os.environ["RELEASE_TAG"] or None,
+              "source_revision": os.environ["GITHUB_SHA"],
+              "source_ref": os.environ["GITHUB_REF"],
+          }
+          Path(f"{component}.release.json").write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload release evidence
+        # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.component }}-release-evidence-${{ github.sha }}
+          path: |
+            ${{ matrix.component }}.release.json
+            ${{ matrix.component }}.spdx.json
+            ${{ matrix.component }}.trivy.sarif
+          if-no-files-found: error
+          retention-days: 90

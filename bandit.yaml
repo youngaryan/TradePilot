@@ -1,0 +1,4 @@
+skips:
+  - B310  # URL fetches are constrained by provider-specific validation and production allowlists.
+  - B314  # RSS/XML parsing is handled only for headline feeds; tracked for defusedxml migration.
+  - B615  # FinBERT downloads are optional and disabled for local-only UI runs; pin before hosted transformer use.

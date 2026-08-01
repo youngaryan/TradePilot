@@ -1,0 +1,69 @@
+{
+  "execution": {
+    "initial_cash": 100000.0,
+    "commission_bps": 0.5,
+    "slippage_bps": 1.0,
+    "min_trade_notional": 100.0,
+    "weight_tolerance": 0.0025
+  },
+  "strategies": [
+    {
+      "name": "etf_trend_core",
+      "pipeline": "etf_trend",
+      "symbols": ["SPY", "QQQ", "IWM", "DIA", "TLT", "IEF", "GLD", "XLE", "XLF", "XLK", "XLV"],
+      "lookback_bars": 800,
+      "params": {
+        "top_n": 3,
+        "trend_window": 200,
+        "rebalance_bars": 21
+      }
+    },
+    {
+      "name": "residual_stat_arb_shadow",
+      "pipeline": "stat_arb",
+      "sector_map_path": "examples/sector_map.sample.json",
+      "lookback_bars": 620,
+      "params": {
+        "include_residual_book": true,
+        "include_classic_pairs": true,
+        "top_n_pairs": 3,
+        "residual_lookback": 60
+      }
+    },
+    {
+      "name": "edgar_event_shadow",
+      "pipeline": "edgar_event",
+      "symbols": ["AAPL", "MSFT", "NVDA", "AMZN"],
+      "event_file": "examples/events.sample.csv",
+      "lookback_bars": 520,
+      "params": {
+        "holding_period_bars": 5,
+        "entry_threshold": 0.15
+      }
+    },
+    {
+      "name": "vol_target_trend_shadow",
+      "pipeline": "volatility_target_trend",
+      "symbols": ["SPY", "QQQ", "TLT", "GLD"],
+      "lookback_bars": 360,
+      "params": {
+        "trend_window": 120,
+        "volatility_window": 20,
+        "target_volatility": 0.15,
+        "max_strategy_weight": 0.25
+      }
+    },
+    {
+      "name": "bollinger_reversion_shadow",
+      "pipeline": "bollinger_mean_reversion",
+      "symbols": ["SPY", "QQQ", "IWM"],
+      "lookback_bars": 220,
+      "params": {
+        "bollinger_window": 20,
+        "bollinger_num_std": 2.0,
+        "z_exit": 0.25,
+        "max_strategy_weight": 0.20
+      }
+    }
+  ]
+}

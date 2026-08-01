@@ -1,0 +1,69 @@
+groups:
+  - name: tradepilot-production
+    rules:
+      - alert: TradePilotApiHighErrorRate
+        expr: sum(rate(tradepilot_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(tradepilot_http_requests_total[5m])), 1) > 0.02
+        for: 5m
+        labels: { severity: page, owner: "OWNER_PLATFORM" }
+        annotations:
+          summary: "TradePilot API 5xx rate exceeds 2%"
+          runbook: "docs/production_operations.md#api-errors-or-latency"
+      - alert: TradePilotApiP95Latency
+        expr: histogram_quantile(0.95, sum by (le) (rate(tradepilot_http_request_duration_seconds_bucket[10m]))) > 2
+        for: 10m
+        labels: { severity: ticket, owner: "OWNER_PLATFORM" }
+        annotations:
+          summary: "TradePilot API p95 latency exceeds two seconds"
+          runbook: "docs/production_operations.md#api-errors-or-latency"
+      - alert: TradePilotQueueOldestAge
+        expr: max by (kind) (tradepilot_job_oldest_queued_age_seconds) > 900
+        for: 5m
+        labels: { severity: page, owner: "OWNER_JOBS" }
+        annotations:
+          summary: "A TradePilot job has waited more than 15 minutes"
+          runbook: "docs/production_operations.md#queue-backlog-failed-or-stuck-jobs"
+      - alert: TradePilotQueueBacklog
+        expr: max by (kind) (tradepilot_job_backlog) > 100
+        for: 10m
+        labels: { severity: ticket, owner: "OWNER_JOBS" }
+        annotations:
+          summary: "TradePilot queue backlog exceeds 100 jobs"
+          runbook: "docs/production_operations.md#queue-backlog-failed-or-stuck-jobs"
+      - alert: TradePilotDispatchPendingStale
+        expr: max by (kind) (tradepilot_job_oldest_dispatch_pending_age_seconds) > 300
+        for: 5m
+        labels: { severity: page, owner: "OWNER_JOBS" }
+        annotations:
+          summary: "A TradePilot durable job has remained dispatch-pending for more than five minutes"
+          runbook: "docs/production_operations.md#queue-backlog-failed-or-stuck-jobs"
+      - alert: TradePilotStuckJobs
+        expr: max by (kind) (tradepilot_jobs_stuck) > 0
+        for: 5m
+        labels: { severity: page, owner: "OWNER_JOBS" }
+        annotations:
+          summary: "TradePilot has running jobs beyond their lease"
+          runbook: "docs/production_operations.md#queue-backlog-failed-or-stuck-jobs"
+      - alert: TradePilotRoleHeartbeatMissing
+        expr: min by (role) (tradepilot_role_heartbeat_healthy) < 1
+        for: 3m
+        labels: { severity: page, owner: "OWNER_PLATFORM" }
+        annotations:
+          summary: "TradePilot worker or controller heartbeat is missing"
+          runbook: "docs/production_operations.md#worker-or-controller-heartbeat-loss"
+      - alert: TradePilotDependencyNotReady
+        expr: min by (component) (tradepilot_dependency_ready) < 1
+        for: 3m
+        labels: { severity: page, owner: "OWNER_PLATFORM" }
+        annotations:
+          summary: "A required TradePilot dependency is not ready"
+          runbook: "docs/production_operations.md#database-redis-or-object-storage-readiness"
+      - alert: TradePilotMetricsCollectionFailed
+        expr: min by (collector) (tradepilot_metrics_collection_success) < 1
+        for: 3m
+        labels: { severity: page, owner: "OWNER_PLATFORM" }
+        annotations:
+          summary: "A TradePilot operational metrics collector is failing"
+          runbook: "docs/production_operations.md#database-redis-or-object-storage-readiness"
+      # Stripe webhook delivery failures are currently emitted through structured
+      # logs/Sentry. Configure the log backend to count event=webhook_failed and
+      # page OWNER_BILLING on any production occurrence in a five-minute window.

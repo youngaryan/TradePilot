@@ -1,0 +1,162 @@
+name: secure-v1-ci
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_DB: quantops_ci
+          POSTGRES_USER: quantops
+          POSTGRES_PASSWORD: quantops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quantops -d quantops_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      # v4; immutable pins are intentionally used for every third-party action.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/test-py312.lock
+      # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python package
+        run: |
+          python -m pip install --require-hashes -r requirements/test-py312.lock
+          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip check
+      - name: Backend tests
+        run: python -m pytest -q
+      - name: Python dependency check
+        run: python -m pip_audit --strict --require-hashes -r requirements/test-py312.lock
+      - name: Postgres migration smoke
+        env:
+          DATABASE_URL: postgresql+psycopg://quantops:quantops@127.0.0.1:5432/quantops_ci
+          APP_ENV: development
+        run: |
+          alembic upgrade head
+          python - <<'PY'
+          from pairs_trading.platform.persistence import PostgresMetadataStore
+          store = PostgresMetadataStore(
+              "postgresql+psycopg://quantops:quantops@127.0.0.1:5432/quantops_ci",
+              initialize=False,
+          )
+          counts = store.counts()
+          assert hasattr(counts, "artifacts")
+          print({"users": counts.users, "organizations": counts.organizations, "artifacts": counts.artifacts})
+          PY
+          expected_head="$(alembic heads | awk '{print $1}')"
+          alembic downgrade -1
+          alembic upgrade head
+          actual_head="$(psql 'postgresql://quantops:quantops@127.0.0.1:5432/quantops_ci' --no-psqlrc --tuples-only --no-align --command 'SELECT version_num FROM alembic_version')"
+          test "${actual_head}" = "${expected_head}"
+      - name: Isolated Postgres backup and restore drill
+        env:
+          TEST_POSTGRES_URL: postgresql+psycopg://quantops:quantops@127.0.0.1:5432/quantops_ci
+          DATABASE_URL: postgresql+psycopg://quantops:quantops@127.0.0.1:5432/quantops_ci
+          APP_ENV: development
+          REQUIRE_REAL_INTEGRATION: "true"
+        run: python -m pytest -q --strict-markers tests/integration/test_postgres_restore_drill.py
+      - name: Real Postgres and Redis integration tests
+        env:
+          TEST_POSTGRES_URL: postgresql+psycopg://quantops:quantops@127.0.0.1:5432/quantops_ci
+          TEST_REDIS_URL: redis://127.0.0.1:6379/0
+          DATABASE_URL: postgresql+psycopg://quantops:quantops@127.0.0.1:5432/quantops_ci
+          REDIS_URL: redis://127.0.0.1:6379/0
+          APP_ENV: development
+          ENABLE_DEMO_ACCOUNTS: "false"
+          ENABLE_IN_PROCESS_JOBS: "false"
+          REQUIRE_REAL_INTEGRATION: "true"
+        run: python -m pytest -q --strict-markers -m integration --ignore=tests/integration/test_postgres_restore_drill.py
+      - name: SAST
+        run: bandit -q -c bandit.yaml -r pairs_trading -x "**/__pycache__/**" --severity-level medium --confidence-level high
+      - name: Secret scanning
+        # v2
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: |
+          npm run typecheck
+          npm run unused:exports
+      - name: Frontend unit tests
+        working-directory: frontend
+        run: npm test
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
+      - name: Frontend E2E
+        working-directory: frontend
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+      - name: Accessibility smoke
+        working-directory: frontend
+        run: |
+          CHROME_VERSION="$(google-chrome --version | grep -oE '[0-9]+(\.[0-9]+){3}')"
+          npx browser-driver-manager install "chrome@${CHROME_VERSION}"
+
+          npm run preview -- --host 127.0.0.1 --port 4173 > preview.log 2>&1 &
+          PREVIEW_PID=$!
+          trap 'kill $PREVIEW_PID' EXIT
+
+          npx wait-on http://127.0.0.1:4173
+          npx axe http://127.0.0.1:4173 --exit
+      - name: Frontend audit
+        working-directory: frontend
+        run: npm audit --omit=dev
+      - name: Prepare env for Docker Compose
+        run: |
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> .env
+          echo "MINIO_ROOT_PASSWORD=$(openssl rand -hex 16)" >> .env
+          echo "S3_SECRET_ACCESS_KEY=$(openssl rand -hex 16)" >> .env
+          echo "SESSION_SECRET=$(openssl rand -hex 16)" >> .env
+          echo "CSRF_SECRET=$(openssl rand -hex 16)" >> .env
+          echo "APP_ENV=development" >> .env
+      - name: Docker Compose config smoke
+        run: docker compose config --quiet
+      - name: Docker API build
+        run: docker build -f Dockerfile.api -t quantops-api:ci .
+      - name: Docker web build
+        run: docker build -f Dockerfile.web -t quantops-web:ci .
