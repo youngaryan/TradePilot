@@ -6,7 +6,7 @@ The constrained strategy builder supports five structured-output providers:
 | --- | --- | --- | --- |
 | OpenAI | `openai` | `PAIRS_TRADING_STRATEGY_BUILDER_OPENAI_API_KEY_REF` | `gpt-5-mini` |
 | Anthropic | `anthropic` | `PAIRS_TRADING_STRATEGY_BUILDER_ANTHROPIC_API_KEY_REF` | `claude-sonnet-4-5` |
-| DeepInfra | `deepinfra` | `PAIRS_TRADING_STRATEGY_BUILDER_DEEPINFRA_API_KEY_REF` | `deepseek-ai/DeepSeek-V3` |
+| DeepInfra | `deepinfra` | `PAIRS_TRADING_STRATEGY_BUILDER_DEEPINFRA_API_KEY_REF` | `deepseek-ai/DeepSeek-V4-Flash` |
 | NVIDIA Build/NIM | `nvidia` | `PAIRS_TRADING_STRATEGY_BUILDER_NVIDIA_API_KEY_REF` | `mistralai/mistral-large-3-675b-instruct-2512` |
 | Local Ollama | `ollama` | none | any pulled instruction model with reliable JSON output |
 
@@ -27,4 +27,6 @@ For Ollama, set `PAIRS_TRADING_STRATEGY_BUILDER_OLLAMA_BASE_URL`, pull the confi
 
 API keys can use `env:NAME` (including the existing `NAME_FILE` mounted-secret behavior) or `secret-manager:aws:<secret-id>#<json-key>`. Credentials remain server-side.
 
-All providers have the same safety boundary: the model can return only a candidate `StrategySpec`. TradePilot then applies deterministic allowlist validation, a synthetic dry run, explicit approval, and the normal walk-forward backtest pipeline. Provider output never executes as code.
+Hosted providers use the [model-first semantic compiler architecture](strategy_builder_model_first_architecture.md): the model independently interprets every material prompt requirement, returns an auditable disposition trace, and compiles a candidate `StrategySpec`. It is no longer guided by a hidden regex-generated candidate. TradePilot then applies deterministic allowlist validation, a synthetic dry run, one bounded semantic repair when necessary, explicit approval, and the normal walk-forward backtest pipeline. Provider output never executes as code.
+
+Hosted providers must also return a bounded pre-backtest analysis containing a concise summary, qualitative overall risk, key risks, mitigations, and walk-forward validation priorities. The prompt explicitly forbids invented performance metrics. These statements are hypotheses for review; computed backtest results remain the authoritative evidence.

@@ -266,9 +266,84 @@ export function buildProductionSentimentRequest(
     alphavantage_api_key: null,
     benzinga_api_key: null,
     stocktwits_access_token: null,
+    stocktwits_max_pages: 20,
     use_finbert: false,
     local_finbert_only: true,
   };
+}
+
+export type SentimentNewsWindow = "7" | "30" | "90" | "all";
+
+function validDateKey(value: unknown): string | null {
+  const key = String(value ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return null;
+  const parsed = new Date(`${key}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === key ? key : null;
+}
+
+export function sentimentDatasetAnchorDate(dataset: SentimentDatasetPayload | null): string | null {
+  if (!dataset) return null;
+  const observed = [
+    ...(dataset.daily_points ?? []).map((point) => validDateKey(point.date)),
+    ...(dataset.scored_headlines ?? []).map((row) => validDateKey(row.timestamp)),
+    ...(dataset.headlines ?? []).map((row) => validDateKey(row.timestamp)),
+  ].filter((value): value is string => Boolean(value));
+  if (observed.length) return observed.sort().at(-1) ?? null;
+  return validDateKey(dataset.metadata?.end);
+}
+
+export function sentimentWindowCutoff(
+  dataset: SentimentDatasetPayload | null,
+  window: SentimentNewsWindow,
+): string | null {
+  if (window === "all") return null;
+  const anchor = sentimentDatasetAnchorDate(dataset);
+  if (!anchor) return null;
+  const cutoff = new Date(`${anchor}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - (Number(window) - 1));
+  return cutoff.toISOString().slice(0, 10);
+}
+
+export function buildSentimentNewsMatrix(dataset: SentimentDatasetPayload | null, cutoff: string | null) {
+  const points = dataset?.daily_points ?? [];
+  if (!points.length) return dataset?.ticker_summary ?? [];
+  const aggregates = new Map<string, { count: number; weight: number; sentimentSum: number; confidenceSum: number; latestDate: string; latest: number }>();
+  for (const point of points) {
+    const pointDate = validDateKey(point.date);
+    if (!pointDate || (cutoff && pointDate < cutoff)) continue;
+    const ticker = String(point.ticker).toUpperCase();
+    const articleCount = Math.max(0, Number(point.article_count) || 0);
+    const weight = articleCount || 1;
+    const sentimentScore = Number(point.sentiment_score) || 0;
+    const confidence = Math.max(0, Math.min(1, Number(point.confidence) || 0));
+    const current = aggregates.get(ticker) ?? { count: 0, weight: 0, sentimentSum: 0, confidenceSum: 0, latestDate: "", latest: 0 };
+    current.count += articleCount;
+    current.weight += weight;
+    current.sentimentSum += sentimentScore * weight;
+    current.confidenceSum += confidence * weight;
+    if (pointDate >= current.latestDate) {
+      current.latestDate = pointDate;
+      current.latest = sentimentScore;
+    }
+    aggregates.set(ticker, current);
+  }
+  return Array.from(aggregates.entries())
+    .map(([ticker, aggregate]) => {
+      return {
+        ticker,
+        article_count: aggregate.count,
+        avg_sentiment: aggregate.sentimentSum / aggregate.weight,
+        avg_confidence: aggregate.confidenceSum / aggregate.weight,
+        latest_sentiment: aggregate.latest,
+      };
+    })
+    .sort((a, b) => a.ticker.localeCompare(b.ticker));
+}
+
+export function sentimentHeadlineKey(row: Record<string, unknown>, index: number): string {
+  return [row.timestamp, row.ticker, row.source ?? row.provider_name, row.url, row.headline ?? row.title, index]
+    .map((value) => String(value ?? ""))
+    .join("|");
 }
 
 const ACCENTS: Record<string, string> = {
@@ -555,7 +630,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   const backtestPoll = useRef<AbortController | null>(null);
 
   const runBacktest = useCallback(async () => {
-    if (onLogout && !hasPremium) { setBtError("Upgrade to Pro to run live backtests."); return; }
+    if (!hasPremium) { setBtError("Upgrade to Pro to run live backtests."); return; }
     const symbols = backtestSymbols.length ? backtestSymbols : ["SPY"];
     if (backtestStart >= backtestEnd) { setBtError("Start date must be before end date."); return; }
     const pipeline = pipelineFor(selectedStrategy);
@@ -602,7 +677,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
         setBtRunning(false);
       }
     }
-  }, [backtestSymbols, backtestStart, backtestEnd, backtestInterval, btParamRows, selectedStrategy, pipelineFor, reloadJobs, hasPremium, onLogout]);
+  }, [backtestSymbols, backtestStart, backtestEnd, backtestInterval, btParamRows, selectedStrategy, pipelineFor, reloadJobs, hasPremium]);
 
   useEffect(() => {
     backtestPoll.current?.abort();
@@ -620,7 +695,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   const researchPoll = useRef<AbortController | null>(null);
 
   const runResearch = useCallback(async () => {
-    if (onLogout && !hasPremium) { setResearchError("Upgrade to Pro to run the AI research committee."); return; }
+    if (!hasPremium) { setResearchError("Upgrade to Pro to run the AI research committee."); return; }
     setResearchError(null);
     setResearchReport(null);
     setResearchRunning(true);
@@ -646,7 +721,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
         setResearchRunning(false);
       }
     }
-  }, [researchTicker, reloadJobs, hasPremium, onLogout]);
+  }, [researchTicker, reloadJobs, hasPremium]);
 
   useEffect(() => {
     researchPoll.current?.abort();
@@ -670,7 +745,8 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   // -- News & sentiment (dataset + scan action) -------------------------------
   const [sentiment, setSentiment] = useState<SentimentDatasetPayload | null>(null);
   const [sentimentTicker, setSentimentTicker] = useState("AAPL MSFT NVDA GLD");
-  const [newsWindow, setNewsWindow] = useState<"7" | "30" | "90" | "all">("all");
+  const [newsWindow, setNewsWindow] = useState<SentimentNewsWindow>("all");
+  const [newsPage, setNewsPage] = useState(1);
   const [scanRunning, setScanRunning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [sentimentLoading, setSentimentLoading] = useState(true);
@@ -701,14 +777,18 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
     return () => { sentimentLoadVersion.current += 1; };
   }, [reloadSentiment]);
 
+  useEffect(() => {
+    setNewsPage(1);
+  }, [sentiment?.dataset_id, sentiment?.scored_headlines?.length, sentiment?.headlines?.length]);
+
   const runSentimentScan = useCallback(async () => {
-    if (onLogout && !hasPremium) { setScanError("Upgrade to Pro to run sentiment scans."); return; }
+    if (!hasPremium) { setScanError("Upgrade to Pro to run sentiment scans."); return; }
     sentimentPoll.current?.abort();
     const controller = new AbortController();
     sentimentPoll.current = controller;
     setScanError(null);
     setScanRunning(true);
-    const request = buildProductionSentimentRequest(sentimentTicker);
+    const request = { ...buildProductionSentimentRequest(sentimentTicker), idempotency_key: `sentiment:${crypto.randomUUID()}` };
     try {
       const job = await startSentimentAccumulationJob(request);
       const fresh = await pollJobUntilTerminal(() => getSentimentAccumulationJob(job.id), { signal: controller.signal, initialDelayMs: 1500 });
@@ -727,7 +807,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
         setScanRunning(false);
       }
     }
-  }, [sentimentTicker, hasPremium, onLogout]);
+  }, [sentimentTicker, hasPremium]);
 
   useEffect(() => {
     sentimentPoll.current?.abort();
@@ -759,7 +839,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   }, [completedBtJobs, deployJobId]);
 
   const deployPaper = useCallback(async () => {
-    if (onLogout && !hasPremium) { setDeployError("Upgrade to Pro to deploy paper agents."); return; }
+    if (!hasPremium) { setDeployError("Upgrade to Pro to deploy paper agents."); return; }
     const chosen = completedBtJobs.find((j) => j.id === deployJobId);
     if (!chosen) { setDeployError("Select a validated backtest to deploy first."); return; }
     const req = chosen.request as { pipeline?: string; symbols?: string[]; interval?: string; trading_mode?: string };
@@ -795,7 +875,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
         setDeployRunning(false);
       }
     }
-  }, [hasPremium, onLogout, reloadPaper, completedBtJobs, deployJobId, strategyDisplayName]);
+  }, [hasPremium, reloadPaper, completedBtJobs, deployJobId, strategyDisplayName]);
 
   useEffect(() => {
     deployPoll.current?.abort();
@@ -832,6 +912,9 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
     setBuilderBusy(true);
     setBuilderError(null);
     setBuilderApproved(null);
+    // Do not display clarification questions from the previous turn while the
+    // new request is still being evaluated.
+    setBuilderResp(null);
     const orgAtStart = activeOrgId;
     try {
       const resp = await chatStrategyBuilder(nextMessages, (builderDraft as unknown as Record<string, unknown> | null) ?? null);
@@ -1264,40 +1347,24 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   };
   const sentimentWord = (score?: number) => (score == null ? "neutral" : score > 0.1 ? "bull" : score < -0.1 ? "bear" : "neutral");
   const headlineRows = (sentiment?.scored_headlines?.length ? sentiment.scored_headlines : sentiment?.headlines) ?? [];
-  const realNews = headlineRows.slice(0, 20).map((h) => ({
+  const realNews = headlineRows.map((h, index) => ({
+    key: sentimentHeadlineKey(h, index),
     headline: String(h.headline || h.title || h.summary || h.label || "Untitled"),
     source: `${h.ticker ? `${h.ticker} · ` : ""}${String(h.source || h.source_group_label || "news")}`,
     time: relTime(h.timestamp),
     sentiment: sentimentWord(typeof h.score === "number" ? h.score : undefined),
   }));
   const newsDefs = realNews;
+  const newsPageCount = Math.max(1, Math.ceil(newsDefs.length / 8));
+  const safeNewsPage = Math.min(newsPage, newsPageCount);
+  const pagedNews = newsDefs.slice((safeNewsPage - 1) * 8, safeNewsPage * 8);
   const tickerMatrix = sentiment?.ticker_summary ?? [];
 
   // Timeframe-aware sentiment matrix: recompute per-ticker aggregates from the
   // scored daily points when a window is selected; fall back to the server's
   // all-time ticker_summary when daily points are unavailable.
-  const newsCutoff = newsWindow === "all" ? null : new Date(Date.now() - Number(newsWindow) * 86400000).toISOString().slice(0, 10);
-  const newsMatrix = (() => {
-    const pts = sentiment?.daily_points ?? [];
-    if (!pts.length) return tickerMatrix;
-    const agg = new Map<string, { count: number; wsum: number; w: number; latestDate: string; latest: number }>();
-    for (const p of pts) {
-      const date = String(p.date).slice(0, 10);
-      if (newsCutoff && date < newsCutoff) continue;
-      const t = String(p.ticker).toUpperCase();
-      const n = Number(p.article_count) || 1;
-      const s = Number(p.sentiment_score) || 0;
-      const cur = agg.get(t) ?? { count: 0, wsum: 0, w: 0, latestDate: "", latest: 0 };
-      cur.count += n;
-      cur.wsum += s * n;
-      cur.w += n;
-      if (date >= cur.latestDate) { cur.latestDate = date; cur.latest = s; }
-      agg.set(t, cur);
-    }
-    return Array.from(agg.entries())
-      .map(([ticker, a]) => ({ ticker, article_count: a.count, avg_sentiment: a.w ? a.wsum / a.w : 0, avg_confidence: 0, latest_sentiment: a.latest }))
-      .sort((a, b) => a.ticker.localeCompare(b.ticker));
-  })();
+  const newsCutoff = sentimentWindowCutoff(sentiment, newsWindow);
+  const newsMatrix = buildSentimentNewsMatrix(sentiment, newsCutoff);
 
   const newsSources = sentiment?.source_group_summary?.length ? sentiment.source_group_summary : sentiment?.source_summary ?? [];
 
@@ -1859,7 +1926,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
 
   const NewsList = (items: typeof newsDefs, big = false) =>
     items.map((n) => (
-      <div key={n.headline} style={css(newsRowStyle)}>
+      <div key={n.key} style={css(newsRowStyle)}>
         <div style={css(sentimentDot(n.sentiment))} />
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: big ? "13.5px" : "12.5px", fontWeight: 600, color: colors.text, lineHeight: 1.4 }}>{n.headline}</div>
@@ -2564,6 +2631,18 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                     {builderResp?.state === "rejected" ? (
                       <div style={{ fontSize: "12px", color: colors.loss, lineHeight: 1.5 }}>{(builderResp.validation.errors || []).join(" ")}</div>
                     ) : null}
+                    {builderResp?.interpreted_intent ? (
+                      <details style={css(`background:${colors.surface}; border:1px solid ${colors.border}; border-radius:11px; padding:10px 12px;`)}>
+                        <summary style={{ fontSize: "12px", fontWeight: 700, color: colors.text, cursor: "pointer" }}>How the AI interpreted this request</summary>
+                        <div style={{ fontSize: "12px", color: colors.textFaint, lineHeight: 1.45, marginTop: "7px" }}>{builderResp.interpreted_intent.objective}</div>
+                        {builderResp.interpreted_intent.requirement_trace.map((item, i) => (
+                          <div key={`${item.requirement}-${i}`} style={{ fontSize: "11.5px", color: colors.textFaint, lineHeight: 1.4, marginTop: "6px" }}>
+                            <b style={{ color: item.disposition === "unsupported" || item.disposition === "missing" ? colors.loss : colors.text }}>{item.disposition.toUpperCase()}:</b> {item.requirement} — {item.handling}
+                          </div>
+                        ))}
+                        {builderResp.semantic_repair_count ? <div style={{ fontSize: "11px", color: colors.textFaint, marginTop: "7px" }}>The engine validator corrected this draft through one bounded AI repair pass.</div> : null}
+                      </details>
+                    ) : null}
                     {builderApproved ? (
                       <div style={css(`background:oklch(from ${colors.gain} l c h / 0.12); border:1px solid oklch(from ${colors.gain} l c h / 0.4); border-radius:11px; padding:11px 13px;`)}>
                         <div style={{ fontSize: "12.5px", fontWeight: 600, color: colors.text }}>✓ Added “{builderApproved.name}” to your library.</div>
@@ -2616,6 +2695,30 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                         <div><span style={{ color: colors.textFaint }}>Timeframe </span><b style={{ color: colors.text }}>{intervalLabel(builderDraft.timeframe === "short_term" ? "4h" : "1d")}</b></div>
                         <div><span style={{ color: colors.textFaint }}>Side </span><b style={{ color: colors.text }}>{builderDraft.side.replace("_", " ")}</b></div>
                       </div>
+                      {builderResp?.generation_summary ? (
+                        <div style={css(`border:1px solid ${colors.border}; border-radius:10px; padding:10px 12px; margin-bottom:10px; background:${colors.surfaceRaised};`)}>
+                          <div style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: colors.textFaint, marginBottom: "4px" }}>AI summary</div>
+                          <div style={{ fontSize: "12.5px", color: colors.text, lineHeight: 1.5 }}>{builderResp.generation_summary}</div>
+                        </div>
+                      ) : null}
+                      {builderResp?.risk_analysis ? (
+                        <div style={css(`border:1px solid oklch(from ${colors.loss} l c h / 0.35); border-radius:10px; padding:10px 12px; margin-bottom:10px; background:oklch(from ${colors.loss} l c h / 0.06);`)}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginBottom: "5px" }}>
+                            <div style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: colors.textFaint }}>Pre-backtest risk analysis</div>
+                            <div style={{ fontSize: "11px", fontWeight: 700, color: colors.loss }}>{builderResp.risk_analysis.overall_risk.toUpperCase()}</div>
+                          </div>
+                          <div style={{ fontSize: "12px", color: colors.text, lineHeight: 1.45 }}>{builderResp.risk_analysis.overview}</div>
+                          <div style={{ fontSize: "11.5px", color: colors.textFaint, marginTop: "6px", lineHeight: 1.45 }}>
+                            <b style={{ color: colors.text }}>Key risks:</b> {builderResp.risk_analysis.key_risks.join(" ")}
+                          </div>
+                          <div style={{ fontSize: "11.5px", color: colors.textFaint, marginTop: "4px", lineHeight: 1.45 }}>
+                            <b style={{ color: colors.text }}>Mitigations:</b> {builderResp.risk_analysis.mitigations.join(" ")}
+                          </div>
+                          <div style={{ fontSize: "11.5px", color: colors.textFaint, marginTop: "4px", lineHeight: 1.45 }}>
+                            <b style={{ color: colors.text }}>Validate:</b> {builderResp.risk_analysis.validation_priorities.join(" ")}
+                          </div>
+                        </div>
+                      ) : null}
                       <div style={css(`border-top:1px solid ${colors.border}; padding-top:10px;`)}>
                         {[["Entry", builderDraft.entry_rules], ["Exit", builderDraft.exit_rules]].map(([grp, rules]) => (
                           <div key={grp as string} style={{ marginBottom: "8px" }}>
@@ -3700,6 +3803,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                       <div style={{ flex: 1 }}>Ticker</div>
                       <div style={{ flex: 1, textAlign: "right" }}>Articles</div>
                       <div style={{ flex: 1.2, textAlign: "right" }}>Avg</div>
+                      <div style={{ flex: 1, textAlign: "right" }}>Confidence</div>
                       <div style={{ flex: 1, textAlign: "right" }}>Latest</div>
                     </div>
                     {newsMatrix.map((r) => {
@@ -3710,6 +3814,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                           <div style={{ flex: 1, fontSize: "13px", fontWeight: 700, color: colors.text }}>{r.ticker}</div>
                           <div style={{ flex: 1, fontSize: "13px", textAlign: "right", color: colors.textFaint }}>{Math.round(r.article_count)}</div>
                           <div style={{ flex: 1.2, fontSize: "13px", fontWeight: 600, textAlign: "right", color: c }}>{r.avg_sentiment >= 0 ? "+" : ""}{r.avg_sentiment.toFixed(2)}</div>
+                          <div style={{ flex: 1, fontSize: "13px", textAlign: "right", color: colors.textFaint }}>{Math.round(r.avg_confidence * 100)}%</div>
                           <div style={{ flex: 1, fontSize: "13px", textAlign: "right", color: lc }}>{r.latest_sentiment >= 0 ? "+" : ""}{r.latest_sentiment.toFixed(2)}</div>
                         </div>
                       );
@@ -3732,10 +3837,19 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
               </div>
 
               <div style={css(`${panelStyle} flex:1;`)}>
-                <div style={{ fontSize: "15px", fontWeight: 600, color: colors.text, marginBottom: "12px" }}>Latest Headlines</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginBottom: "12px" }}>
+                  <div style={{ fontSize: "15px", fontWeight: 600, color: colors.text }}>Latest Headlines</div>
+                  {newsDefs.length > 8 ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: "7px", fontSize: "11.5px", color: colors.textFaint }}>
+                      <button disabled={safeNewsPage <= 1} onClick={() => setNewsPage((page) => Math.max(1, page - 1))} style={css(`${ghostLinkBtnStyle} width:auto; opacity:${safeNewsPage <= 1 ? 0.45 : 1};`)}>Previous</button>
+                      <span>{safeNewsPage} / {newsPageCount}</span>
+                      <button disabled={safeNewsPage >= newsPageCount} onClick={() => setNewsPage((page) => Math.min(newsPageCount, page + 1))} style={css(`${ghostLinkBtnStyle} width:auto; opacity:${safeNewsPage >= newsPageCount ? 0.45 : 1};`)}>Next</button>
+                    </div>
+                  ) : null}
+                </div>
                 {sentimentLoading ? <div style={{ fontSize: "12.5px", color: colors.textFaint }}>Loading headlines…</div>
                   : sentimentLoadError ? <div style={{ fontSize: "12.5px", color: colors.loss }}>Headlines unavailable: {sentimentLoadError}<button onClick={() => void reloadSentiment()} style={css(`${ghostLinkBtnStyle} width:auto;`)}>Retry</button></div>
-                  : newsDefs.length ? <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>{NewsList(newsDefs.slice(0, 8), true)}</div>
+                  : newsDefs.length ? <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>{NewsList(pagedNews, true)}</div>
                   : <div style={{ fontSize: "12.5px", color: colors.textFaint }}>No headlines were returned. Run a sentiment scan to collect current coverage.</div>}
               </div>
             </div>

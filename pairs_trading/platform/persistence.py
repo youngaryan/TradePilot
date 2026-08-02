@@ -1817,14 +1817,22 @@ class SQLiteMetadataStore:
             if feature in consolidated:
                 if float(consolidated[feature]["limit"]) != float(limit):
                     raise ValueError("Duplicate quota features must use the same limit")
+                if consolidated[feature]["idempotency_key"] != reservation.get("idempotency_key"):
+                    raise ValueError("Duplicate quota features must use the same idempotency key")
                 consolidated[feature]["quantity"] += float(quantity)
                 consolidated[feature]["properties"].append(reservation.get("properties") or {})
             else:
+                idempotency_key = reservation.get("idempotency_key")
+                if idempotency_key is not None:
+                    idempotency_key = str(idempotency_key).strip()
+                    if not idempotency_key or len(idempotency_key) > 200:
+                        raise ValueError("Quota idempotency key must contain between 1 and 200 characters")
                 consolidated[feature] = {
                     "feature": feature,
                     "quantity": float(quantity),
                     "limit": float(limit),
                     "properties": [reservation.get("properties") or {}],
+                    "idempotency_key": idempotency_key,
                 }
 
         normalized_start = window_start.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -1836,6 +1844,73 @@ class SQLiteMetadataStore:
                 feature = reservation["feature"]
                 quantity = float(reservation["quantity"])
                 limit = float(reservation["limit"])
+                properties = reservation["properties"]
+                event_properties = properties[0] if len(properties) == 1 else {"reservations": properties}
+                idempotency_key = reservation["idempotency_key"]
+                event_id = self.stable_id(
+                    "use",
+                    f"{organization_id}:{feature}:idempotency:{idempotency_key}" if idempotency_key else f"{organization_id}:{feature}:{uuid4().hex}",
+                )
+                inserted = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO usage_events (
+                        id, organization_id, user_id, feature, quantity,
+                        properties_json, occurred_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        organization_id,
+                        user_id,
+                        feature,
+                        quantity,
+                        _json_dump(event_properties),
+                        normalized_occurred,
+                    ),
+                )
+                if inserted.rowcount == 0:
+                    existing = connection.execute("SELECT * FROM usage_events WHERE id = ?", (event_id,)).fetchone()
+                    if existing is None:
+                        raise RuntimeError("Idempotent quota reservation could not be read after a duplicate insert")
+                    if (
+                        str(existing["organization_id"]) != organization_id
+                        or str(existing["feature"]) != feature
+                        or float(existing["quantity"]) != quantity
+                    ):
+                        raise ValueError("Quota idempotency key was reused with a different reservation")
+                    current = connection.execute(
+                        """
+                        SELECT COALESCE(SUM(quantity), 0) AS quantity FROM usage_events
+                        WHERE organization_id = ? AND feature = ?
+                          AND occurred_at_utc >= ? AND occurred_at_utc < ?
+                        """,
+                        (organization_id, feature, normalized_start, normalized_end),
+                    ).fetchone()
+                    total = float(current["quantity"] if current is not None else 0.0)
+                    results.append(
+                        {
+                            "allowance": {
+                                "feature": feature,
+                                "limit": None if limit < 0 else limit,
+                                "used": total,
+                                "remaining": None if limit < 0 else max(limit - total, 0.0),
+                                "bypassed": False,
+                                "window_start_utc": normalized_start,
+                                "window_end_utc": normalized_end,
+                            },
+                            "usage": {
+                                "id": event_id,
+                                "organization_id": organization_id,
+                                "user_id": existing["user_id"],
+                                "feature": feature,
+                                "quantity": quantity,
+                                "properties": _json_load(existing["properties_json"], {}),
+                                "occurred_at_utc": existing["occurred_at_utc"],
+                            },
+                            "idempotent_replay": True,
+                        }
+                    )
+                    continue
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO quota_usage_counters (
@@ -1846,6 +1921,7 @@ class SQLiteMetadataStore:
                     FROM usage_events
                     WHERE organization_id = ? AND feature = ?
                       AND occurred_at_utc >= ? AND occurred_at_utc < ?
+                      AND id <> ?
                     """,
                     (
                         organization_id,
@@ -1857,6 +1933,7 @@ class SQLiteMetadataStore:
                         feature,
                         normalized_start,
                         normalized_end,
+                        event_id,
                     ),
                 )
                 cursor = connection.execute(
@@ -1893,26 +1970,6 @@ class SQLiteMetadataStore:
                     used = float(current["quantity"] if current is not None else 0.0)
                     raise QuotaReservationExceededError(feature=feature, limit=limit, used=used)
                 total = float(updated["quantity"])
-                properties = reservation["properties"]
-                event_properties = properties[0] if len(properties) == 1 else {"reservations": properties}
-                event_id = self.stable_id("use", f"{organization_id}:{feature}:{uuid4().hex}")
-                connection.execute(
-                    """
-                    INSERT INTO usage_events (
-                        id, organization_id, user_id, feature, quantity,
-                        properties_json, occurred_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        organization_id,
-                        user_id,
-                        feature,
-                        quantity,
-                        _json_dump(event_properties),
-                        normalized_occurred,
-                    ),
-                )
                 results.append(
                     {
                         "allowance": {
@@ -3453,6 +3510,59 @@ class SQLiteMetadataStore:
                     payload.get("finished_at_utc"),
                 ),
             )
+
+    def create_job_if_absent(self, *, kind: str, payload: dict[str, Any]) -> bool:
+        """Atomically persist a new queued job without replacing an idempotent replay."""
+
+        organization_id = payload.get("organization_id")
+        normalized_payload = dict(payload)
+        normalized_payload.update(
+            {
+                "version": int(payload.get("version", 0) or 0),
+                "attempt": int(payload.get("attempt", 0) or 0),
+                "max_attempts": int(payload.get("max_attempts", 3) or 3),
+                "worker_id": payload.get("worker_id"),
+                "heartbeat_at_utc": payload.get("heartbeat_at_utc"),
+                "lease_expires_at_utc": payload.get("lease_expires_at_utc"),
+                "rq_job_id": payload.get("rq_job_id"),
+            }
+        )
+        if normalized_payload["version"] < 0 or normalized_payload["attempt"] < 0 or normalized_payload["max_attempts"] < 1:
+            raise ValueError("Job version/attempt must be non-negative and max_attempts must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO jobs (
+                    id, organization_id, kind, status, version, attempt, max_attempts,
+                    worker_id, heartbeat_at_utc, lease_expires_at_utc, rq_job_id,
+                    stage, progress, request_json, payload_json, error, created_at_utc,
+                    updated_at_utc, started_at_utc, finished_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(payload["id"]),
+                    str(organization_id) if organization_id else None,
+                    kind,
+                    str(payload.get("status", "unknown")),
+                    normalized_payload["version"],
+                    normalized_payload["attempt"],
+                    normalized_payload["max_attempts"],
+                    normalized_payload["worker_id"],
+                    normalized_payload["heartbeat_at_utc"],
+                    normalized_payload["lease_expires_at_utc"],
+                    normalized_payload["rq_job_id"],
+                    payload.get("stage"),
+                    float(payload.get("progress", 0.0) or 0.0),
+                    _json_dump(payload.get("request", {})),
+                    _json_dump(normalized_payload),
+                    payload.get("error"),
+                    str(payload.get("created_at_utc") or _utc_now_iso()),
+                    str(payload.get("updated_at_utc") or _utc_now_iso()),
+                    payload.get("started_at_utc"),
+                    payload.get("finished_at_utc"),
+                ),
+            )
+        return cursor.rowcount == 1
 
     def list_jobs(
         self,

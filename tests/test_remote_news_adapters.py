@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 import pandas as pd
@@ -471,6 +472,20 @@ class RemoteNewsAdapterTests(unittest.TestCase):
         self.assertEqual(provider.urls, ["https://www.reddit.com/r/Gold/.rss"])
         self.assertEqual(len(headlines), 1)
         self.assertEqual(headlines.loc[0, "ticker"], "GLD")
+
+    def test_rss_adapter_drops_unmatched_rows_from_non_templated_single_ticker_feed(self) -> None:
+        provider = RSSHeadlineProvider(feed_urls=["https://feeds.example.com/markets.xml"], skip_errors=False)
+        xml = """<?xml version="1.0"?>
+        <rss version="2.0"><channel><item>
+          <title>European bond yields move after central bank remarks</title>
+          <description>No company or requested ticker is mentioned.</description>
+          <link>https://example.com/unrelated</link>
+          <pubDate>Wed, 03 Jan 2024 10:00:00 GMT</pubDate>
+        </item></channel></rss>"""
+        with patch.object(provider, "_fetch_text", return_value=xml):
+            headlines = provider.get_headlines(["AAPL"], "2024-01-01", "2024-01-05")
+
+        self.assertTrue(headlines.empty)
 
     def test_rss_adapter_maps_fx_pair_to_yahoo_alias_but_stores_requested_symbol(self) -> None:
         provider = StubForexRSSProvider()

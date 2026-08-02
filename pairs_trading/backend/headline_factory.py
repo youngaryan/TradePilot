@@ -102,7 +102,13 @@ def build_headline_provider(
             elif name == "benzinga":
                 providers.append(classes["benzinga"](api_key=key, page_size=min(maximum, 100), timeout_seconds=timeout))
             else:
-                providers.append(classes["stocktwits"](access_token=key))
+                providers.append(
+                    classes["stocktwits"](
+                        access_token=key,
+                        max_pages=int(opts.get("stocktwits_max_pages", 20)),
+                        timeout_seconds=timeout,
+                    )
+                )
         else:
             raise ValueError(f"Unsupported headline provider: {name}.")
     if not providers:

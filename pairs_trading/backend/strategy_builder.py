@@ -170,14 +170,87 @@ def _detect_prompt_injection(text: str) -> bool:
 
 
 def _extract_symbols(text: str) -> list[str]:
-    candidates = re.findall(r"\b[A-Za-z]{1,5}\b", text.upper())
+    # Prefer explicitly capitalized ticker-like tokens. Treating every short
+    # English word as a ticker made natural descriptions produce universes such
+    # as ["SPY", "THE", "ONLY"].
+    candidates = re.findall(r"\b[A-Z]{1,5}\b", text)
     symbols: list[str] = []
     for candidate in candidates:
         if candidate in SYMBOL_STOPWORDS:
             continue
         if candidate not in symbols:
             symbols.append(candidate)
+    if symbols:
+        return symbols[:12]
+
+    # Support a lower-case ticker immediately following an explicit trading
+    # verb without reopening the broad short-word heuristic.
+    for match in re.finditer(r"\b(?:trade|buy|sell)\s+([a-z]{1,5})\b", text, re.IGNORECASE):
+        candidate = match.group(1).upper()
+        if candidate not in SYMBOL_STOPWORDS and candidate not in symbols:
+            symbols.append(candidate)
     return symbols[:12]
+
+
+def _extract_cost_assumptions(text: str) -> dict[str, float] | None:
+    labels = {
+        "commission_bps": r"commission|commissions|broker(?:age)? fee",
+        "spread_bps": r"spread|bid[- ]ask spread",
+        "slippage_bps": r"slippage",
+        "market_impact_bps": r"market impact|impact",
+    }
+    explicit: dict[str, float] = {}
+    number = r"(\d+(?:\.\d+)?)"
+    for field, label in labels.items():
+        patterns = (
+            rf"{number}\s*bps?\s*(?:of\s+)?(?:{label})",
+            rf"(?:{label})\s*(?:of|at|=|:)?\s*{number}\s*bps?",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                explicit[field] = max(0.0, float(match.group(1)))
+                break
+    if explicit:
+        return {
+            "commission_bps": explicit.get("commission_bps", 0.0),
+            "spread_bps": explicit.get("spread_bps", 0.0),
+            "slippage_bps": explicit.get("slippage_bps", 0.0),
+            "market_impact_bps": explicit.get("market_impact_bps", 0.0),
+        }
+
+    total_patterns = (
+        rf"{number}\s*bps?\s*(?:total\s+)?(?:transaction\s+|execution\s+)?costs?",
+        rf"(?:total\s+)?(?:transaction\s+|execution\s+)?costs?\s*(?:of|at|=|:)?\s*{number}\s*bps?",
+    )
+    total: float | None = None
+    for pattern in total_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            total = max(0.0, float(match.group(1)))
+            break
+    if total is None:
+        fallback = re.search(rf"{number}\s*bps?", text, re.IGNORECASE)
+        total = max(0.0, float(fallback.group(1))) if fallback else None
+    if total is None:
+        return None
+    component = round(total / 4.0, 4)
+    return {
+        "commission_bps": component,
+        "spread_bps": component,
+        "slippage_bps": component,
+        "market_impact_bps": round(total - (3.0 * component), 4),
+    }
+
+
+def _requests_same_bar_execution(text: str) -> bool:
+    return bool(re.search(
+        r"(?:same|signal)\s+bar(?:'s)?\s+(?:close|closing)|"
+        r"(?:on|at)\s+(?:the\s+)?close\s+of\s+(?:the\s+)?signal\s+bar|"
+        r"execute\w*\s+(?:on|at)\s+(?:the\s+)?(?:same|signal)\s+bar",
+        text,
+        re.IGNORECASE,
+    ))
 
 
 def _extract_timeframe(text: str) -> str | None:
@@ -323,10 +396,22 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
     stop_match = re.search(r"stop(?:\s+loss)?\s*(?:at|of)?\s*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
     if not stop_match:
         stop_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*stop(?:\s+loss)?", text, re.IGNORECASE)
+    if not stop_match:
+        stop_match = re.search(
+            r"(?:price\s+)?(?:falls?|drops?|declines?)\s+(\d+(?:\.\d+)?)\s*%\s+"
+            r"(?:below|from)\s+(?:the\s+)?(?:entry|entry price|purchase price)",
+            text,
+            re.IGNORECASE,
+        )
+    if not stop_match:
+        stop_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*%\s+(?:below|under)\s+(?:the\s+)?(?:entry|entry price|purchase price)",
+            text,
+            re.IGNORECASE,
+        )
     if stop_match:
         stop_loss = float(stop_match.group(1)) / 100.0
-    cost_match = re.search(r"(\d+(?:\.\d+)?)\s*bps", text, re.IGNORECASE)
-    cost_bps = float(cost_match.group(1)) if cost_match else None
+    parsed_costs = _extract_cost_assumptions(text)
 
     questions: list[str] = []
     if not symbols:
@@ -341,7 +426,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
         questions.append("How should positions be sized? Specify equal weight or a maximum percent per symbol.")
     if stop_loss is None and "no stop" not in lowered:
         questions.append("Should there be a stop loss or should the strategy explicitly run without a hard stop?")
-    if cost_bps is None:
+    if parsed_costs is None:
         questions.append("What transaction cost assumption should be used in basis points?")
     if questions:
         return None, questions, "needs_clarification"
@@ -349,7 +434,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
     side = "long_only"
     name = _infer_name(text, indicators)
     max_positions = min(len(symbols), max(1, int(round(1.0 / max(max_position or 1.0, 0.01)))))
-    cost_component = max((cost_bps or 2.0) / 3.0, 0.0)
+    same_bar_normalized = _requests_same_bar_execution(text)
     spec = {
         "schema_version": "strategy_spec/v1",
         "name": name,
@@ -375,26 +460,26 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
             "execution_timing": "next_bar_close",
         },
         "costs": {
-            "commission_bps": round(cost_component, 4),
-            "spread_bps": round(cost_component, 4),
-            "slippage_bps": round(cost_component, 4),
-            "market_impact_bps": 0.5,
+            **(parsed_costs or {}),
             "delay_bars": 1,
         },
         "assumptions": [
             "Signals are computed from historical daily close data." if timeframe == "1d" else "Signals use hourly execution bars with 4-hour confirmation in short-term mode.",
             "Execution uses the existing backtest engine's next-bar delayed close-to-close execution model.",
             "No arbitrary user code is generated or executed.",
+            *(["Requested signal-bar-close execution is conservatively normalized to next-bar-close execution to avoid look-ahead bias."] if same_bar_normalized else []),
         ],
         "limitations": [
             "The safe builder currently supports a constrained set of technical-indicator rule blocks.",
             "Minute bars, tick data, custom external data, and discretionary text rules are not supported in this builder.",
             "Backtest performance does not guarantee future results.",
+            *(["The engine does not execute at the already-observed signal-bar close; orders are delayed to the next bar close."] if same_bar_normalized else []),
         ],
         "editable_parameters": editable_params,
         "compatibility": {
             "engine": "directional_ledger_v1",
             "supported": True,
+            "execution_normalized": same_bar_normalized,
             "notes": ["Compatible with the directional walk-forward backtest path and ledger visualization outputs."],
         },
     }
@@ -465,6 +550,11 @@ def validate_strategy_spec(spec: dict[str, Any]) -> SpecValidation:
         errors.append("risk_controls.stop_loss_pct must be null or between 0 and 50%.")
     if stop_loss is None:
         warnings.append("No hard stop loss is configured; exits rely on rule logic.")
+    compatibility = normalized.get("compatibility") if isinstance(normalized.get("compatibility"), dict) else {}
+    if compatibility.get("execution_normalized") is True:
+        warnings.append(
+            "Requested signal-bar-close execution was normalized to next-bar-close execution to avoid look-ahead bias."
+        )
 
     return SpecValidation(ok=not errors, errors=errors, warnings=warnings, spec=normalized if not errors else None)
 
@@ -498,7 +588,7 @@ def risk_level_for_spec(spec: dict[str, Any]) -> str:
     max_gross = float(sizing.get("max_gross_exposure", 1.0) or 1.0)
     if side != "long_only" or max_gross > 1.0:
         return "high"
-    if risk.get("stop_loss_pct") is None:
+    if risk.get("stop_loss_pct") is None or max_gross > 0.5:
         return "medium"
     return "low"
 
@@ -602,8 +692,15 @@ class StrategyBuilderService:
         usage: dict[str, int] = {}
         retry_count = 0
         provider_outcome = "not_called"
+        generation_summary: str | None = None
+        risk_analysis: dict[str, Any] | None = None
+        interpreted_intent: dict[str, Any] | None = None
+        generation_path = "deterministic_rules"
+        semantic_repair_count = 0
+        provider_request_count = 0
 
-        if precheck_state == "rejected":
+        if generation_mode == "llm" and _detect_prompt_injection(user_text):
+            generation_path = "security_precheck"
             spec, questions, state = None, precheck_questions, "rejected"
             validation = SpecValidation(ok=False, errors=questions, warnings=[])
         elif generation_mode == "llm":
@@ -612,21 +709,17 @@ class StrategyBuilderService:
             provider = self.settings.strategy_builder_llm_provider
             model = self.settings.strategy_builder_llm_model
             prompt_version = PROMPT_VERSION
+            generation_path = "model_first"
             provider_messages = list(messages)
-            candidate_seed = draft_spec or precheck_spec
-            if candidate_seed:
-                provider_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            "Deterministically parsed safe candidate seed. Preserve it when it matches the user's intent; "
-                            "return it as candidate_spec with state ready_for_validation unless a concrete requirement is missing: "
-                            + json.dumps(candidate_seed, separators=(",", ":"))
-                        ),
-                    }
-                )
+            # Hosted models interpret the conversation independently. A draft is
+            # supplied only when it came from the user's editable review state;
+            # the deterministic parser is not a semantic gate or hidden seed.
+            candidate_seed = draft_spec
+            if self.settings.strategy_builder_llm_provider == "ollama":
+                candidate_seed = draft_spec or precheck_spec
             try:
                 result = self.generation_service.generate(provider_messages, candidate_seed=candidate_seed)
+                provider_request_count = 1
                 provider_outcome = "success"
                 generated = result.value
                 provider = result.provider
@@ -642,16 +735,65 @@ class StrategyBuilderService:
                 }
                 raw_attempt = result.metadata.get("attempt", 1) if isinstance(result.metadata, dict) else 1
                 retry_count = max(0, min(int(raw_attempt) - 1, 20)) if isinstance(raw_attempt, int) else 0
+                generation_path = str(result.metadata.get("generation_path") or "model_first")[:80]
                 questions = list(generated.clarification_questions)
+                generation_summary = generated.assistant_summary
+                risk_analysis = generated.risk_analysis.model_dump(mode="json") if generated.risk_analysis else None
+                interpreted_intent = generated.interpretation.model_dump(mode="json")
                 spec = generated.candidate_spec.model_dump(mode="json") if generated.candidate_spec else None
                 state = generated.state
                 validation = validate_strategy_spec(spec) if spec else SpecValidation(ok=False, errors=questions, warnings=[])
                 if state == "ready_for_validation":
-                    if not validation.ok or validation.spec is None:
-                        questions = validation.errors or ["The generated candidate did not pass deterministic validation."]
-                        state = "needs_clarification"
-                        spec = None
-                    else:
+                    repair_feedback = list(validation.errors)
+                    if validation.ok and validation.spec is not None:
+                        try:
+                            dry_run_strategy_spec(validation.spec)
+                        except Exception:
+                            repair_feedback.append("Synthetic engine dry-run rejected the compiled candidate.")
+
+                    if repair_feedback and self.settings.strategy_builder_llm_provider != "ollama":
+                        semantic_repair_count = 1
+                        try:
+                            repaired = self.generation_service.repair(
+                                provider_messages,
+                                previous=generated,
+                                validator_feedback=repair_feedback,
+                            )
+                        except Exception:
+                            provider_outcome = "repair_error"
+                            provider_request_count = 2
+                            generation_path = "model_first_semantic_repair_failed"
+                            questions = [
+                                "The model draft did not match the engine, and its bounded correction pass failed. Please restate the affected rules."
+                            ]
+                            state = "needs_clarification"
+                            spec = None
+                        else:
+                            provider_request_count = 2
+                            generation_path = str(
+                                repaired.metadata.get("generation_path") or "model_first_semantic_repair"
+                            )[:80]
+                            latency_ms += max(0, int(repaired.latency_ms))
+                            for key, value in repaired.usage.items():
+                                if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool):
+                                    usage[key[:40]] = min(100_000_000, usage.get(key[:40], 0) + max(0, value))
+                            repaired_attempt = repaired.metadata.get("attempt", 1)
+                            if isinstance(repaired_attempt, int):
+                                retry_count += max(0, min(repaired_attempt - 1, 20))
+                            generated = repaired.value
+                            questions = list(generated.clarification_questions)
+                            generation_summary = generated.assistant_summary
+                            risk_analysis = generated.risk_analysis.model_dump(mode="json") if generated.risk_analysis else None
+                            interpreted_intent = generated.interpretation.model_dump(mode="json")
+                            spec = generated.candidate_spec.model_dump(mode="json") if generated.candidate_spec else None
+                            state = generated.state
+                            validation = validate_strategy_spec(spec) if spec else SpecValidation(
+                                ok=False,
+                                errors=questions,
+                                warnings=[],
+                            )
+
+                    if state == "ready_for_validation" and validation.ok and validation.spec is not None:
                         try:
                             dry_run_strategy_spec(validation.spec)
                         except Exception:
@@ -661,11 +803,22 @@ class StrategyBuilderService:
                         else:
                             state = "ready_for_approval"
                             spec = validation.spec
-                elif state != "rejected":
+                    elif state == "ready_for_validation":
+                        questions = validation.errors or ["The generated candidate did not pass deterministic validation."]
+                        state = "needs_clarification"
+                        spec = None
+                elif state == "rejected":
+                    unsupported = list(generated.interpretation.unsupported_requirements)
+                    questions = questions or unsupported
+                    validation = SpecValidation(ok=False, errors=questions, warnings=[])
+                    spec = None
+                else:
+                    questions = questions or list(generated.interpretation.missing_requirements)
                     state = "needs_clarification"
                     spec = None
             except Exception:
                 provider_outcome = "error"
+                provider_request_count = max(provider_request_count, 1)
                 spec = None
                 questions = ["The strategy generation provider is temporarily unavailable. Please try again later."]
                 state = "needs_clarification"
@@ -690,12 +843,18 @@ class StrategyBuilderService:
             assistant_message = "The strategy is precise enough to review. Read the structured specification, then approve it explicitly if it matches your intent."
         else:
             assistant_message = "I need a few more specifics before this can become an implementable strategy."
+        if generation_mode == "llm" and generation_summary:
+            assistant_message = generation_summary
 
         if generation_mode == "llm":
-            metric_provider = provider if provider in {"openai", "anthropic", "nvidia", "ollama"} else "other"
+            metric_provider = provider if provider in {"openai", "anthropic", "deepinfra", "nvidia", "ollama"} else "other"
             metric_model = re.sub(r"[^A-Za-z0-9._:-]", "_", str(model or "unknown"))[:80] or "unknown"
             labels = {"provider": metric_provider, "model": metric_model, "outcome": provider_outcome}
-            METRICS.inc("tradepilot_strategy_builder_provider_calls_total", labels)
+            METRICS.inc(
+                "tradepilot_strategy_builder_provider_calls_total",
+                labels,
+                float(provider_request_count),
+            )
             METRICS.observe("tradepilot_strategy_builder_provider_duration_seconds", labels, max(0.0, time.monotonic() - started_at))
             METRICS.observe("tradepilot_strategy_builder_provider_retries", {"provider": metric_provider}, retry_count)
             METRICS.inc(
@@ -718,6 +877,9 @@ class StrategyBuilderService:
                 "prompt_version": prompt_version,
                 "validation_outcome": "passed" if validation.ok and spec else "not_ready",
                 "retry_count": retry_count,
+                "semantic_repair_count": semantic_repair_count,
+                "provider_request_count": provider_request_count,
+                "generation_path": generation_path,
                 "candidate_spec": spec,
             },
         )
@@ -732,6 +894,11 @@ class StrategyBuilderService:
         return {
             "state": state,
             "assistant_message": assistant_message,
+            "generation_summary": generation_summary,
+            "risk_analysis": risk_analysis,
+            "interpreted_intent": interpreted_intent,
+            "generation_path": generation_path,
+            "semantic_repair_count": semantic_repair_count,
             "questions": questions,
             "draft_spec": spec,
             "validation": {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from enum import StrEnum
 from pathlib import Path
 import re
@@ -349,8 +349,11 @@ class SentimentAccumulationRequest(BaseModel):
         default_factory=lambda: ["AAPL", "MSFT", "NVDA"],
         description="Tickers to fetch and score headlines for.",
     )
-    start: str = Field(default="2024-01-01", description="Start date, formatted as YYYY-MM-DD.")
-    end: str = Field(default="2024-02-10", description="End date, formatted as YYYY-MM-DD.")
+    start: str = Field(
+        default_factory=lambda: (date.today() - timedelta(days=14)).isoformat(),
+        description="Start date, formatted as YYYY-MM-DD.",
+    )
+    end: str = Field(default_factory=lambda: date.today().isoformat(), description="End date, formatted as YYYY-MM-DD.")
     providers: list[SentimentProvider] = Field(
         default_factory=lambda: [SentimentProvider.RSS, SentimentProvider.LOCAL_WEB],
         description="Headline sources: rss, local_web, web, local, newsapi, alphavantage, benzinga. API-key providers need request credentials or backend environment variables.",
@@ -369,6 +372,19 @@ class SentimentAccumulationRequest(BaseModel):
     alphavantage_api_key: str | None = Field(default=None, description="Optional Alpha Vantage key. Backend env ALPHAVANTAGE_API_KEY is also supported.")
     benzinga_api_key: str | None = Field(default=None, description="Optional Benzinga key. Backend env BENZINGA_API_KEY is also supported.")
     stocktwits_access_token: str | None = Field(default=None, description="Personal access token for StockTwits API (stocktwits.com/settings/apps). Backend env STOCKTWITS_ACCESS_TOKEN is also supported.")
+    stocktwits_max_pages: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Maximum StockTwits cursor pages per symbol before reporting incomplete historical coverage.",
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+        description="Optional client retry key. Reusing it with the same request returns the original job without consuming quota again.",
+    )
     output_dir: Path | None = Field(default=None, description="Development-only output directory. Production rejects raw paths and registers tenant dataset ids.")
     use_finbert: bool = Field(default=False, description="Use FinBERT when available; fallback model is used if local cache is unavailable.")
     local_finbert_only: bool = Field(default=True, description="Do not download FinBERT during UI runs.")

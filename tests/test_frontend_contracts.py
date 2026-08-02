@@ -404,6 +404,20 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("trade_summary", type_source)
         self.assertIn(".backtest-chart-canvas", style_source)
 
+    def test_strategy_builder_clears_stale_response_before_next_request(self) -> None:
+        source = PROJECT_ROOT.joinpath("frontend/src/features/ApolloDashboard.tsx").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+        request_start = source.index("const sendBuilderMessage = useCallback")
+        request_end = source.index("const approveBuilderDraft = useCallback", request_start)
+        request_source = source[request_start:request_end]
+
+        self.assertIn("setBuilderResp(null)", request_source)
+        self.assertLess(request_source.index("setBuilderResp(null)"), request_source.index("await chatStrategyBuilder"))
+        self.assertIn("interpreted_intent", type_source)
+        self.assertIn("requirement_trace", type_source)
+        self.assertIn("semantic_repair_count", type_source)
+        self.assertIn("How the AI interpreted this request", source)
+
 
 if __name__ == "__main__":
     unittest.main()

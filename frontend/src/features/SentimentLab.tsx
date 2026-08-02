@@ -62,6 +62,7 @@ function defaultRequest(): SentimentAccumulationRequest {
     alphavantage_api_key: null,
     benzinga_api_key: null,
     stocktwits_access_token: null,
+    stocktwits_max_pages: 20,
     use_finbert: false,
     local_finbert_only: true
   };
@@ -387,7 +388,7 @@ export function SentimentLab() {
     }
     setIsRunning(true);
     try {
-      const finalRequest = { ...request, symbols: finalSymbols };
+      const finalRequest = { ...request, symbols: finalSymbols, idempotency_key: `sentiment:${crypto.randomUUID()}` };
       setRequest(finalRequest);
       setSymbolsText(finalSymbols.join(" "));
       const job = await startSentimentAccumulationJob(finalRequest);
@@ -861,6 +862,11 @@ export function SentimentLab() {
             <label htmlFor="sl-stocktwits-token">
               StockTwits token
               <input id="sl-stocktwits-token" value={request.stocktwits_access_token ?? ""} onChange={(event) => setRequest({ ...request, stocktwits_access_token: event.target.value || null })} placeholder="Optional unless StockTwits is selected" />
+            </label>
+            <label htmlFor="sl-stocktwits-max-pages">
+              StockTwits page limit
+              <input id="sl-stocktwits-max-pages" type="number" min={1} max={100} value={request.stocktwits_max_pages} onChange={(event) => setRequest({ ...request, stocktwits_max_pages: Number(event.target.value) })} />
+              <small>Higher values reach further back in busy streams. A warning is saved if the requested start date is still not reached.</small>
             </label>
           </div>
           <div className="hint-card">

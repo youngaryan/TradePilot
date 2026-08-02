@@ -76,6 +76,9 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
     def accumulate_job(request: SentimentAccumulationRequest, ctx: RequestContext = Depends(paid_context), _: None = Depends(csrf_guard)) -> dict[str, Any]:
         try:
             service.validate_request(request)
+            existing = runner.existing_idempotent_job(request, organization_id=ctx.organization_id)
+            if existing is not None:
+                return redact_paths(existing) if settings.is_production else existing
             estimated_news_pages = 0.0
             reservations: list[dict[str, Any]] = []
             if {"web", "local_web"} & {str(provider).lower() for provider in request.providers}:
@@ -87,6 +90,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
                         "feature": "news_pages",
                         "quantity": estimated_news_pages,
                         "properties": {"providers": request.providers, "symbols": request.symbols},
+                        "idempotency_key": f"{request.idempotency_key}:news_pages" if request.idempotency_key else None,
                     }
                 )
             reservations.append(
@@ -94,6 +98,7 @@ def build_sentiment_router(settings: BackendSettings) -> APIRouter:
                     "feature": "sentiment_job",
                     "quantity": 1.0,
                     "properties": {"providers": request.providers, "symbols": request.symbols, "mode": "job"},
+                    "idempotency_key": f"{request.idempotency_key}:sentiment_job" if request.idempotency_key else None,
                 }
             )
             quotas.check_and_record_many(

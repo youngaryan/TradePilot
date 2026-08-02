@@ -34,6 +34,7 @@ class StockTwitsHeadlineProvider(RemoteHeadlineProvider):
             raise ValueError("StockTwits access token is required.")
         self.access_token = access_token
         self.max_pages = max(int(max_pages), 1)
+        self.last_errors: list[str] = []
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.access_token}"}
@@ -46,10 +47,13 @@ class StockTwitsHeadlineProvider(RemoteHeadlineProvider):
     ) -> pd.DataFrame:
         request = NewsRequest.from_inputs(tickers=tickers, start=start, end=end)
         rows: list[dict[str, Any]] = []
+        self.last_errors = []
+        start_ts = pd.Timestamp(request.start)
+        end_ts = pd.Timestamp(request.end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
 
         for ticker in request.tickers:
             cursor: str | None = None
-            for _ in range(self.max_pages):
+            for page_number in range(1, self.max_pages + 1):
                 params: dict[str, str] = {"max": "30"}
                 if cursor:
                     params["cursor"] = cursor
@@ -62,13 +66,15 @@ class StockTwitsHeadlineProvider(RemoteHeadlineProvider):
                 if not messages:
                     break
 
+                page_timestamps: list[pd.Timestamp] = []
                 for msg in messages:
                     created = pd.to_datetime(msg.get("created_at"), errors="coerce")
                     if created is pd.NaT:
                         continue
                     if created.tz is not None:
                         created = created.tz_localize(None)
-                    if created < pd.Timestamp(request.start) or created > pd.Timestamp(request.end):
+                    page_timestamps.append(created)
+                    if created < start_ts or created > end_ts:
                         continue
 
                     body = _strip_markup(msg.get("body", ""))
@@ -98,9 +104,16 @@ class StockTwitsHeadlineProvider(RemoteHeadlineProvider):
 
                 cursor_data = payload.get("cursor") or {}
                 cursor = cursor_data.get("next")
-                more = cursor_data.get("more", False)
-                if not cursor or not more:
+                has_more = bool(cursor_data.get("more", False))
+                if page_timestamps and min(page_timestamps) <= start_ts:
                     break
+                if not cursor or not has_more:
+                    break
+                if page_number == self.max_pages:
+                    self.last_errors.append(
+                        f"StockTwits coverage for {ticker} is incomplete: the {self.max_pages}-page safety limit "
+                        f"was reached before the requested start date {request.start}."
+                    )
 
         if not rows:
             return pd.DataFrame(columns=list(HEADLINE_COLUMNS) + ["user_sentiment", "user_username", "message_id"])

@@ -155,6 +155,7 @@ class QuotaService:
                     "quantity": quantity,
                     "limit": self._quota_limit(quotas[feature], field_name=f"Quota limit for {feature}"),
                     "properties": reservation.get("properties") or {},
+                    "idempotency_key": reservation.get("idempotency_key"),
                 }
             )
         if _is_admin_role(role):

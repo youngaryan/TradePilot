@@ -84,6 +84,29 @@ CASES: list[tuple[str, RunnerFactory, Submitter]] = [
 ]
 
 
+def test_sentiment_idempotency_key_dispatches_one_durable_job() -> None:
+    with TemporaryDirectory(prefix="tradepilot-sentiment-idempotency-") as temp_dir:
+        settings = _settings(Path(temp_dir))
+        first_runner = SentimentJobRunner(settings)
+        second_runner = SentimentJobRunner(settings)
+        request = SentimentAccumulationRequest(
+            symbols=["SPY"],
+            providers=["rss"],
+            idempotency_key="sentiment-retry-key-123",
+        )
+        with patch("pairs_trading.backend.services.enqueue_quant_job", return_value={"queue": "test"}) as enqueue:
+            first = first_runner.submit(request, organization_id="org-a", user_id="user-a")
+            replay = second_runner.submit(request, organization_id="org-a", user_id="user-a")
+
+        assert first["id"] == replay["id"]
+        assert enqueue.call_count == 1
+        assert len(first_runner.metadata_store.list_jobs(kind="sentiment", organization_id="org-a")) == 1
+
+        changed = request.model_copy(update={"symbols": ["QQQ"]})
+        with pytest.raises(ValueError, match="reused with a different request"):
+            second_runner.submit(changed, organization_id="org-a", user_id="user-a")
+
+
 @pytest.mark.parametrize(("kind", "runner_factory", "submitter"), CASES)
 def test_external_runners_share_durable_visibility_without_startup_mutation(
     kind: str,

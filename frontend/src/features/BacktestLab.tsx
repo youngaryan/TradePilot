@@ -690,6 +690,18 @@ export function BacktestLab({
                 </ul>
               </div>
             ) : null}
+            {builderResponse?.interpreted_intent ? (
+              <details className="strategy-builder__questions">
+                <summary><strong>How the AI interpreted this request</strong></summary>
+                <p>{builderResponse.interpreted_intent.objective}</p>
+                <ul>
+                  {builderResponse.interpreted_intent.requirement_trace.map((item, index) => (
+                    <li key={`${item.requirement}-${index}`}><strong>{item.disposition}:</strong> {item.requirement} — {item.handling}</li>
+                  ))}
+                </ul>
+                {builderResponse.semantic_repair_count ? <p>The engine validator corrected this draft through one bounded AI repair pass.</p> : null}
+              </details>
+            ) : null}
 
             {draftSpec ? (
               <div className="strategy-spec-review">
@@ -706,6 +718,23 @@ export function BacktestLab({
                   <span><strong>Side</strong>{draftSpec.side.replace("_", " ")}</span>
                   <span><strong>Sizing</strong>{String(draftSpec.position_sizing.max_position_per_symbol ?? "n/a")} max per symbol</span>
                 </div>
+                {builderResponse?.generation_summary ? (
+                  <div className="inline-info">
+                    <strong>AI summary</strong> {builderResponse.generation_summary}
+                  </div>
+                ) : null}
+                {builderResponse?.risk_analysis ? (
+                  <div className="inline-warning">
+                    <AlertTriangle size={16} />
+                    <div>
+                      <strong>Pre-backtest risk: {builderResponse.risk_analysis.overall_risk}</strong>
+                      <div>{builderResponse.risk_analysis.overview}</div>
+                      <div><strong>Key risks:</strong> {builderResponse.risk_analysis.key_risks.join(" ")}</div>
+                      <div><strong>Mitigations:</strong> {builderResponse.risk_analysis.mitigations.join(" ")}</div>
+                      <div><strong>Validate:</strong> {builderResponse.risk_analysis.validation_priorities.join(" ")}</div>
+                    </div>
+                  </div>
+                ) : null}
                 <DataTable
                   rows={[...draftSpec.entry_rules.map((rule) => ({ ...rule, group: "Entry" })), ...draftSpec.exit_rules.map((rule) => ({ ...rule, group: "Exit" }))]}
                   empty="No rules in the draft spec."

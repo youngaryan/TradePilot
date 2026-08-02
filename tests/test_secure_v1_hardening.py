@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 import re
 import shutil
@@ -174,6 +174,14 @@ class SecureV1HardeningTests(unittest.TestCase):
             SentimentAccumulationRequest(providers=["unknown"])
         with self.assertRaises(ValidationError):
             SentimentAccumulationRequest(start="2024-02-01", end="2024-01-01")
+
+        today_before = date.today()
+        sentiment_defaults = SentimentAccumulationRequest()
+        today_after = date.today()
+        default_end = date.fromisoformat(sentiment_defaults.end)
+        self.assertIn(default_end, {today_before, today_after})
+        self.assertEqual(date.fromisoformat(sentiment_defaults.start), default_end - timedelta(days=14))
+        self.assertEqual(sentiment_defaults.stocktwits_max_pages, 20)
 
     def test_local_artifact_storage_rejects_tenant_path_traversal(self) -> None:
         from pairs_trading.backend.storage import LocalArtifactStorage, safe_join_tenant_path

@@ -2,12 +2,15 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "../../api/client";
-import type { PaperDashboardPayload } from "../../api/types";
+import type { PaperDashboardPayload, SentimentDatasetPayload } from "../../api/types";
 import {
   ApolloDashboard,
   JobPollingTimeoutError,
   buildProductionSentimentRequest,
+  buildSentimentNewsMatrix,
   pollJobUntilTerminal,
+  sentimentHeadlineKey,
+  sentimentWindowCutoff,
 } from "../ApolloDashboard";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -131,6 +134,35 @@ describe("production request and polling helpers", () => {
     expect(request.news_files).toEqual([]);
     expect(request.start).toBe("2026-07-02");
     expect(request.end).toBe("2026-08-01");
+    expect(request.stocktwits_max_pages).toBe(20);
+  });
+
+  it("anchors sentiment windows to historical dataset dates and weights confidence", () => {
+    const dataset = {
+      metadata: { end: "2024-01-10" },
+      daily_points: [
+        { date: "2024-01-01", ticker: "AAA", article_count: 5, sentiment_score: -0.5, confidence: 0.2 },
+        { date: "2024-01-04", ticker: "AAA", article_count: 2, sentiment_score: 0.2, confidence: 0.4 },
+        { date: "2024-01-10", ticker: "AAA", article_count: 6, sentiment_score: 0.6, confidence: 0.8 },
+      ],
+      headlines: [], scored_headlines: [], ticker_summary: [], source_summary: [], warnings: [], summary: {},
+    } as unknown as SentimentDatasetPayload;
+
+    const cutoff = sentimentWindowCutoff(dataset, "7");
+    const matrix = buildSentimentNewsMatrix(dataset, cutoff);
+
+    expect(cutoff).toBe("2024-01-04");
+    expect(matrix).toHaveLength(1);
+    expect(matrix[0].article_count).toBe(8);
+    expect(matrix[0].avg_sentiment).toBeCloseTo(0.5);
+    expect(matrix[0].avg_confidence).toBeCloseTo(0.7);
+    expect(matrix[0].latest_sentiment).toBe(0.6);
+  });
+
+  it("gives duplicate syndicated headlines stable distinct keys", () => {
+    const first = sentimentHeadlineKey({ headline: "Same wire story", timestamp: "2026-08-01T10:00:00Z", source: "wire" }, 0);
+    const second = sentimentHeadlineKey({ headline: "Same wire story", timestamp: "2026-08-01T10:05:00Z", source: "wire" }, 1);
+    expect(first).not.toBe(second);
   });
 
   it("bounds polling and cancels pending timers", async () => {

@@ -221,6 +221,39 @@ def test_quota_batch_rolls_back_and_invalid_values_fail_closed(tmp_path: Path) -
     assert bypass["usage"] is None
 
 
+def test_quota_reservation_idempotency_key_records_usage_once(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteMetadataStore(settings.metadata_db_path)
+    organization_id = _workspace(store, "quota-idempotent")["organization_id"]
+    store.upsert_organization_quotas(organization_id=organization_id, quotas={"sentiment_job": 5})
+    service = QuotaService(settings)
+    reservation = {
+        "feature": "sentiment_job",
+        "quantity": 1,
+        "properties": {"mode": "job"},
+        "idempotency_key": "sentiment-request-123:sentiment_job",
+    }
+
+    first = service.check_and_record_many(
+        organization_id=organization_id,
+        occurred_at_utc="2026-08-01T12:00:00Z",
+        reservations=[reservation],
+    )
+    replay = service.check_and_record_many(
+        organization_id=organization_id,
+        occurred_at_utc="2026-08-01T12:01:00Z",
+        reservations=[reservation],
+    )
+
+    assert first[0]["usage"]["id"] == replay[0]["usage"]["id"]
+    assert replay[0]["idempotent_replay"] is True
+    assert store.usage_count_window(
+        organization_id=organization_id,
+        feature="sentiment_job",
+        window_start_utc="2026-08-01T00:00:00Z",
+        window_end_utc="2026-08-02T00:00:00Z",
+    ) == 1
+
 def test_stripe_webhook_failure_is_retryable_then_duplicates_are_noops(tmp_path: Path) -> None:
     service = BillingService(_settings(tmp_path))
     organization_id = _workspace(service.store, "billing-retry")["organization_id"]

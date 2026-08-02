@@ -827,7 +827,7 @@ class RSSHeadlineProvider(RemoteHeadlineProvider):
         max_items_per_feed: int = 200,
         timeout_seconds: float = 20.0,
         skip_errors: bool = True,
-        assign_single_ticker_when_unmatched: bool = True,
+        assign_single_ticker_when_unmatched: bool = False,
     ) -> None:
         super().__init__(timeout_seconds=timeout_seconds)
         self.feed_urls = tuple(self._normalize_feed_url(url) for url in (feed_urls or (self.DEFAULT_FEED_TEMPLATE,)))

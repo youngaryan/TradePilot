@@ -55,6 +55,40 @@ class StrategyBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(len(payload["questions"]), 3)
         self.assertIsNone(payload["draft_spec"])
 
+    def test_natural_ema_prompt_parses_components_and_normalizes_execution(self) -> None:
+        from pairs_trading.backend.strategy_builder import _build_draft_from_text, validate_strategy_spec
+
+        prompt = (
+            "Trade SPY on daily bars, going long whenever the 12-day EMA crosses above the 48-day EMA "
+            "and holding 100% of the account in a single position, then exiting when the 12-day EMA "
+            "crosses back below the 48-day EMA or price falls 10% below the entry, executing decisions "
+            "on the close of the signal bar and assuming roughly 0.5 bps commission, 1 bps spread, and "
+            "0.75 bps slippage."
+        )
+        spec, questions, state = _build_draft_from_text(prompt)
+
+        self.assertEqual(state, "ready_for_approval")
+        self.assertEqual(questions, [])
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec["asset_universe"]["symbols"], ["SPY"])
+        self.assertEqual(spec["entry_rules"][0]["kind"], "ema_cross_above")
+        self.assertEqual(spec["entry_rules"][0]["parameters"], {"fast_window": 12, "slow_window": 48})
+        self.assertEqual(spec["exit_rules"][0]["kind"], "ema_cross_below")
+        self.assertEqual(spec["risk_controls"]["stop_loss_pct"], 0.10)
+        self.assertEqual(spec["costs"], {
+            "commission_bps": 0.5,
+            "spread_bps": 1.0,
+            "slippage_bps": 0.75,
+            "market_impact_bps": 0.0,
+            "delay_bars": 1,
+        })
+        self.assertEqual(spec["rebalancing"]["execution_timing"], "next_bar_close")
+        self.assertTrue(spec["compatibility"]["execution_normalized"])
+        validation = validate_strategy_spec(spec)
+        self.assertTrue(validation.ok)
+        self.assertTrue(any("normalized" in warning for warning in validation.warnings))
+
     def test_prompt_injection_attempt_is_rejected(self) -> None:
         app = self.make_app()
         client = TestClient(app)
@@ -96,6 +130,12 @@ class StrategyBuilderTests(unittest.TestCase):
         self.assertEqual(chat.json()["state"], "ready_for_approval")
         spec = chat.json()["draft_spec"]
         self.assertEqual(spec["asset_universe"]["symbols"], ["SPY", "QQQ"])
+        self.assertAlmostEqual(
+            sum(float(spec["costs"][name]) for name in (
+                "commission_bps", "spread_bps", "slippage_bps", "market_impact_bps"
+            )),
+            3.0,
+        )
 
         missing_approval = user_client.post(
             "/api/strategies/builder/approve",
@@ -111,6 +151,7 @@ class StrategyBuilderTests(unittest.TestCase):
         )
         self.assertEqual(approved.status_code, 200, approved.text)
         strategy = approved.json()["strategy"]
+        self.assertEqual(strategy["risk_level"], "medium")
         pipeline = approved.json()["catalog_item"]["pipeline"]
         self.assertEqual(strategy["owner_user_id"], "usr_c85baec7d78db180b549")
 

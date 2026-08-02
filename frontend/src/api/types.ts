@@ -677,6 +677,28 @@ export interface UserStrategyRecord {
 export interface StrategyBuilderResponse {
   state: "needs_clarification" | "ready_for_approval" | "rejected" | string;
   assistant_message: string;
+  generation_summary?: string | null;
+  risk_analysis?: {
+    overall_risk: "low" | "medium" | "high";
+    overview: string;
+    key_risks: string[];
+    mitigations: string[];
+    validation_priorities: string[];
+  } | null;
+  interpreted_intent?: {
+    objective: string;
+    requirement_trace: Array<{
+      requirement: string;
+      disposition: "implemented" | "normalized" | "unsupported" | "missing";
+      handling: string;
+    }>;
+    assumptions: string[];
+    safe_normalizations: string[];
+    unsupported_requirements: string[];
+    missing_requirements: string[];
+  } | null;
+  generation_path?: string;
+  semantic_repair_count?: number;
   questions: string[];
   draft_spec?: StrategySpec | null;
   validation: {
@@ -1234,6 +1256,7 @@ export interface MarketResearchJob {
 }
 
 export interface SentimentAccumulationRequest {
+  idempotency_key?: string | null;
   symbols: string[];
   start: string;
   end: string;
@@ -1252,6 +1275,7 @@ export interface SentimentAccumulationRequest {
   alphavantage_api_key?: string | null;
   benzinga_api_key?: string | null;
   stocktwits_access_token?: string | null;
+  stocktwits_max_pages: number;
   use_finbert: boolean;
   local_finbert_only: boolean;
 }

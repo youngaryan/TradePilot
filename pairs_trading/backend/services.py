@@ -2364,6 +2364,7 @@ class SentimentService:
                 "domains": request.web_research_domains,
                 "urls": request.web_research_urls,
                 "query_terms": request.web_research_query_terms,
+                "stocktwits_max_pages": request.stocktwits_max_pages,
                 "maximum_articles": request.web_research_max_articles,
                 "max_crawl_pages_per_source": request.local_web_max_pages_per_source,
                 "refresh_minutes": request.local_web_refresh_minutes,
@@ -2452,6 +2453,7 @@ class SentimentService:
                 "web_research_query_terms": request.web_research_query_terms,
                 "web_research_max_articles": request.web_research_max_articles,
                 "web_research_fetch_article_text": request.web_research_fetch_article_text,
+                "stocktwits_max_pages": request.stocktwits_max_pages,
                 "news_files": [str(path) for path in request.news_files],
                 "warnings": warnings,
             }
@@ -2824,6 +2826,34 @@ class SentimentJobRunner:
             return job_id
         return _attempt_publication_id(job_id, self.claimed_attempt, self.claimed_worker_id)
 
+    def _idempotent_job_id(self, request: SentimentAccumulationRequest, organization_id: str) -> str | None:
+        if not request.idempotency_key:
+            return None
+        return self.metadata_store.stable_id("sjob", f"{organization_id}:{request.idempotency_key}")
+
+    @staticmethod
+    def _assert_same_idempotent_request(existing: dict[str, Any], persisted_request: dict[str, Any]) -> None:
+        if existing.get("request") != persisted_request:
+            raise ValueError("Sentiment idempotency key was reused with a different request.")
+
+    def existing_idempotent_job(
+        self,
+        request: SentimentAccumulationRequest,
+        *,
+        organization_id: str,
+    ) -> dict[str, Any] | None:
+        job_id = self._idempotent_job_id(request, organization_id)
+        if job_id is None:
+            return None
+        persisted_request, _ = _prepare_job_request(
+            request.model_dump(mode="json"),
+            external_worker=not self.settings.enable_in_process_jobs,
+        )
+        existing = self.get_job(job_id, organization_id=organization_id)
+        if existing is not None:
+            self._assert_same_idempotent_request(existing, persisted_request)
+        return existing
+
     def submit(self, request: SentimentAccumulationRequest, *, organization_id: str, user_id: str | None = None) -> dict[str, Any]:
         SentimentService(self.settings).validate_request(request)
         persisted_request, secrets = _prepare_job_request(
@@ -2833,7 +2863,7 @@ class SentimentJobRunner:
         secrets.update(_sentiment_server_secret_values())
         now = _utc_now_iso()
         job = SentimentAccumulationJob(
-            id=uuid4().hex,
+            id=self._idempotent_job_id(request, organization_id) or uuid4().hex,
             status="queued",
             request=persisted_request,
             created_at_utc=now,
@@ -2850,6 +2880,13 @@ class SentimentJobRunner:
             max_attempts=self.settings.job_max_attempts,
         )
         with self.lock:
+            safe_payload = json_ready(_secret_safe_job_data(job.to_dict(), secrets))
+            if not self.metadata_store.create_job_if_absent(kind="sentiment", payload=safe_payload):
+                existing = self.get_job(job.id, organization_id=organization_id)
+                if existing is None:
+                    raise RuntimeError("Idempotent sentiment job exists but could not be loaded.")
+                self._assert_same_idempotent_request(existing, persisted_request)
+                return existing
             self._secret_values[job.id] = secrets
             self.jobs[job.id] = job
             self._save_locked(job)

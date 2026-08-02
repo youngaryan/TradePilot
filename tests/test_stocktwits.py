@@ -111,6 +111,22 @@ class TestStockTwitsHeadlineProvider:
 
         assert len(df) == 90
         assert mock_fetch.call_count == 3
+        assert provider.last_errors
+        assert "coverage for AAPL is incomplete" in provider.last_errors[0]
+
+    @patch.object(StockTwitsHeadlineProvider, "_fetch_json")
+    def test_pagination_stops_after_reaching_requested_start(self, mock_fetch):
+        mock_fetch.side_effect = [
+            json.loads(_mock_response([_message("recent", created="2024-01-31T12:00:00Z")], cursor="page2", more=True)),
+            json.loads(_mock_response([_message("boundary", created="2024-01-01T00:00:00Z")], cursor="page3", more=True)),
+        ]
+
+        provider = StockTwitsHeadlineProvider(access_token="t", max_pages=10)
+        df = provider.get_headlines(tickers=["AAPL"], start="2024-01-01", end="2024-01-31")
+
+        assert len(df) == 2
+        assert mock_fetch.call_count == 2
+        assert provider.last_errors == []
 
     @patch.object(StockTwitsHeadlineProvider, "_fetch_json")
     def test_skips_messages_without_body(self, mock_fetch):
