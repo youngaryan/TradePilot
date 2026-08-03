@@ -12,6 +12,7 @@ from .config import BackendSettings
 
 DEFAULT_QUOTAS: dict[str, float] = {
     "backtest_job": 20,
+    "strategy_builder_generation": 50,
     "market_research_job": 20,
     "sentiment_job": 20,
     "paper_job": 20,

@@ -93,6 +93,12 @@ def test_marketplace_persists_immutable_versions_and_tenant_subscriptions() -> N
         assert first.status_code == replay.status_code == 200
         assert first.json()["id"] == replay.json()["id"]
         assert first.json()["pinned_listing_version_id"] == version_id
+        community_pipeline = f"marketplace_strategy:{first.json()['id']}"
+        allowed = subscriber.get("/api/strategies/allowed", headers=subscriber_headers)
+        assert allowed.status_code == 200, allowed.text
+        community_item = next(item for item in allowed.json() if item["pipeline"] == community_pipeline)
+        assert community_item["community_strategy"] is True
+        assert community_item["paper_config_example"]["symbols"] == ["SPY", "QQQ"]
 
         replacement = _approved_strategy(
             publisher,

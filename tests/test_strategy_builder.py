@@ -155,6 +155,15 @@ class StrategyBuilderTests(unittest.TestCase):
         pipeline = approved.json()["catalog_item"]["pipeline"]
         self.assertEqual(strategy["owner_user_id"], "usr_c85baec7d78db180b549")
 
+        duplicate = user_client.post(
+            "/api/strategies/builder/approve",
+            headers=user_headers,
+            json={"spec": spec, "approved": True, "approval_text": "Approved a second time."},
+        )
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertEqual(duplicate.json()["strategy"]["id"], strategy["id"])
+        self.assertTrue(duplicate.json()["validation"]["deduplicated"])
+
         owner_catalog = user_client.get("/api/strategies/allowed", headers=user_headers)
         self.assertEqual(owner_catalog.status_code, 200)
         self.assertIn(pipeline, {item["pipeline"] for item in owner_catalog.json()})
@@ -220,6 +229,75 @@ class StrategyBuilderTests(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertTrue(any("Unsupported rule kind" in error for error in result.errors))
+
+    def test_parser_keeps_multiple_rules_and_named_percentages_separate(self) -> None:
+        from pairs_trading.backend.strategy_builder import _build_draft_from_text
+
+        spec, questions, state = _build_draft_from_text(
+            "Trade SPY and QQQ on daily bars. Buy equal weight at 25% per symbol when RSI 14 is below 30 "
+            "and price is above the 50 day SMA, exit when RSI is above 60 or price is below the 50 day SMA, "
+            "use a 10% stop loss, 20% take profit, and 3 bps costs."
+        )
+
+        self.assertEqual(state, "ready_for_approval")
+        self.assertEqual(questions, [])
+        assert spec is not None
+        self.assertEqual([rule["kind"] for rule in spec["entry_rules"]], ["rsi_below", "price_above_sma"])
+        self.assertEqual([rule["kind"] for rule in spec["exit_rules"]], ["rsi_above", "price_below_sma"])
+        self.assertEqual(spec["exit_rules"][0]["parameters"]["threshold"], 60.0)
+        self.assertEqual(spec["position_sizing"]["max_position_per_symbol"], 0.25)
+        self.assertEqual(spec["risk_controls"]["stop_loss_pct"], 0.10)
+        self.assertEqual(spec["risk_controls"]["take_profit_pct"], 0.20)
+
+    def test_macd_parameters_and_backtest_overrides_are_executable(self) -> None:
+        from pairs_trading.backend.strategy_builder import _build_draft_from_text, apply_strategy_parameters
+
+        spec, _, state = _build_draft_from_text(
+            "Trade SPY daily. Buy when MACD 8 21 5 crosses above signal and exit when MACD 8 21 5 "
+            "crosses below signal. Equal weight 50%, no stop, 2 bps costs."
+        )
+        self.assertEqual(state, "ready_for_approval")
+        assert spec is not None
+        self.assertEqual(spec["entry_rules"][0]["parameters"], {"fast_window": 8, "slow_window": 21, "signal_window": 5})
+
+        overridden = apply_strategy_parameters(spec, {"macd_fast_window": 10, "max_position_per_symbol": 0.3})
+        self.assertEqual(overridden["entry_rules"][0]["parameters"]["fast_window"], 10)
+        self.assertEqual(overridden["exit_rules"][0]["parameters"]["fast_window"], 10)
+        self.assertEqual(overridden["position_sizing"]["max_position_per_symbol"], 0.3)
+
+    def test_rule_mode_revision_changes_only_requested_rsi_exit(self) -> None:
+        from pairs_trading.backend.strategy_builder import _build_draft_from_text, _revise_rule_draft
+
+        spec, _, _ = _build_draft_from_text(
+            "Trade SPY daily. Buy when RSI 14 is below 30 and exit when RSI is above 60. "
+            "Equal weight 50%, no stop, 2 bps costs."
+        )
+        assert spec is not None
+
+        revised = _revise_rule_draft(spec, "Change RSI exit to 65")
+
+        self.assertEqual(revised["asset_universe"]["symbols"], ["SPY"])
+        self.assertEqual(revised["entry_rules"][0]["parameters"]["threshold"], 30.0)
+        self.assertEqual(revised["exit_rules"][0]["parameters"]["threshold"], 65.0)
+        defaults = {item["name"]: item["default"] for item in revised["editable_parameters"]}
+        self.assertEqual(defaults["rsi_exit_threshold"], 65.0)
+
+    def test_validation_reports_bad_types_instead_of_raising(self) -> None:
+        from pairs_trading.backend.strategy_builder import _build_draft_from_text, validate_strategy_spec
+
+        spec, _, _ = _build_draft_from_text(
+            "Trade SPY daily. Buy when RSI 14 is below 30 and exit when RSI is above 60. "
+            "Equal weight 50%, no stop, 2 bps costs."
+        )
+        assert spec is not None
+        spec["position_sizing"]["max_position_per_symbol"] = {"not": "numeric"}
+        spec["costs"]["commission_bps"] = "not-a-number"
+
+        result = validate_strategy_spec(spec)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(any("max_position_per_symbol must be numeric" in error for error in result.errors))
+        self.assertTrue(any("commission_bps must be numeric" in error for error in result.errors))
 
     def test_strategy_builder_accepts_short_term_hourly_specs(self) -> None:
         from pairs_trading.backend.strategy_builder import validate_strategy_spec

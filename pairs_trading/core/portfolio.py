@@ -27,12 +27,20 @@ class PortfolioManager:
         forecast_floor: float = 0.15,
         max_strategy_weight: float | None = None,
         max_pair_weight: float | None = None,
+        allocation_method: str = "risk_weighted",
+        max_active_positions: int | None = None,
     ) -> None:
         self.max_leverage = max_leverage
         self.risk_per_trade = risk_per_trade
         self.volatility_window = volatility_window
         self.forecast_floor = forecast_floor
         self.max_strategy_weight = max_strategy_weight if max_strategy_weight is not None else max_pair_weight
+        if allocation_method not in {"risk_weighted", "equal_weight"}:
+            raise ValueError("allocation_method must be risk_weighted or equal_weight")
+        self.allocation_method = allocation_method
+        if max_active_positions is not None and int(max_active_positions) < 1:
+            raise ValueError("max_active_positions must be at least 1 when provided")
+        self.max_active_positions = int(max_active_positions) if max_active_positions is not None else None
 
     def allocate_capital(
         self,
@@ -93,7 +101,13 @@ class PortfolioManager:
 
             conviction = frame["forecast"].abs().clip(lower=self.forecast_floor, upper=2.0)
             cost_penalty = (1.0 / (1.0 + frame["cost_estimate"] * 10_000.0)).clip(lower=0.25, upper=1.0)
-            gross_weight = (self.risk_per_trade / rolling_vol) * conviction * cost_penalty
+            if self.allocation_method == "equal_weight":
+                gross_weight = pd.Series(
+                    float(self.max_strategy_weight if self.max_strategy_weight is not None else 1.0),
+                    index=frame.index,
+                )
+            else:
+                gross_weight = (self.risk_per_trade / rolling_vol) * conviction * cost_penalty
             if self.max_strategy_weight is not None:
                 gross_weight = gross_weight.clip(upper=self.max_strategy_weight)
 
@@ -120,6 +134,12 @@ class PortfolioManager:
                     **output.diagnostics,
                 }
             )
+
+        if self.max_active_positions is not None and len(weights.columns) > self.max_active_positions:
+            # Prefer the strongest active forecasts, with stable column order resolving ties.
+            scores = weights.abs() * (1.0 + strategy_forecasts.abs())
+            ranks = scores.rank(axis=1, method="first", ascending=False)
+            weights = weights.where((weights == 0.0) | (ranks <= self.max_active_positions), 0.0)
 
         gross_leverage = weights.abs().sum(axis=1)
         scaling = pd.Series(1.0, index=portfolio_index)

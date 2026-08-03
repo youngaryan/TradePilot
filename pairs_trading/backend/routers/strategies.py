@@ -10,6 +10,7 @@ from ..config import BackendSettings
 from ..saas import RequestContext
 from ..schemas import StrategyBuilderApprovalRequest, StrategyBuilderChatRequest
 from ..strategy_builder import StrategyBuilderService
+from ..quotas import QuotaExceeded, QuotaService
 
 
 def build_strategy_router(settings: BackendSettings) -> APIRouter:
@@ -17,6 +18,7 @@ def build_strategy_router(settings: BackendSettings) -> APIRouter:
     auth_context = require_auth_context(settings)
     csrf_guard = require_csrf(settings)
     builder = StrategyBuilderService(settings)
+    quotas = QuotaService(settings)
 
     @router.get("/catalog")
     def get_strategy_catalog() -> list[dict[str, Any]]:
@@ -51,13 +53,23 @@ def build_strategy_router(settings: BackendSettings) -> APIRouter:
         if not request.messages:
             raise HTTPException(status_code=400, detail="Send at least one user message.")
         try:
+            if settings.strategy_builder_mode == "llm":
+                quotas.check_and_record(
+                    organization_id=ctx.organization_id,
+                    user_id=str(ctx.user["id"]),
+                    feature="strategy_builder_generation",
+                    properties={"provider": settings.strategy_builder_llm_provider},
+                    role=ctx.user.get("role"),
+                )
             return builder.chat(
                 organization_id=ctx.organization_id,
                 user_id=str(ctx.user["id"]),
                 messages=[message.model_dump(mode="json") for message in request.messages],
                 draft_spec=request.draft_spec,
             )
-        except ValueError as exc:
+        except QuotaExceeded as exc:
+            raise HTTPException(status_code=429, detail=exc.as_detail()) from exc
+        except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/builder/approve")
@@ -77,7 +89,7 @@ def build_strategy_router(settings: BackendSettings) -> APIRouter:
                 approval_text=approval_text,
                 provenance_token=request.provenance_token,
             )
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

@@ -1479,15 +1479,18 @@ def run_rule_based_strategy_pipeline(
         delay_bars=int(costs.get("delay_bars", 1)),
     )
     sizing = spec.get("position_sizing") if isinstance(spec.get("position_sizing"), dict) else {}
+    risk_controls = spec.get("risk_controls") if isinstance(spec.get("risk_controls"), dict) else {}
     max_gross = float(sizing.get("max_gross_exposure", 1.0))
     pipeline_name = experiment_name or str(spec.get("name") or "user_rule_strategy")
     pipeline = DirectionalStrategyPipeline(
         strategy_factory=strategy_factory,
         portfolio_manager=PortfolioManager(
             max_leverage=max(0.1, max_gross),
-            risk_per_trade=min(0.20, max(0.01, float(sizing.get("max_position_per_symbol", 0.25)))),
+            risk_per_trade=max(0.01, float(sizing.get("max_position_per_symbol", 0.25))),
             volatility_window=20,
             max_strategy_weight=min(1.0, max(0.01, float(sizing.get("max_position_per_symbol", 0.25)))),
+            allocation_method="equal_weight",
+            max_active_positions=int(risk_controls.get("max_positions", len(symbols))),
         ),
         config=DirectionalPipelineConfig.from_symbols(symbols=symbols, min_history=min_history),
         name=pipeline_name,

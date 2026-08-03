@@ -34,7 +34,7 @@ from ..pipelines import (
 from ..reporting.paper import PaperDashboardVisualizer
 from ..research import GraphClusterConfig, PairScreenConfig
 from ..features.sentiment import SentimentConfig
-from ..strategies import GraphClusterTradingConfig
+from ..strategies import GraphClusterTradingConfig, build_rule_based_strategy_factory
 from .paper_state import (
     PAPER_LEDGER_SCHEMA_VERSION,
     PaperStateScope,
@@ -485,6 +485,12 @@ class PaperTradingService:
     def _default_lookback(spec: PaperStrategySpec) -> int:
         if spec.lookback_bars is not None:
             return int(spec.lookback_bars)
+        if spec.pipeline.startswith(("user_strategy:", "marketplace_strategy:")):
+            strategy_spec = spec.params.get("strategy_spec")
+            if not isinstance(strategy_spec, dict):
+                raise ValueError("Custom and community paper strategies require an embedded validated strategy_spec.")
+            _, min_history = build_rule_based_strategy_factory(strategy_spec)
+            return min_history + 10
         if spec.pipeline == "etf_trend":
             return 800
         if spec.pipeline in {"stat_arb", "graph_stat_arb"}:
@@ -637,6 +643,60 @@ class PaperTradingService:
             instrument_prices=instrument_prices,
             diagnostics=output.diagnostics,
             metadata={"pipeline": spec.pipeline, "trading_mode": str(spec.timeframe.mode), "execution_interval": spec.timeframe.execution_interval},
+        )
+
+    def _build_user_strategy_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
+        strategy_spec = spec.params.get("strategy_spec")
+        if not isinstance(strategy_spec, dict):
+            raise ValueError("Custom and community paper strategies require an embedded validated strategy_spec.")
+        symbols = list(spec.symbols or strategy_spec.get("asset_universe", {}).get("symbols", []))
+        if not symbols:
+            raise ValueError(f"{spec.name} requires at least one symbol.")
+        strategy_factory, min_history = build_rule_based_strategy_factory(strategy_spec)
+        prices = self._price_history(
+            symbols,
+            asof=asof,
+            lookback_bars=max(self._default_lookback(spec), min_history + 10),
+            interval=spec.effective_interval,
+        )
+        sizing = strategy_spec.get("position_sizing") if isinstance(strategy_spec.get("position_sizing"), dict) else {}
+        max_position = float(sizing.get("max_position_per_symbol", 1.0))
+        max_gross = float(sizing.get("max_gross_exposure", 1.0))
+        risk_controls = strategy_spec.get("risk_controls") if isinstance(strategy_spec.get("risk_controls"), dict) else {}
+        pipeline = DirectionalStrategyPipeline(
+            strategy_factory=strategy_factory,
+            portfolio_manager=PortfolioManager(
+                max_leverage=max_gross,
+                max_strategy_weight=max_position,
+                allocation_method="equal_weight",
+                max_active_positions=int(risk_controls.get("max_positions", len(symbols))),
+            ),
+            config=DirectionalPipelineConfig.from_symbols(symbols=symbols, min_history=min_history),
+            name=spec.name,
+            multi_timeframe=MultiTimeframeSignalConfig(
+                execution_interval=spec.timeframe.execution_interval,
+                confirmation_interval="4h",
+                fast_window=6,
+                slow_window=24,
+            ) if spec.timeframe.mode == TradingMode.SHORT_TERM else None,
+            timeframe_metadata=spec.timeframe.to_metadata(),
+        )
+        output = pipeline.run_fold(train_data=prices.iloc[:-1], test_data=prices.iloc[-1:])
+        target_weights = self._extract_asset_weights(output)
+        instrument_prices = {symbol: float(prices.iloc[-1][symbol]) for symbol in prices.columns if pd.notna(prices.iloc[-1][symbol])}
+        return PaperSignalSnapshot(
+            strategy_name=spec.name,
+            timestamp=pd.Timestamp(prices.index[-1]).tz_localize(None),
+            mode="asset",
+            target_weights=target_weights,
+            instrument_prices=instrument_prices,
+            diagnostics=output.diagnostics,
+            metadata={
+                "pipeline": spec.pipeline,
+                "user_strategy": spec.pipeline.startswith("user_strategy:"),
+                "community_strategy": spec.pipeline.startswith("marketplace_strategy:"),
+                "trading_mode": str(spec.timeframe.mode),
+            },
         )
 
     def _build_etf_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
@@ -957,6 +1017,8 @@ class PaperTradingService:
         )
 
     def build_snapshot(self, spec: PaperStrategySpec, *, asof: pd.Timestamp) -> PaperSignalSnapshot:
+        if spec.pipeline.startswith(("user_strategy:", "marketplace_strategy:")):
+            return self._build_user_strategy_snapshot(spec, asof=asof)
         if spec.pipeline == "etf_trend":
             return self._build_etf_snapshot(spec, asof=asof)
         if spec.pipeline == "stat_arb":

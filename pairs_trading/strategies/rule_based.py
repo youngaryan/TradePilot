@@ -20,6 +20,8 @@ class RuleBasedStrategyConfig:
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
     transaction_cost_bps: float = 2.0
+    entry_logic: str = "all"
+    exit_logic: str = "any"
 
 
 def _rule_parameters(rule: dict[str, Any]) -> dict[str, Any]:
@@ -128,8 +130,8 @@ class RuleBasedDirectionalStrategy(WalkForwardStrategy):
     def run_fold(self, train_data: pd.DataFrame, test_data: pd.DataFrame) -> StrategyOutput:
         symbol, prices, test_index = _extract_price_series(train_data, test_data, self.symbol)
         analysis = _price_analysis_frame(prices)
-        entry = _combine_rules(analysis, prices, self.config.entry_rules, mode="all")
-        exit_ = _combine_rules(analysis, prices, self.config.exit_rules, mode="any")
+        entry = _combine_rules(analysis, prices, self.config.entry_rules, mode=self.config.entry_logic)
+        exit_ = _combine_rules(analysis, prices, self.config.exit_rules, mode=self.config.exit_logic)
 
         positions = np.zeros(len(analysis), dtype=float)
         current = 0.0
@@ -139,17 +141,22 @@ class RuleBasedDirectionalStrategy(WalkForwardStrategy):
         risk_exits = np.zeros(len(analysis), dtype=bool)
         for index, (should_enter, should_exit) in enumerate(zip(entry.to_numpy(dtype=bool), exit_.to_numpy(dtype=bool), strict=True)):
             current_price = closes[index]
-            if current != 0.0 and entry_price and np.isfinite(current_price):
-                position_return = (current_price / entry_price - 1.0) * np.sign(current)
-                if self.config.stop_loss_pct is not None and position_return <= -float(self.config.stop_loss_pct):
-                    should_exit = True
-                    risk_exits[index] = True
-                if self.config.take_profit_pct is not None and position_return >= float(self.config.take_profit_pct):
-                    should_exit = True
-                    risk_exits[index] = True
+            if current != 0.0 and np.isfinite(current_price):
+                # Targets execute at the following close. Anchor risk controls to
+                # that delayed fill bar, not to the already-observed signal close.
+                if entry_price is None:
+                    entry_price = current_price
+                else:
+                    position_return = (current_price / entry_price - 1.0) * np.sign(current)
+                    if self.config.stop_loss_pct is not None and position_return <= -float(self.config.stop_loss_pct):
+                        should_exit = True
+                        risk_exits[index] = True
+                    if self.config.take_profit_pct is not None and position_return >= float(self.config.take_profit_pct):
+                        should_exit = True
+                        risk_exits[index] = True
             if current == 0.0 and should_enter:
                 current = -max_position if self.config.side == "short_only" else max_position
-                entry_price = current_price if np.isfinite(current_price) else None
+                entry_price = None
             elif current != 0.0 and should_exit:
                 current = 0.0
                 entry_price = None
@@ -191,26 +198,20 @@ def max_rule_lookback(spec: dict[str, Any]) -> int:
 
 
 def build_rule_based_strategy_factory(spec: dict[str, Any]):
-    sizing = spec.get("position_sizing") if isinstance(spec.get("position_sizing"), dict) else {}
-    costs = spec.get("costs") if isinstance(spec.get("costs"), dict) else {}
-    max_position = _as_float(sizing, "max_position_per_symbol", 1.0)
-    transaction_cost_bps = sum(
-        _as_float(costs, key, default)
-        for key, default in (
-            ("commission_bps", 0.5),
-            ("spread_bps", 1.0),
-            ("slippage_bps", 0.75),
-        )
-    )
     config = RuleBasedStrategyConfig(
         name=str(spec.get("id") or spec.get("name") or "user_rule_strategy").lower().replace(" ", "_"),
         entry_rules=tuple(rule for rule in spec.get("entry_rules") or [] if isinstance(rule, dict)),
         exit_rules=tuple(rule for rule in spec.get("exit_rules") or [] if isinstance(rule, dict)),
         side=str(spec.get("side") or "long_only"),
-        max_position=max_position,
+        # Portfolio sizing is applied once by the custom pipeline allocator.
+        max_position=1.0,
         stop_loss_pct=float(spec.get("risk_controls", {}).get("stop_loss_pct")) if isinstance(spec.get("risk_controls"), dict) and spec.get("risk_controls", {}).get("stop_loss_pct") is not None else None,
         take_profit_pct=float(spec.get("risk_controls", {}).get("take_profit_pct")) if isinstance(spec.get("risk_controls"), dict) and spec.get("risk_controls", {}).get("take_profit_pct") is not None else None,
-        transaction_cost_bps=transaction_cost_bps,
+        # The ledger is the authoritative cost model. Keeping strategy-level
+        # cost estimates at zero prevents charging the same components twice.
+        transaction_cost_bps=0.0,
+        entry_logic=str(spec.get("entry_logic") or "all"),
+        exit_logic=str(spec.get("exit_logic") or "any"),
     )
     min_history = max(80, max_rule_lookback(spec) * 3)
     return lambda symbol: RuleBasedDirectionalStrategy(symbol=symbol, config=config), min_history

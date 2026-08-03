@@ -12,9 +12,11 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..core.portfolio import PortfolioManager
 from ..core.timeframes import TradingMode, normalize_trading_mode
+from ..pipelines import DirectionalPipelineConfig, DirectionalStrategyPipeline
 from ..platform import build_metadata_store
 from ..strategies import build_rule_based_strategy_factory
 from .config import BackendSettings
@@ -22,6 +24,7 @@ from .observability import METRICS
 
 
 CUSTOM_PIPELINE_PREFIX = "user_strategy:"
+MARKETPLACE_PIPELINE_PREFIX = "marketplace_strategy:"
 RULES_PROMPT_VERSION = "strategy-builder-rules/v1"
 SUPPORTED_TIMEFRAMES = {"1d", "daily", "1h", "4h", "hourly", "intraday", "short_term", "short-term"}
 SUPPORTED_RULE_KINDS = {
@@ -94,22 +97,39 @@ SYMBOL_STOPWORDS = {
     "COST",
     "COSTS",
     "BPS",
+    "OR",
+    "I",
+    "IT",
+    "TO",
+    "AT",
+    "OF",
+    "MAX",
+    "MIN",
+    "THE",
+    "ONLY",
+    "PERCENT",
 }
 
 
 class StrategyRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     description: str | None = None
 
 
 class StrategyIndicator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     kind: str
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyParameter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     default: Any
     min: float | None = None
@@ -118,6 +138,8 @@ class StrategyParameter(BaseModel):
 
 
 class StrategySpecModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: Literal["strategy_spec/v1"] = "strategy_spec/v1"
     name: str = Field(min_length=3, max_length=120)
     summary: str = Field(min_length=12, max_length=1000)
@@ -127,6 +149,8 @@ class StrategySpecModel(BaseModel):
     required_indicators: list[StrategyIndicator] = Field(default_factory=list)
     entry_rules: list[StrategyRule] = Field(default_factory=list)
     exit_rules: list[StrategyRule] = Field(default_factory=list)
+    entry_logic: Literal["all", "any"] = "all"
+    exit_logic: Literal["all", "any"] = "any"
     position_sizing: dict[str, Any]
     risk_controls: dict[str, Any] = Field(default_factory=dict)
     rebalancing: dict[str, Any] = Field(default_factory=dict)
@@ -160,6 +184,33 @@ def parse_custom_strategy_pipeline(pipeline: str) -> str | None:
     return strategy_id or None
 
 
+def marketplace_strategy_pipeline(subscription_id: str) -> str:
+    return f"{MARKETPLACE_PIPELINE_PREFIX}{subscription_id}"
+
+
+def parse_marketplace_strategy_pipeline(pipeline: str) -> str | None:
+    if not pipeline.startswith(MARKETPLACE_PIPELINE_PREFIX):
+        return None
+    subscription_id = pipeline[len(MARKETPLACE_PIPELINE_PREFIX):].strip()
+    return subscription_id or None
+
+
+def max_rule_lookback(spec: dict[str, Any]) -> int:
+    """Return the longest indicator window referenced by an allowlisted spec."""
+    windows: list[int] = []
+    for group in ("required_indicators", "entry_rules", "exit_rules"):
+        for item in spec.get(group, []) if isinstance(spec.get(group), list) else []:
+            parameters = item.get("parameters") if isinstance(item, dict) and isinstance(item.get("parameters"), dict) else {}
+            for key in ("window", "fast_window", "slow_window", "signal_window"):
+                try:
+                    value = int(parameters.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if value > 1:
+                    windows.append(value)
+    return max(windows, default=20)
+
+
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -183,12 +234,18 @@ def _extract_symbols(text: str) -> list[str]:
     if symbols:
         return symbols[:12]
 
-    # Support a lower-case ticker immediately following an explicit trading
-    # verb without reopening the broad short-word heuristic.
-    for match in re.finditer(r"\b(?:trade|buy|sell)\s+([a-z]{1,5})\b", text, re.IGNORECASE):
-        candidate = match.group(1).upper()
-        if candidate not in SYMBOL_STOPWORDS and candidate not in symbols:
-            symbols.append(candidate)
+    # Support a bounded lower-case symbol list after an explicit universe or
+    # trading phrase without treating arbitrary short English words as tickers.
+    list_match = re.search(
+        r"\b(?:trade|symbols?|tickers?|universe)\s+(.+?)(?=\s+(?:on|using|when|with|at|from)\b|[.;]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if list_match:
+        for raw in re.split(r"\s*(?:,|\band\b)\s*", list_match.group(1), flags=re.IGNORECASE):
+            candidate = raw.strip().upper()
+            if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", candidate) and candidate not in SYMBOL_STOPWORDS and candidate not in symbols:
+                symbols.append(candidate)
     return symbols[:12]
 
 
@@ -264,8 +321,12 @@ def _extract_timeframe(text: str) -> str | None:
     return None
 
 
-def _extract_percent(text: str, default: float | None = None) -> float | None:
-    match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+def _extract_sizing_percent(text: str, default: float | None = None) -> float | None:
+    patterns = (
+        r"(?:size|sizing|allocate|allocation|hold|holding|position|max(?:imum)?(?: position)?|per (?:name|symbol)|equal\s+weight(?:ed)?(?:\s+(?:at|of))?)\D{0,20}(\d+(?:\.\d+)?)\s*%",
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:position|allocation|weight|per (?:name|symbol)|of (?:the )?(?:account|portfolio|capital))",
+    )
+    match = next((found for pattern in patterns if (found := re.search(pattern, text, re.IGNORECASE))), None)
     if not match:
         return default
     return float(match.group(1)) / 100.0
@@ -284,7 +345,14 @@ def _first_int_near(text: str, keyword: str, default: int) -> int:
 
 
 def _ma_windows(text: str, default_fast: int, default_slow: int) -> tuple[int, int]:
-    numbers = [int(value) for value in re.findall(r"\b(\d{1,3})\b", text)]
+    numbers = [
+        int(match.group(1))
+        for match in re.finditer(
+            r"\b(\d{1,4})\s*(?:[- ]?(?:day|bar|period)s?)?\s*(?:SMA|EMA|moving average)\b",
+            text,
+            re.IGNORECASE,
+        )
+    ]
     if len(numbers) >= 2:
         fast, slow = sorted(numbers[:2])
         if fast < slow:
@@ -303,8 +371,16 @@ def _build_rule_spec(text: str) -> tuple[list[dict[str, Any]], list[dict[str, An
         window = _first_int_near(text, "rsi", 14)
         lower = 30.0
         upper = 70.0
-        below_match = re.search(r"(?:below|under|oversold)\D{0,12}(\d{1,2}(?:\.\d+)?)", text, re.IGNORECASE)
-        above_match = re.search(r"(?:above|over|overbought)\D{0,12}(\d{1,2}(?:\.\d+)?)", text, re.IGNORECASE)
+        below_match = re.search(
+            r"(?:rsi(?:\s+\d+)?(?:(?!\b(?:price|sma|ema|macd)\b).){0,30}?(?:below|under)|(?:below|under)[^.;,]{0,16}?rsi|oversold)\D{0,12}(\d{1,2}(?:\.\d+)?)",
+            text,
+            re.IGNORECASE,
+        )
+        above_match = re.search(
+            r"(?:rsi(?:\s+\d+)?(?:(?!\b(?:price|sma|ema|macd)\b).){0,30}?(?:above|over)|(?:above|over)[^.;,]{0,16}?rsi|overbought)\D{0,12}(\d{1,2}(?:\.\d+)?)",
+            text,
+            re.IGNORECASE,
+        )
         if below_match:
             lower = float(below_match.group(1))
         if above_match:
@@ -324,20 +400,25 @@ def _build_rule_spec(text: str) -> tuple[list[dict[str, Any]], list[dict[str, An
                 {"name": "rsi_exit_threshold", "default": upper, "min": 50, "max": 99, "description": "Exit threshold."},
             ]
         )
-        return indicators, entry_rules, exit_rules, params
-
     if "macd" in lowered:
-        indicators.append({"name": "MACD", "kind": "macd", "parameters": {"fast_window": 12, "slow_window": 26, "signal_window": 9}})
-        entry_rules.append({"kind": "macd_above_signal", "parameters": {"fast_window": 12, "slow_window": 26, "signal_window": 9}, "description": "Enter when MACD is above the signal line."})
-        exit_rules.append({"kind": "macd_below_signal", "parameters": {"fast_window": 12, "slow_window": 26, "signal_window": 9}, "description": "Exit when MACD is below the signal line."})
+        macd_match = re.search(
+            r"macd\D{0,12}(\d{1,3})\D{1,8}(\d{1,3})\D{1,8}(\d{1,3})",
+            text,
+            re.IGNORECASE,
+        )
+        fast, slow, signal = (12, 26, 9)
+        if macd_match:
+            fast, slow, signal = (int(macd_match.group(1)), int(macd_match.group(2)), int(macd_match.group(3)))
+        indicators.append({"name": "MACD", "kind": "macd", "parameters": {"fast_window": fast, "slow_window": slow, "signal_window": signal}})
+        entry_rules.append({"kind": "macd_above_signal", "parameters": {"fast_window": fast, "slow_window": slow, "signal_window": signal}, "description": "Enter when MACD is above the signal line."})
+        exit_rules.append({"kind": "macd_below_signal", "parameters": {"fast_window": fast, "slow_window": slow, "signal_window": signal}, "description": "Exit when MACD is below the signal line."})
         params.extend(
             [
-                {"name": "macd_fast_window", "default": 12, "min": 2, "max": 100, "description": "Fast EMA window."},
-                {"name": "macd_slow_window", "default": 26, "min": 3, "max": 200, "description": "Slow EMA window."},
-                {"name": "macd_signal_window", "default": 9, "min": 2, "max": 100, "description": "Signal-line EMA window."},
+                {"name": "macd_fast_window", "default": fast, "min": 2, "max": 100, "description": "Fast EMA window."},
+                {"name": "macd_slow_window", "default": slow, "min": 3, "max": 200, "description": "Slow EMA window."},
+                {"name": "macd_signal_window", "default": signal, "min": 2, "max": 100, "description": "Signal-line EMA window."},
             ]
         )
-        return indicators, entry_rules, exit_rules, params
 
     if any(token in lowered for token in ("moving average", "sma", "ema", "golden cross", "death cross", "ma cross")):
         uses_ema = "ema" in lowered or "exponential" in lowered
@@ -345,21 +426,28 @@ def _build_rule_spec(text: str) -> tuple[list[dict[str, Any]], list[dict[str, An
         indicator_kind = "ema" if uses_ema else "sma"
         entry_kind = "ema_cross_above" if uses_ema else "sma_cross_above"
         exit_kind = "ema_cross_below" if uses_ema else "sma_cross_below"
-        indicators.extend(
-            [
-                {"name": f"{indicator_kind.upper()} {fast}", "kind": indicator_kind, "parameters": {"window": fast}},
-                {"name": f"{indicator_kind.upper()} {slow}", "kind": indicator_kind, "parameters": {"window": slow}},
-            ]
-        )
-        entry_rules.append({"kind": entry_kind, "parameters": {"fast_window": fast, "slow_window": slow}, "description": f"Enter when the {fast}-bar {indicator_kind.upper()} crosses above the {slow}-bar {indicator_kind.upper()}."})
-        exit_rules.append({"kind": exit_kind, "parameters": {"fast_window": fast, "slow_window": slow}, "description": f"Exit when the {fast}-bar {indicator_kind.upper()} crosses below the {slow}-bar {indicator_kind.upper()}."})
-        params.extend(
-            [
-                {"name": "fast_window", "default": fast, "min": 2, "max": 250, "description": "Fast moving-average lookback."},
-                {"name": "slow_window", "default": slow, "min": 3, "max": 500, "description": "Slow moving-average lookback."},
-            ]
-        )
-        return indicators, entry_rules, exit_rules, params
+        price_vs_average = bool(re.search(r"price.{0,20}?(?:above|below|under|over).{0,30}?(?:sma|ema|moving average)", text, re.IGNORECASE))
+        if price_vs_average:
+            window = slow if slow != 200 or fast != 50 else _first_int_near(text, indicator_kind, 50)
+            indicators.append({"name": f"{indicator_kind.upper()} {window}", "kind": indicator_kind, "parameters": {"window": window}})
+            entry_rules.append({"kind": f"price_above_{indicator_kind}", "parameters": {"window": window}, "description": f"Enter when price is above the {window}-bar {indicator_kind.upper()}."})
+            exit_rules.append({"kind": f"price_below_{indicator_kind}", "parameters": {"window": window}, "description": f"Exit when price is below the {window}-bar {indicator_kind.upper()}."})
+            params.append({"name": "ma_window", "default": window, "min": 2, "max": 500, "description": "Moving-average lookback."})
+        else:
+            indicators.extend(
+                [
+                    {"name": f"{indicator_kind.upper()} {fast}", "kind": indicator_kind, "parameters": {"window": fast}},
+                    {"name": f"{indicator_kind.upper()} {slow}", "kind": indicator_kind, "parameters": {"window": slow}},
+                ]
+            )
+            entry_rules.append({"kind": entry_kind, "parameters": {"fast_window": fast, "slow_window": slow}, "description": f"Enter when the {fast}-bar {indicator_kind.upper()} crosses above the {slow}-bar {indicator_kind.upper()}."})
+            exit_rules.append({"kind": exit_kind, "parameters": {"fast_window": fast, "slow_window": slow}, "description": f"Exit when the {fast}-bar {indicator_kind.upper()} crosses below the {slow}-bar {indicator_kind.upper()}."})
+            params.extend(
+                [
+                    {"name": "fast_window", "default": fast, "min": 2, "max": 250, "description": "Fast moving-average lookback."},
+                    {"name": "slow_window", "default": slow, "min": 3, "max": 500, "description": "Slow moving-average lookback."},
+                ]
+            )
 
     return indicators, entry_rules, exit_rules, params
 
@@ -388,9 +476,9 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
         return None, ["The safe builder supports daily bars and short-term hourly/4-hour bars, but not minute or tick strategies."], "rejected"
 
     indicators, entry_rules, exit_rules, editable_params = _build_rule_spec(text)
-    max_position = _extract_percent(text)
+    max_position = _extract_sizing_percent(text)
     lowered = text.casefold()
-    if "equal weight" in lowered and symbols:
+    if max_position is None and "equal weight" in lowered and symbols:
         max_position = min(1.0, 1.0 / len(symbols))
     stop_loss = None
     stop_match = re.search(r"stop(?:\s+loss)?\s*(?:at|of)?\s*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
@@ -411,6 +499,15 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
         )
     if stop_match:
         stop_loss = float(stop_match.group(1)) / 100.0
+    take_profit = None
+    take_profit_match = re.search(
+        r"(?:take\s+profit|profit\s+target)\s*(?:at|of)?\s*(\d+(?:\.\d+)?)\s*%|"
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:take\s+profit|profit\s+target)",
+        text,
+        re.IGNORECASE,
+    )
+    if take_profit_match:
+        take_profit = float(take_profit_match.group(1) or take_profit_match.group(2)) / 100.0
     parsed_costs = _extract_cost_assumptions(text)
 
     questions: list[str] = []
@@ -435,6 +532,20 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
     name = _infer_name(text, indicators)
     max_positions = min(len(symbols), max(1, int(round(1.0 / max(max_position or 1.0, 0.01)))))
     same_bar_normalized = _requests_same_bar_execution(text)
+    editable_params.append({
+        "name": "max_position_per_symbol",
+        "default": round(float(max_position or min(1.0, 1.0 / len(symbols))), 6),
+        "min": 0.01,
+        "max": 1.0,
+        "description": "Maximum portfolio weight for each active symbol.",
+    })
+    editable_params.append({"name": "max_positions", "default": max_positions, "min": 1, "max": min(12, len(symbols)), "description": "Maximum number of symbols held concurrently."})
+    if stop_loss is not None:
+        editable_params.append({"name": "stop_loss_pct", "default": stop_loss, "min": 0.001, "max": 0.50, "description": "Close-based stop loss from the delayed fill price."})
+    if take_profit is not None:
+        editable_params.append({"name": "take_profit_pct", "default": take_profit, "min": 0.001, "max": 5.0, "description": "Close-based take-profit threshold from the delayed fill price."})
+    for cost_name, cost_value in (parsed_costs or {}).items():
+        editable_params.append({"name": cost_name, "default": cost_value, "min": 0.0, "max": 10_000.0, "description": f"{cost_name.replace('_', ' ').replace(' bps', '')} in basis points."})
     spec = {
         "schema_version": "strategy_spec/v1",
         "name": name,
@@ -452,7 +563,7 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
         },
         "risk_controls": {
             "stop_loss_pct": stop_loss,
-            "take_profit_pct": None,
+            "take_profit_pct": take_profit,
             "max_positions": max_positions,
         },
         "rebalancing": {
@@ -484,6 +595,102 @@ def _build_draft_from_text(text: str) -> tuple[dict[str, Any] | None, list[str],
         },
     }
     return spec, [], "ready_for_approval"
+
+
+def _revise_rule_draft(draft_spec: dict[str, Any], text: str) -> dict[str, Any]:
+    revised = json.loads(json.dumps(draft_spec))
+    lowered = text.casefold()
+    indicators, entry_rules, exit_rules, indicator_params = _build_rule_spec(text)
+    has_entry_instruction = bool(re.search(r"\b(?:entry|enter|buy|below|under|cross(?:es)?\s+above)\b", text, re.IGNORECASE))
+    has_exit_instruction = bool(re.search(r"\b(?:exit|leave|sell|close|above|over|cross(?:es)?\s+below)\b", text, re.IGNORECASE))
+    if entry_rules and exit_rules and has_entry_instruction and has_exit_instruction:
+        revised["required_indicators"] = indicators
+        revised["entry_rules"] = entry_rules
+        revised["exit_rules"] = exit_rules
+        retained = [
+            item for item in revised.get("editable_parameters", [])
+            if isinstance(item, dict) and item.get("name") in {"max_position_per_symbol", "stop_loss_pct", "take_profit_pct"}
+        ]
+        revised["editable_parameters"] = [*indicator_params, *retained]
+    elif any(str(rule.get("kind") or "").startswith("rsi_") for rule in revised.get("entry_rules", []) + revised.get("exit_rules", [])):
+        entry_match = re.search(r"(?:entry|enter|buy|below|under)\D{0,20}(\d{1,3}(?:\.\d+)?)", text, re.IGNORECASE)
+        exit_match = re.search(r"(?:exit|leave|sell|above|over)\D{0,20}(\d{1,3}(?:\.\d+)?)", text, re.IGNORECASE)
+        if entry_match:
+            for rule in revised.get("entry_rules", []):
+                if str(rule.get("kind") or "").startswith("rsi_"):
+                    rule.setdefault("parameters", {})["threshold"] = float(entry_match.group(1))
+                    rule["description"] = f"Enter when RSI is at or below {float(entry_match.group(1)):g}."
+        if exit_match:
+            for rule in revised.get("exit_rules", []):
+                if str(rule.get("kind") or "").startswith("rsi_"):
+                    rule.setdefault("parameters", {})["threshold"] = float(exit_match.group(1))
+                    rule["description"] = f"Exit when RSI is at or above {float(exit_match.group(1)):g}."
+
+    symbols = _extract_symbols(text)
+    if symbols:
+        revised.setdefault("asset_universe", {})["symbols"] = symbols
+    timeframe = _extract_timeframe(text)
+    if timeframe and timeframe != "unsupported_intraday":
+        revised["timeframe"] = timeframe
+        revised.setdefault("rebalancing", {})["frequency"] = "intraday" if timeframe == "short_term" else "daily"
+    sizing = _extract_sizing_percent(text)
+    if sizing is not None:
+        symbol_count = len(revised.get("asset_universe", {}).get("symbols", []))
+        position_sizing = revised.setdefault("position_sizing", {})
+        existing_gross = float(position_sizing.get("max_gross_exposure", 1.0))
+        position_sizing["max_position_per_symbol"] = sizing
+        position_sizing["max_gross_exposure"] = min(existing_gross, sizing * max(symbol_count, 1))
+    stop_match = re.search(r"(?:stop(?:\s+loss)?\D{0,12})(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%\s*stop", text, re.IGNORECASE)
+    if "no stop" in lowered:
+        revised.setdefault("risk_controls", {})["stop_loss_pct"] = None
+    elif stop_match:
+        revised.setdefault("risk_controls", {})["stop_loss_pct"] = float(stop_match.group(1) or stop_match.group(2)) / 100.0
+    take_match = re.search(r"(?:take\s+profit|profit\s+target)\D{0,12}(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
+    if take_match:
+        revised.setdefault("risk_controls", {})["take_profit_pct"] = float(take_match.group(1)) / 100.0
+    costs = _extract_cost_assumptions(text)
+    if costs is not None:
+        revised["costs"] = {**costs, "delay_bars": 1}
+
+    existing_parameter_names = {
+        str(item.get("name")) for item in revised.get("editable_parameters", []) if isinstance(item, dict)
+    }
+    for name, field, maximum, description in (
+        ("stop_loss_pct", "stop_loss_pct", 0.5, "Close-based stop loss from the delayed fill price."),
+        ("take_profit_pct", "take_profit_pct", 5.0, "Close-based take-profit threshold from the delayed fill price."),
+    ):
+        value = revised.get("risk_controls", {}).get(field)
+        if value is not None and name not in existing_parameter_names:
+            revised.setdefault("editable_parameters", []).append(
+                {"name": name, "default": value, "min": 0.001, "max": maximum, "description": description}
+            )
+            existing_parameter_names.add(name)
+    for name, value in (costs or {}).items():
+        if name not in existing_parameter_names:
+            revised.setdefault("editable_parameters", []).append(
+                {"name": name, "default": value, "min": 0.0, "max": 10_000.0, "description": f"{name.replace('_', ' ').replace(' bps', '')} in basis points."}
+            )
+            existing_parameter_names.add(name)
+
+    # Keep the UI/backtest defaults bound to the revised executable values.
+    for item in revised.get("editable_parameters", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if name == "max_position_per_symbol":
+            item["default"] = revised.get("position_sizing", {}).get(name)
+        elif name in {"stop_loss_pct", "take_profit_pct", "max_positions"}:
+            item["default"] = revised.get("risk_controls", {}).get(name)
+        elif name in {"commission_bps", "spread_bps", "slippage_bps", "market_impact_bps", "delay_bars"}:
+            item["default"] = revised.get("costs", {}).get(name)
+        elif name.startswith("rsi_"):
+            group = "entry_rules" if name == "rsi_entry_threshold" else "exit_rules" if name == "rsi_exit_threshold" else "entry_rules"
+            key = "window" if name == "rsi_window" else "threshold"
+            rule = next((rule for rule in revised.get(group, []) if str(rule.get("kind") or "").startswith("rsi_")), None)
+            if rule:
+                item["default"] = rule.get("parameters", {}).get(key)
+    revised["summary"] = str(revised.get("summary") or "Validated user strategy.")
+    return revised
 
 
 def validate_strategy_spec(spec: dict[str, Any]) -> SpecValidation:
@@ -520,6 +727,34 @@ def validate_strategy_spec(spec: dict[str, Any]) -> SpecValidation:
         if len(cleaned_symbols) > 12:
             warnings.append("Only the first 12 symbols are used to keep generated strategies reviewable.")
 
+    for indicator in normalized.get("required_indicators") or []:
+        kind = str(indicator.get("kind") or "")
+        params = indicator.get("parameters") if isinstance(indicator.get("parameters"), dict) else {}
+        required_keys = {
+            "rsi": ("window",),
+            "sma": ("window",),
+            "ema": ("window",),
+            "macd": ("fast_window", "slow_window", "signal_window"),
+        }.get(kind)
+        if required_keys is None:
+            errors.append(f"Unsupported indicator kind: {kind}")
+            continue
+        parsed_indicator_windows: dict[str, int] = {}
+        for key in required_keys:
+            if key not in params:
+                errors.append(f"Indicator {kind}.{key} is required.")
+                continue
+            try:
+                value = int(params[key])
+            except (TypeError, ValueError):
+                errors.append(f"Indicator {kind}.{key} must be an integer.")
+                continue
+            if isinstance(params[key], bool) or not 2 <= value <= 5_000:
+                errors.append(f"Indicator {kind}.{key} must be an integer between 2 and 5000.")
+            parsed_indicator_windows[key] = value
+        if "fast_window" in parsed_indicator_windows and "slow_window" in parsed_indicator_windows and parsed_indicator_windows["fast_window"] >= parsed_indicator_windows["slow_window"]:
+            errors.append(f"Indicator {kind}.fast_window must be smaller than slow_window.")
+
     if not normalized.get("entry_rules"):
         errors.append("At least one entry rule is required.")
     if not normalized.get("exit_rules"):
@@ -529,15 +764,59 @@ def validate_strategy_spec(spec: dict[str, Any]) -> SpecValidation:
         if kind not in SUPPORTED_RULE_KINDS:
             errors.append(f"Unsupported rule kind: {kind}")
         params = rule.get("parameters") if isinstance(rule.get("parameters"), dict) else {}
+        required_by_kind = {
+            "price_above_sma": ("window",),
+            "price_below_sma": ("window",),
+            "price_above_ema": ("window",),
+            "price_below_ema": ("window",),
+            "sma_cross_above": ("fast_window", "slow_window"),
+            "sma_cross_below": ("fast_window", "slow_window"),
+            "ema_cross_above": ("fast_window", "slow_window"),
+            "ema_cross_below": ("fast_window", "slow_window"),
+            "rsi_below": ("window", "threshold"),
+            "rsi_above": ("window", "threshold"),
+            "macd_above_signal": ("fast_window", "slow_window", "signal_window"),
+            "macd_below_signal": ("fast_window", "slow_window", "signal_window"),
+        }
+        for key in required_by_kind.get(kind, ()):
+            if key not in params:
+                errors.append(f"{kind}.{key} is required.")
+        parsed_windows: dict[str, int] = {}
         for key in ("window", "fast_window", "slow_window", "signal_window"):
-            if key in params and int(params[key]) <= 1:
-                errors.append(f"{kind}.{key} must be greater than 1.")
-        if "fast_window" in params and "slow_window" in params and int(params["fast_window"]) >= int(params["slow_window"]):
+            if key not in params:
+                continue
+            try:
+                value = int(params[key])
+            except (TypeError, ValueError):
+                errors.append(f"{kind}.{key} must be an integer.")
+                continue
+            if isinstance(params[key], bool) or value <= 1 or value > 5_000:
+                errors.append(f"{kind}.{key} must be an integer between 2 and 5000.")
+            parsed_windows[key] = value
+        if "fast_window" in parsed_windows and "slow_window" in parsed_windows and parsed_windows["fast_window"] >= parsed_windows["slow_window"]:
             errors.append(f"{kind}.fast_window must be smaller than slow_window.")
+        if kind in {"rsi_below", "rsi_above"} and "threshold" in params:
+            try:
+                threshold = float(params["threshold"])
+            except (TypeError, ValueError):
+                errors.append(f"{kind}.threshold must be numeric.")
+            else:
+                if not 0.0 <= threshold <= 100.0:
+                    errors.append(f"{kind}.threshold must be between 0 and 100.")
 
     sizing = normalized.get("position_sizing") if isinstance(normalized.get("position_sizing"), dict) else {}
-    max_position = float(sizing.get("max_position_per_symbol", 0.0) or 0.0)
-    max_gross = float(sizing.get("max_gross_exposure", 0.0) or 0.0)
+    try:
+        max_position = float(sizing.get("max_position_per_symbol", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        max_position = 0.0
+        errors.append("position_sizing.max_position_per_symbol must be numeric.")
+    try:
+        max_gross = float(sizing.get("max_gross_exposure", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        max_gross = 0.0
+        errors.append("position_sizing.max_gross_exposure must be numeric.")
+    if sizing.get("method") != "equal_weight":
+        errors.append("position_sizing.method must be equal_weight.")
     if max_position <= 0 or max_position > 1.0:
         errors.append("position_sizing.max_position_per_symbol must be in (0, 1].")
     if max_gross <= 0 or max_gross > 1.5:
@@ -546,30 +825,206 @@ def validate_strategy_spec(spec: dict[str, Any]) -> SpecValidation:
         errors.append("The strategy-builder DSL currently supports long-only generated strategies only.")
     risk = normalized.get("risk_controls") if isinstance(normalized.get("risk_controls"), dict) else {}
     stop_loss = risk.get("stop_loss_pct")
-    if stop_loss is not None and not (0 < float(stop_loss) <= 0.50):
-        errors.append("risk_controls.stop_loss_pct must be null or between 0 and 50%.")
+    if stop_loss is not None:
+        try:
+            parsed_stop = float(stop_loss)
+        except (TypeError, ValueError):
+            errors.append("risk_controls.stop_loss_pct must be numeric or null.")
+        else:
+            if not 0 < parsed_stop <= 0.50:
+                errors.append("risk_controls.stop_loss_pct must be null or between 0 and 50%.")
+    take_profit = risk.get("take_profit_pct")
+    if take_profit is not None:
+        try:
+            parsed_take_profit = float(take_profit)
+        except (TypeError, ValueError):
+            errors.append("risk_controls.take_profit_pct must be numeric or null.")
+        else:
+            if not 0 < parsed_take_profit <= 5.0:
+                errors.append("risk_controls.take_profit_pct must be null or between 0 and 500%.")
+    max_positions = risk.get("max_positions")
+    if isinstance(max_positions, bool) or not isinstance(max_positions, int) or not 1 <= max_positions <= 12:
+        errors.append("risk_controls.max_positions must be an integer between 1 and 12.")
     if stop_loss is None:
         warnings.append("No hard stop loss is configured; exits rely on rule logic.")
+
+    universe = normalized.get("asset_universe") if isinstance(normalized.get("asset_universe"), dict) else {}
+    if universe.get("type") != "explicit_symbols":
+        errors.append("asset_universe.type must be explicit_symbols.")
+
+    costs = normalized.get("costs") if isinstance(normalized.get("costs"), dict) else {}
+    for key in ("commission_bps", "spread_bps", "slippage_bps", "market_impact_bps"):
+        try:
+            cost = float(costs.get(key, 0.0))
+        except (TypeError, ValueError):
+            errors.append(f"costs.{key} must be numeric.")
+        else:
+            if cost < 0 or cost > 10_000:
+                errors.append(f"costs.{key} must be between 0 and 10000 basis points.")
+    delay_bars = costs.get("delay_bars", 1)
+    if isinstance(delay_bars, bool) or not isinstance(delay_bars, int) or not 1 <= delay_bars <= 20:
+        errors.append("costs.delay_bars must be an integer between 1 and 20.")
+
+    rebalancing = normalized.get("rebalancing") if isinstance(normalized.get("rebalancing"), dict) else {}
+    expected_frequency = "intraday" if normalized.get("timeframe") == "short_term" else "daily"
+    if rebalancing.get("frequency") != expected_frequency:
+        errors.append(f"rebalancing.frequency must be {expected_frequency} for this timeframe.")
+    if rebalancing.get("execution_timing") != "next_bar_close":
+        errors.append("rebalancing.execution_timing must be next_bar_close.")
     compatibility = normalized.get("compatibility") if isinstance(normalized.get("compatibility"), dict) else {}
+    if compatibility.get("supported") is not True:
+        errors.append("compatibility.supported must be true.")
+    if compatibility.get("engine") not in {None, "directional_ledger_v1"}:
+        errors.append("compatibility.engine must be directional_ledger_v1.")
     if compatibility.get("execution_normalized") is True:
         warnings.append(
             "Requested signal-bar-close execution was normalized to next-bar-close execution to avoid look-ahead bias."
         )
 
+    supported_editable_parameters = {
+        "rsi_window", "rsi_entry_threshold", "rsi_exit_threshold",
+        "macd_fast_window", "macd_slow_window", "macd_signal_window",
+        "fast_window", "slow_window", "ma_window",
+        "max_position_per_symbol", "max_gross_exposure", "max_positions",
+        "stop_loss_pct", "take_profit_pct",
+        "commission_bps", "spread_bps", "slippage_bps", "market_impact_bps", "delay_bars",
+    }
+    editable_names: set[str] = set()
+    for parameter in normalized.get("editable_parameters") or []:
+        name = str(parameter.get("name") or "")
+        if name in editable_names:
+            errors.append(f"Duplicate editable parameter: {name}")
+        editable_names.add(name)
+        if name not in supported_editable_parameters:
+            errors.append(f"Editable strategy parameter {name} has no executable binding.")
+        try:
+            default = float(parameter.get("default"))
+            minimum = float(parameter["min"]) if parameter.get("min") is not None else None
+            maximum = float(parameter["max"]) if parameter.get("max") is not None else None
+        except (TypeError, ValueError):
+            errors.append(f"Editable strategy parameter {name} must have numeric default/min/max values.")
+            continue
+        if minimum is not None and maximum is not None and minimum > maximum:
+            errors.append(f"Editable strategy parameter {name} has min greater than max.")
+        if minimum is not None and default < minimum or maximum is not None and default > maximum:
+            errors.append(f"Editable strategy parameter {name} default must be within its declared bounds.")
+
     return SpecValidation(ok=not errors, errors=errors, warnings=warnings, spec=normalized if not errors else None)
 
 
+def apply_strategy_parameters(spec: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Apply only declared editable parameters to their executable DSL fields."""
+
+    if not overrides:
+        return json.loads(json.dumps(spec))
+    updated = json.loads(json.dumps(spec))
+    declared = {
+        str(item.get("name")): item
+        for item in updated.get("editable_parameters", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    unknown = sorted(set(overrides).difference(declared))
+    if unknown:
+        raise ValueError(f"Unknown strategy parameter(s): {', '.join(unknown)}")
+
+    def numeric_value(name: str, raw: Any) -> int | float:
+        definition = declared[name]
+        default = definition.get("default")
+        try:
+            value: int | float = int(raw) if isinstance(default, int) and not isinstance(default, bool) else float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Strategy parameter {name} must be numeric.") from exc
+        minimum = definition.get("min")
+        maximum = definition.get("max")
+        if minimum is not None and value < float(minimum):
+            raise ValueError(f"Strategy parameter {name} must be at least {minimum}.")
+        if maximum is not None and value > float(maximum):
+            raise ValueError(f"Strategy parameter {name} must be at most {maximum}.")
+        return value
+
+    rule_bindings = {
+        "rsi_window": ("rsi", "window", "both"),
+        "rsi_entry_threshold": ("rsi", "threshold", "entry"),
+        "rsi_exit_threshold": ("rsi", "threshold", "exit"),
+        "macd_fast_window": ("macd", "fast_window", "both"),
+        "macd_slow_window": ("macd", "slow_window", "both"),
+        "macd_signal_window": ("macd", "signal_window", "both"),
+        "fast_window": ("cross", "fast_window", "both"),
+        "slow_window": ("cross", "slow_window", "both"),
+        "ma_window": ("price", "window", "both"),
+    }
+    for name, raw in overrides.items():
+        value = numeric_value(name, raw)
+        declared[name]["default"] = value
+        if name in rule_bindings:
+            family, key, group = rule_bindings[name]
+            groups = ("entry_rules", "exit_rules") if group == "both" else (("entry_rules",) if group == "entry" else ("exit_rules",))
+            for group_name in groups:
+                for rule in updated.get(group_name, []):
+                    kind = str(rule.get("kind") or "")
+                    matches = (
+                        (family == "rsi" and kind.startswith("rsi_"))
+                        or (family == "macd" and kind.startswith("macd_"))
+                        or (family == "cross" and "_cross_" in kind)
+                        or (family == "price" and kind.startswith("price_"))
+                    )
+                    if matches:
+                        rule.setdefault("parameters", {})[key] = value
+        elif name in {"max_position_per_symbol", "max_gross_exposure"}:
+            updated.setdefault("position_sizing", {})[name] = value
+            if name == "max_position_per_symbol":
+                symbol_count = len(updated.get("asset_universe", {}).get("symbols", []))
+                existing_gross = float(updated["position_sizing"].get("max_gross_exposure", 1.0))
+                updated["position_sizing"]["max_gross_exposure"] = min(existing_gross, float(value) * max(symbol_count, 1))
+        elif name in {"stop_loss_pct", "take_profit_pct", "max_positions"}:
+            updated.setdefault("risk_controls", {})[name] = value
+        elif name in {"commission_bps", "spread_bps", "slippage_bps", "market_impact_bps", "delay_bars"}:
+            updated.setdefault("costs", {})[name] = value
+        else:
+            raise ValueError(f"Editable strategy parameter {name} has no executable binding.")
+
+    validation = validate_strategy_spec(updated)
+    if not validation.ok or validation.spec is None:
+        raise ValueError("; ".join(validation.errors) or "Strategy parameters are invalid.")
+    return validation.spec
+
+
 def dry_run_strategy_spec(spec: dict[str, Any]) -> dict[str, Any]:
-    factory, _ = build_rule_based_strategy_factory(spec)
-    index = pd.bdate_range("2024-01-01", periods=180)
-    path = pd.Series(100.0 + np.sin(np.arange(len(index)) / 8.0) * 4.0 + np.arange(len(index)) * 0.05, index=index)
-    train = pd.DataFrame({"SYN": path.iloc[:120]})
-    test = pd.DataFrame({"SYN": path.iloc[120:]})
-    output = factory("SYN").run_fold(train, test).validate(extra_columns=("unit_return", "gross_return"))
+    factory, min_history = build_rule_based_strategy_factory(spec)
+    symbols = [str(symbol) for symbol in spec.get("asset_universe", {}).get("symbols", [])] or ["SYN"]
+    train_bars = min_history + 20
+    test_bars = 60
+    index = pd.bdate_range("2000-01-03", periods=train_bars + test_bars)
+    values = np.arange(len(index), dtype=float)
+    prices = pd.DataFrame(
+        {
+            symbol: 100.0
+            + np.sin((values + offset * 3.0) / (7.0 + offset)) * (4.0 + offset * 0.25)
+            + values * (0.03 + offset * 0.002)
+            for offset, symbol in enumerate(symbols)
+        },
+        index=index,
+    )
+    sizing = spec.get("position_sizing") if isinstance(spec.get("position_sizing"), dict) else {}
+    risk_controls = spec.get("risk_controls") if isinstance(spec.get("risk_controls"), dict) else {}
+    pipeline = DirectionalStrategyPipeline(
+        strategy_factory=factory,
+        portfolio_manager=PortfolioManager(
+            max_leverage=float(sizing.get("max_gross_exposure", 1.0)),
+            max_strategy_weight=float(sizing.get("max_position_per_symbol", 1.0)),
+            allocation_method="equal_weight",
+            max_active_positions=int(risk_controls.get("max_positions", len(symbols))),
+        ),
+        config=DirectionalPipelineConfig.from_symbols(symbols=symbols, min_history=min_history),
+        name=str(spec.get("name") or "strategy_dry_run"),
+    )
+    output = pipeline.run_fold(prices.iloc[:train_bars], prices.iloc[train_bars:]).validate(
+        extra_columns=("gross_return",)
+    )
     frame = output.frame
     if frame.empty:
         raise ValueError("Synthetic dry-run produced no output rows.")
-    required = {"signal", "position", "gross_return"}
+    required = {"signal", "position", "gross_return", "turnover"}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"Synthetic dry-run missing output columns: {', '.join(sorted(missing))}")
@@ -577,6 +1032,8 @@ def dry_run_strategy_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "status": "passed",
         "rows": int(len(frame)),
         "nonzero_positions": int((frame["position"].abs() > 0).sum()),
+        "required_train_bars": int(min_history),
+        "symbols_checked": len(symbols),
         "checked_at_utc": utc_now_iso(),
     }
 
@@ -586,9 +1043,14 @@ def risk_level_for_spec(spec: dict[str, Any]) -> str:
     risk = spec.get("risk_controls") if isinstance(spec.get("risk_controls"), dict) else {}
     side = str(spec.get("side") or "long_only")
     max_gross = float(sizing.get("max_gross_exposure", 1.0) or 1.0)
-    if side != "long_only" or max_gross > 1.0:
+    max_position = float(sizing.get("max_position_per_symbol", 1.0) or 1.0)
+    stop_loss = risk.get("stop_loss_pct")
+    timeframe = str(spec.get("timeframe") or "1d")
+    costs = spec.get("costs") if isinstance(spec.get("costs"), dict) else {}
+    total_cost_bps = sum(float(costs.get(key, 0.0) or 0.0) for key in ("commission_bps", "spread_bps", "slippage_bps", "market_impact_bps"))
+    if side != "long_only" or max_gross > 1.0 or max_position > 0.75 or (stop_loss is not None and float(stop_loss) > 0.25):
         return "high"
-    if risk.get("stop_loss_pct") is None or max_gross > 0.5:
+    if stop_loss is None or max_gross > 0.5 or max_position > 0.35 or timeframe == "short_term" or total_cost_bps > 20:
         return "medium"
     return "low"
 
@@ -676,6 +1138,11 @@ class StrategyBuilderService:
                     and not isinstance(value, bool)
                     and 0 <= value <= 100_000_000
                 } if isinstance(raw_usage, dict) else {},
+                "generation_path": str(provenance.get("generation_path") or "")[:120] or None,
+                "semantic_repair_count": max(0, min(int(provenance.get("semantic_repair_count") or 0), 1)),
+                "generation_summary": str(provenance.get("generation_summary") or "")[:1_000] or None,
+                "risk_analysis": provenance.get("risk_analysis") if isinstance(provenance.get("risk_analysis"), dict) else None,
+                "interpreted_intent": provenance.get("interpreted_intent") if isinstance(provenance.get("interpreted_intent"), dict) else None,
             }
         except (ValueError, TypeError, json.JSONDecodeError):
             return fallback
@@ -825,7 +1292,12 @@ class StrategyBuilderService:
                 validation = SpecValidation(ok=False, errors=[], warnings=["Hosted strategy generation was unavailable."])
                 latency_ms = None
         elif draft_spec:
-            validation = validate_strategy_spec(draft_spec)
+            latest_user_text = next(
+                (str(message.get("content") or "") for message in reversed(messages) if message.get("role") == "user"),
+                "",
+            )
+            revised_draft = _revise_rule_draft(draft_spec, latest_user_text)
+            validation = validate_strategy_spec(revised_draft)
             state = "ready_for_approval" if validation.ok else "needs_clarification"
             questions = validation.errors
             spec = validation.spec
@@ -890,6 +1362,11 @@ class StrategyBuilderService:
             "prompt_version": prompt_version,
             "latency_ms": latency_ms,
             "usage": usage,
+            "generation_path": generation_path,
+            "semantic_repair_count": semantic_repair_count,
+            "generation_summary": generation_summary,
+            "risk_analysis": risk_analysis,
+            "interpreted_intent": interpreted_intent,
         }
         return {
             "state": state,
@@ -928,6 +1405,25 @@ class StrategyBuilderService:
         dry_run = dry_run_strategy_spec(validation.spec)
         risk_level = risk_level_for_spec(validation.spec)
         generation = self._verified_provenance(validation.spec, provenance_token)
+        canonical_spec = json.dumps(validation.spec, sort_keys=True, separators=(",", ":"))
+        existing = next(
+            (
+                item
+                for item in self.store.list_user_strategies(
+                    organization_id=organization_id,
+                    owner_user_id=user_id,
+                    active_only=True,
+                )
+                if json.dumps(item.get("spec") or {}, sort_keys=True, separators=(",", ":")) == canonical_spec
+            ),
+            None,
+        )
+        if existing is not None:
+            return {
+                "strategy": existing,
+                "catalog_item": self.catalog_item(existing),
+                "validation": {"warnings": validation.warnings, "dry_run": dry_run, "deduplicated": True},
+            }
         record = self.store.create_user_strategy(
             organization_id=organization_id,
             owner_user_id=user_id,
@@ -960,7 +1456,15 @@ class StrategyBuilderService:
 
     def allowed_catalog(self, *, organization_id: str, user_id: str, base_catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
         strategies = self.store.list_user_strategies(organization_id=organization_id, owner_user_id=user_id, active_only=True)
-        return [*base_catalog, *[self.catalog_item(record) for record in strategies]]
+        community: list[dict[str, Any]] = []
+        if self.settings.marketplace_enabled:
+            for subscription in self.store.list_marketplace_subscriptions(subscriber_organization_id=organization_id):
+                if subscription.get("status") != "active" or subscription.get("listing_status") not in {"published", "archived"}:
+                    continue
+                version = self.store.get_strategy_listing_version(version_id=subscription["pinned_listing_version_id"])
+                if version is not None:
+                    community.append(self.marketplace_catalog_item(subscription, version))
+        return [*base_catalog, *[self.catalog_item(record) for record in strategies], *community]
 
     def user_strategies(self, *, organization_id: str, user_id: str) -> list[dict[str, Any]]:
         return self.store.list_user_strategies(organization_id=organization_id, owner_user_id=user_id, active_only=False)
@@ -1024,6 +1528,7 @@ class StrategyBuilderService:
         generation = approval.get("generation") if isinstance(approval.get("generation"), dict) else {}
         mode = "llm" if generation.get("mode") == "llm" else "rules"
         generation_label = "AI-assisted" if mode == "llm" else "Rule-generated"
+        required_train_bars = max(80, max_rule_lookback(spec) * 3)
         return {
             "id": record["id"],
             "name": record["name"],
@@ -1040,7 +1545,10 @@ class StrategyBuilderService:
                 "name": record.get("name"),
                 "pipeline": custom_strategy_pipeline(record["id"]),
                 "symbols": symbols,
-                "lookback_bars": 360,
+                "lookback_bars": max(360, required_train_bars + 10),
+                "train_bars": required_train_bars,
+                "trading_mode": "short_term" if spec.get("timeframe") == "short_term" else "daily",
+                "interval": "1h" if spec.get("timeframe") == "short_term" else "1d",
                 "params": params,
                 "user_strategy_id": record["id"],
             },
@@ -1051,4 +1559,43 @@ class StrategyBuilderService:
             "risk_level": record.get("risk_level"),
             "generation_mode": mode,
             "generation_label": generation_label,
+            "required_train_bars": required_train_bars,
+        }
+
+    @staticmethod
+    def marketplace_catalog_item(subscription: dict[str, Any], version: dict[str, Any]) -> dict[str, Any]:
+        spec = version.get("strategy_spec") if isinstance(version.get("strategy_spec"), dict) else {}
+        snapshot = version.get("catalog_snapshot") if isinstance(version.get("catalog_snapshot"), dict) else {}
+        symbols = spec.get("asset_universe", {}).get("symbols", []) if isinstance(spec.get("asset_universe"), dict) else []
+        params = {item.get("name"): item.get("default") for item in spec.get("editable_parameters", []) if isinstance(item, dict) and item.get("name")}
+        return {
+            "id": subscription["id"],
+            "name": snapshot.get("name") or subscription.get("listing_title") or spec.get("name") or "Community strategy",
+            "family": "Community",
+            "difficulty": snapshot.get("difficulty") or f"Immutable v{version.get('version', 1)} / {version.get('risk_level', 'medium')} risk",
+            "pipeline": marketplace_strategy_pipeline(subscription["id"]),
+            "summary": snapshot.get("summary") or spec.get("summary") or "Subscribed immutable community strategy.",
+            "how_it_works": snapshot.get("how_it_works") or "Executes the pinned, validated marketplace StrategySpec.",
+            "best_for": "Tenant-scoped backtesting of an explicitly subscribed immutable version.",
+            "watch_out": snapshot.get("watch_out") or "Community strategies require independent validation before paper use.",
+            "key_parameters": tuple(params.keys()),
+            "example_cli": "Available from the authenticated web backtesting UI only.",
+            "paper_config_example": {
+                "name": snapshot.get("name") or spec.get("name"),
+                "pipeline": marketplace_strategy_pipeline(subscription["id"]),
+                "symbols": symbols,
+                "lookback_bars": max(360, max_rule_lookback(spec) * 3),
+                "train_bars": max(80, max_rule_lookback(spec) * 3),
+                "trading_mode": "short_term" if spec.get("timeframe") == "short_term" else "daily",
+                "interval": "1h" if spec.get("timeframe") == "short_term" else "1d",
+                "params": params,
+            },
+            "user_strategy": False,
+            "community_strategy": True,
+            "status": "active",
+            "version": version.get("version"),
+            "risk_level": version.get("risk_level"),
+            "generation_mode": snapshot.get("generation_mode") or "rules",
+            "generation_label": snapshot.get("generation_label") or "Community",
+            "required_train_bars": max(80, max_rule_lookback(spec) * 3),
         }

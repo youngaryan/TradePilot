@@ -60,7 +60,13 @@ from .job_security import collect_secret_values, redact_secret_values, sanitize_
 from .saas import build_lineage, build_readiness, sentiment_snapshot, SaaSService
 from .schemas import BacktestRunRequest, SentimentAccumulationRequest
 from .storage import ArtifactReference, build_artifact_storage
-from .strategy_builder import parse_custom_strategy_pipeline
+from .strategy_builder import (
+    apply_strategy_parameters,
+    parse_custom_strategy_pipeline,
+    parse_marketplace_strategy_pipeline,
+    validate_strategy_spec,
+)
+from ..strategies import build_rule_based_strategy_factory
 from .validators import validate_relative_path, validate_url
 
 
@@ -415,9 +421,11 @@ class PaperRunJobRunner:
                 message=f"Preparing {len(asof_dates)} paper execution date(s) from deployment config.",
             )
             service = PaperService(self.settings)
+            job_payload = self.get_job(job_id, organization_id=organization_id) or {}
             result = service.run_paper_batch(
                 command,
                 organization_id=organization_id,
+                user_id=str(job_payload.get("user_id") or "") or None,
                 job_id=job_id,
                 ownership_guard=lambda: self._set_status(job_id, "running"),
             )
@@ -1331,9 +1339,42 @@ class BacktestService:
             if strategy is None:
                 raise ValueError("User-created strategy not found, disabled, or not owned by this user.")
             spec = strategy.get("spec") if isinstance(strategy.get("spec"), dict) else {}
+            spec = apply_strategy_parameters(spec, _clean_parameters(request.parameters))
             symbols = request.symbols or spec.get("asset_universe", {}).get("symbols", [])
             if not symbols:
                 raise ValueError("User-created strategies require at least one symbol.")
+            _, min_history = build_rule_based_strategy_factory(spec)
+            if request.train_bars < min_history:
+                raise ValueError(
+                    f"This user strategy requires at least {min_history} train_bars for indicator warmup; "
+                    f"received {request.train_bars}."
+                )
+        marketplace_subscription_id = parse_marketplace_strategy_pipeline(request.pipeline)
+        if marketplace_subscription_id:
+            if not organization_id:
+                raise ValueError("Community strategies require an authenticated workspace.")
+            subscription = next(
+                (
+                    item for item in self.metadata_store.list_marketplace_subscriptions(subscriber_organization_id=organization_id)
+                    if item.get("id") == marketplace_subscription_id and item.get("status") == "active"
+                ),
+                None,
+            )
+            if subscription is None or subscription.get("listing_status") not in {"published", "archived"}:
+                raise ValueError("Community strategy subscription not found or inactive.")
+            version = self.metadata_store.get_strategy_listing_version(version_id=subscription["pinned_listing_version_id"])
+            if version is None:
+                raise ValueError("Pinned community strategy version is unavailable.")
+            spec = apply_strategy_parameters(version.get("strategy_spec") or {}, _clean_parameters(request.parameters))
+            symbols = request.symbols or spec.get("asset_universe", {}).get("symbols", [])
+            if not symbols:
+                raise ValueError("Community strategies require at least one symbol.")
+            _, min_history = build_rule_based_strategy_factory(spec)
+            if request.train_bars < min_history:
+                raise ValueError(
+                    f"This community strategy requires at least {min_history} train_bars for indicator warmup; "
+                    f"received {request.train_bars}."
+                )
         if request.pipeline in (set(DIRECTIONAL_PIPELINES) | {"etf_trend", "edgar_event", "pead_sentiment", "committee_signal_follower"}) and not request.symbols:
             raise ValueError("This pipeline requires at least one symbol.")
         if request.pipeline in {"edgar_event", "pead_sentiment"} and not request.event_file and not request.event_dataset_id and not request.use_sec_companyfacts and not request.include_sec_filings:
@@ -1446,6 +1487,7 @@ class BacktestService:
             if strategy_record is None:
                 raise ValueError("User-created strategy not found, disabled, or not owned by this user.")
             spec = strategy_record.get("spec") if isinstance(strategy_record.get("spec"), dict) else {}
+            spec = apply_strategy_parameters(spec, params)
             spec_symbols = spec.get("asset_universe", {}).get("symbols", []) if isinstance(spec.get("asset_universe"), dict) else []
             symbols = request.symbols or list(spec_symbols)
             custom_timeframe = resolve_timeframe_spec(trading_mode=request.trading_mode or str(spec.get("timeframe") or ""), interval=request.interval)
@@ -1478,6 +1520,57 @@ class BacktestService:
                 "name": strategy_record.get("name"),
                 "version": strategy_record.get("version"),
                 "risk_level": strategy_record.get("risk_level"),
+            }
+            return payload
+
+        marketplace_subscription_id = parse_marketplace_strategy_pipeline(pipeline)
+        if marketplace_subscription_id:
+            if not organization_id:
+                raise ValueError("Community strategies require an authenticated workspace.")
+            subscription = next(
+                (
+                    item for item in self.metadata_store.list_marketplace_subscriptions(subscriber_organization_id=organization_id)
+                    if item.get("id") == marketplace_subscription_id and item.get("status") == "active"
+                ),
+                None,
+            )
+            if subscription is None or subscription.get("listing_status") not in {"published", "archived"}:
+                raise ValueError("Community strategy subscription not found or inactive.")
+            version = self.metadata_store.get_strategy_listing_version(version_id=subscription["pinned_listing_version_id"])
+            if version is None:
+                raise ValueError("Pinned community strategy version is unavailable.")
+            spec = apply_strategy_parameters(version.get("strategy_spec") or {}, params)
+            spec_symbols = spec.get("asset_universe", {}).get("symbols", []) if isinstance(spec.get("asset_universe"), dict) else []
+            symbols = request.symbols or list(spec_symbols)
+            custom_timeframe = resolve_timeframe_spec(trading_mode=request.trading_mode or str(spec.get("timeframe") or ""), interval=request.interval)
+            custom_bars_per_year = custom_timeframe.bars_per_year if request.bars_per_year == 252 and custom_timeframe.mode == TradingMode.SHORT_TERM else request.bars_per_year
+            report("running_community_strategy", f"Running pinned community strategy across {len(symbols)} symbols.", 0.22)
+            run_output = run_rule_based_strategy_pipeline(
+                spec=spec,
+                symbols=symbols,
+                start=request.start,
+                end=request.end,
+                interval=custom_timeframe.execution_interval,
+                trading_mode=str(custom_timeframe.mode),
+                experiment_name=experiment_name,
+                price_cache_dir=str(self.settings.price_cache_dir),
+                artifact_root=artifact_root,
+                train_bars=request.train_bars,
+                test_bars=request.test_bars,
+                step_bars=request.step_bars,
+                bars_per_year=custom_bars_per_year,
+                purge_bars=request.purge_bars,
+                embargo_bars=request.embargo_bars,
+                pbo_partitions=request.pbo_partitions,
+                progress_callback=snapshot_progress,
+            )
+            report("collecting_results", "Backtest finished. Building charts and validation summary.", 0.92)
+            payload = _result_payload(run_output)
+            payload["community_strategy"] = {
+                "subscription_id": marketplace_subscription_id,
+                "listing_id": subscription.get("listing_id"),
+                "version": version.get("version"),
+                "risk_level": version.get("risk_level"),
             }
             return payload
 
@@ -1947,6 +2040,7 @@ class PaperService:
         command: PaperRunCommand,
         *,
         organization_id: str,
+        user_id: str | None = None,
     ) -> tuple[dict[str, Any], Path]:
         _reject_paper_inline_secrets(command.deployment_config)
         if command.deployment_config is not None and command.deployment_config_path is not None:
@@ -2003,6 +2097,56 @@ class PaperService:
             deployment_id=str(deployment["id"]),
             project_id=project_id,
         )
+        hydrated_strategies: list[dict[str, Any]] = []
+        for raw_strategy in config.get("strategies", []):
+            if not isinstance(raw_strategy, dict):
+                raise ValueError("Paper deployment strategies must be objects.")
+            item = dict(raw_strategy)
+            custom_strategy_id = parse_custom_strategy_pipeline(str(item.get("pipeline") or ""))
+            if custom_strategy_id:
+                if not user_id:
+                    raise ValueError("User-created paper strategies require an authenticated owner.")
+                strategy = self.metadata_store.get_user_strategy(
+                    organization_id=organization_id,
+                    strategy_id=custom_strategy_id,
+                    owner_user_id=user_id,
+                    active_only=True,
+                )
+                if strategy is None:
+                    raise ValueError("User-created strategy not found, disabled, or not owned by this user.")
+                strategy_spec = strategy.get("spec") if isinstance(strategy.get("spec"), dict) else {}
+                validation = validate_strategy_spec(strategy_spec)
+                if not validation.ok or validation.spec is None:
+                    raise ValueError("User-created paper strategy no longer passes deterministic validation.")
+                _, min_history = build_rule_based_strategy_factory(validation.spec)
+                item["symbols"] = item.get("symbols") or validation.spec.get("asset_universe", {}).get("symbols", [])
+                item["lookback_bars"] = max(int(item.get("lookback_bars") or 0), min_history + 10)
+                item["params"] = {**dict(item.get("params") or {}), "strategy_spec": validation.spec}
+            marketplace_subscription_id = parse_marketplace_strategy_pipeline(str(item.get("pipeline") or ""))
+            if marketplace_subscription_id:
+                subscription = next(
+                    (
+                        candidate for candidate in self.metadata_store.list_marketplace_subscriptions(subscriber_organization_id=organization_id)
+                        if candidate.get("id") == marketplace_subscription_id and candidate.get("status") == "active"
+                    ),
+                    None,
+                )
+                if subscription is None or subscription.get("listing_status") not in {"published", "archived"}:
+                    raise ValueError("Community strategy subscription not found or inactive.")
+                version = self.metadata_store.get_strategy_listing_version(version_id=subscription["pinned_listing_version_id"])
+                if version is None:
+                    raise ValueError("Pinned community strategy version is unavailable.")
+                strategy_spec = version.get("strategy_spec") if isinstance(version.get("strategy_spec"), dict) else {}
+                validation = validate_strategy_spec(strategy_spec)
+                if not validation.ok or validation.spec is None:
+                    raise ValueError("Community paper strategy no longer passes deterministic validation.")
+                _, min_history = build_rule_based_strategy_factory(validation.spec)
+                item["symbols"] = item.get("symbols") or validation.spec.get("asset_universe", {}).get("symbols", [])
+                item["lookback_bars"] = max(int(item.get("lookback_bars") or 0), min_history + 10)
+                item["params"] = {**dict(item.get("params") or {}), "strategy_spec": validation.spec}
+            hydrated_strategies.append(item)
+        config["strategies"] = hydrated_strategies
+
         snapshot_id = self.metadata_store.stable_id(
             "pcfg",
             f"{organization_id}:{deployment['id']}:{deployment['version']}",
@@ -2098,12 +2242,13 @@ class PaperService:
         command: PaperRunCommand,
         *,
         organization_id: str,
+        user_id: str | None = None,
         job_id: str | None = None,
         ownership_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         if ownership_guard is not None:
             ownership_guard()
-        deployment, config_path = self._resolve_deployment(command, organization_id=organization_id)
+        deployment, config_path = self._resolve_deployment(command, organization_id=organization_id, user_id=user_id)
         if ownership_guard is not None:
             ownership_guard()
         deployment_id = str(deployment["id"])

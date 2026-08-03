@@ -192,6 +192,30 @@ function intervalLabel(iv: string): string {
   return iv === "1h" ? "1-hour bars" : iv === "4h" ? "4-hour bars" : iv === "1mo" ? "Monthly bars" : "Daily bars";
 }
 
+export function boundedBuilderMessages(messages: StrategyBuilderMessage[], next: StrategyBuilderMessage): StrategyBuilderMessage[] {
+  return [...messages, next].slice(-20);
+}
+
+export function catalogBacktestDefaults(item: StrategyCatalogItem): {
+  symbols: string[];
+  interval: "1d" | "4h" | "1h" | "1mo";
+  trainBars: number;
+  parameters: Array<{ k: string; v: string }>;
+} {
+  const example = item.paper_config_example ?? {};
+  const rawSymbols = Array.isArray(example.symbols) ? example.symbols : [];
+  const symbols = rawSymbols.map((value) => String(value).trim().toUpperCase()).filter(Boolean);
+  const rawInterval = String(example.interval ?? "1d");
+  const interval = (["1d", "4h", "1h", "1mo"].includes(rawInterval) ? rawInterval : "1d") as "1d" | "4h" | "1h" | "1mo";
+  const rawTrainBars = Number(example.train_bars ?? item.required_train_bars ?? 300);
+  const trainBars = Number.isFinite(rawTrainBars) && rawTrainBars > 0 ? rawTrainBars : 300;
+  const params = example.params && typeof example.params === "object" && !Array.isArray(example.params)
+    ? example.params as Record<string, unknown>
+    : {};
+  const parameters = Object.entries(params).map(([k, value]) => ({ k, v: String(value ?? "") }));
+  return { symbols, interval, trainBars, parameters };
+}
+
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "interrupted"]);
 
 export class JobPollingTimeoutError extends Error {
@@ -652,6 +676,8 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
       const num = Number(value);
       parameters[key] = value === "true" ? true : value === "false" ? false : Number.isFinite(num) ? num : value;
     }
+    const selectedCatalogItem = catalog?.find((item) => item.name === selectedStrategy || item.id === selectedStrategy);
+    const configuredTrainBars = selectedCatalogItem ? catalogBacktestDefaults(selectedCatalogItem).trainBars : 300;
     try {
       const job = await startBacktest({
         pipeline,
@@ -661,6 +687,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
         interval: backtestInterval,
         trading_mode: tradingMode,
         experiment_name: "apollo_backtest",
+        train_bars: configuredTrainBars,
         parameters,
       } as Parameters<typeof startBacktest>[0]);
       const fresh = await pollJobUntilTerminal(() => getBacktestJob(job.id), { signal: controller.signal });
@@ -677,7 +704,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
         setBtRunning(false);
       }
     }
-  }, [backtestSymbols, backtestStart, backtestEnd, backtestInterval, btParamRows, selectedStrategy, pipelineFor, reloadJobs, hasPremium]);
+  }, [backtestSymbols, backtestStart, backtestEnd, backtestInterval, btParamRows, selectedStrategy, pipelineFor, reloadJobs, hasPremium, catalog]);
 
   useEffect(() => {
     backtestPoll.current?.abort();
@@ -885,6 +912,20 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   }, [activeOrgId]);
 
   // -- Strategy builder (describe an idea → validated, backtestable spec) ------
+  const [userStrategies, setUserStrategies] = useState<UserStrategyRecord[]>([]);
+  const reloadUserStrategies = useCallback(async () => {
+    try {
+      const next = await listUserStrategies();
+      if (activeOrgRef.current === activeOrgId) setUserStrategies(next);
+    } catch {
+      if (activeOrgRef.current === activeOrgId) setUserStrategies([]);
+    }
+  }, [activeOrgId]);
+  useEffect(() => {
+    setUserStrategies([]);
+    void reloadUserStrategies();
+  }, [reloadUserStrategies]);
+
   const [builderMode, setBuilderMode] = useState<"browse" | "design" | "community">("browse");
   const [builderMessages, setBuilderMessages] = useState<StrategyBuilderMessage[]>([]);
   const [builderInput, setBuilderInput] = useState("");
@@ -892,7 +933,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   const [builderDraft, setBuilderDraft] = useState<StrategySpec | null>(null);
   const [builderBusy, setBuilderBusy] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
-  const [builderApproved, setBuilderApproved] = useState<{ name: string; pipeline: string } | null>(null);
+  const [builderApproved, setBuilderApproved] = useState<StrategyCatalogItem | null>(null);
 
   useEffect(() => {
     setBuilderMessages([]);
@@ -906,7 +947,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
   const sendBuilderMessage = useCallback(async () => {
     const text = builderInput.trim();
     if (!text || builderBusy) return;
-    const nextMessages: StrategyBuilderMessage[] = [...builderMessages, { role: "user", content: text }];
+    const nextMessages = boundedBuilderMessages(builderMessages, { role: "user", content: text });
     setBuilderMessages(nextMessages);
     setBuilderInput("");
     setBuilderBusy(true);
@@ -920,8 +961,8 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
       const resp = await chatStrategyBuilder(nextMessages, (builderDraft as unknown as Record<string, unknown> | null) ?? null);
       if (activeOrgRef.current !== orgAtStart) return;
       setBuilderResp(resp);
-      setBuilderDraft(resp.draft_spec ?? builderDraft);
-      setBuilderMessages((prev) => [...prev, { role: "assistant", content: resp.assistant_message }]);
+      setBuilderDraft(resp.draft_spec ?? (resp.state === "needs_clarification" ? builderDraft : null));
+      setBuilderMessages((prev) => boundedBuilderMessages(prev, { role: "assistant", content: resp.assistant_message }));
     } catch (e) {
       if (activeOrgRef.current === orgAtStart) setBuilderError(e instanceof Error ? e.message : "Strategy builder failed.");
     } finally {
@@ -937,10 +978,9 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
     try {
       const resp = await approveStrategySpec(builderDraft as unknown as Record<string, unknown>, `Approved ${builderDraft.name} from Apollo.`, builderResp?.provenance_token);
       if (activeOrgRef.current !== orgAtStart) return;
-      const pipeline = resp.catalog_item?.pipeline ?? "";
-      setBuilderApproved({ name: resp.catalog_item?.name ?? builderDraft.name, pipeline });
+      setBuilderApproved(resp.catalog_item);
       // Refresh the catalog so the new strategy appears in the library immediately.
-      await reloadCatalog();
+      await Promise.all([reloadCatalog(), reloadUserStrategies()]);
       // Reset the conversation for the next idea.
       setBuilderMessages([]);
       setBuilderDraft(null);
@@ -950,21 +990,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
     } finally {
       if (activeOrgRef.current === orgAtStart) setBuilderBusy(false);
     }
-  }, [builderDraft, builderBusy, builderResp?.provenance_token, activeOrgId, reloadCatalog]);
-
-  const [userStrategies, setUserStrategies] = useState<UserStrategyRecord[]>([]);
-  const reloadUserStrategies = useCallback(async () => {
-    try {
-      const next = await listUserStrategies();
-      if (activeOrgRef.current === activeOrgId) setUserStrategies(next);
-    } catch {
-      if (activeOrgRef.current === activeOrgId) setUserStrategies([]);
-    }
-  }, [activeOrgId]);
-  useEffect(() => {
-    setUserStrategies([]);
-    void reloadUserStrategies();
-  }, [reloadUserStrategies]);
+  }, [builderDraft, builderBusy, builderResp?.provenance_token, activeOrgId, reloadCatalog, reloadUserStrategies]);
 
   const marketplaceEnabled = capabilities?.marketplace_enabled === true;
   const [marketListings, setMarketListings] = useState<MarketplaceListing[]>([]);
@@ -1071,7 +1097,8 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
       setBtParamRows((spec?.editable_parameters ?? []).map((p) => ({ k: p.name, v: String(p.default ?? "") })));
       return;
     }
-    setBtParamRows((item.key_parameters ?? []).slice(0, 8).map((k) => ({ k, v: "" })));
+    const defaults = catalogBacktestDefaults(item);
+    setBtParamRows(defaults.parameters.length ? defaults.parameters : (item.key_parameters ?? []).slice(0, 8).map((k) => ({ k, v: "" })));
   }, [selectedStrategy, catalog, userStrategies]);
 
   const dark = theme === "dark";
@@ -1117,6 +1144,13 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
     setOpenNavKey((cur) => (cur === key ? null : key));
   };
   const runBacktestFor = (name: string) => {
+    const item = catalog?.find((candidate) => candidate.name === name || candidate.id === name);
+    if (item) {
+      const defaults = catalogBacktestDefaults(item);
+      if (defaults.symbols.length) setBacktestSymbols(defaults.symbols);
+      setBacktestInterval(defaults.interval);
+      setBtParamRows(defaults.parameters.length ? defaults.parameters : (item.key_parameters ?? []).slice(0, 8).map((k) => ({ k, v: "" })));
+    }
     setSelectedStrategy(name);
     navigateTo("flask");
   };
@@ -1232,7 +1266,8 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
     const paramCount = item.key_parameters?.length ?? 0;
     // Distinguish provenance: benchmarks are reference baselines, user strategies
     // were authored here, and published user strategies are community listings.
-    const isUser = Boolean(item.user_strategy) || item.pipeline?.startsWith("user_strategy:");
+    const isCommunity = Boolean(item.community_strategy) || item.pipeline?.startsWith("marketplace_strategy:");
+    const isUser = !isCommunity && (Boolean(item.user_strategy) || item.pipeline?.startsWith("user_strategy:"));
     const isBenchmark = /buy_and_hold|benchmark/i.test(item.pipeline || "") || /benchmark/i.test(item.name);
     return {
       id: item.id,
@@ -1246,7 +1281,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
       // the badge is showing risk instead.
       footLabel: hasRisk ? "Difficulty" : "Parameters",
       footValue: hasRisk ? item.difficulty || "—" : String(paramCount),
-      origin: isUser ? "user" : isBenchmark ? "benchmark" : "builtin",
+      origin: isCommunity ? "community" : isUser ? "user" : isBenchmark ? "benchmark" : "builtin",
     } as StratCard;
   });
   const allCards = realCards;
@@ -2513,7 +2548,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                                 {/* Reproducibility metadata: version lineage + audit trail */}
                                 <div style={{ fontSize: "11.5px", color: colors.textFaint, marginTop: "3px", fontFamily: "'JetBrains Mono',monospace" }}>
                                   v{s.version} · {s.risk_level} risk · {s.status}
-                                  {s.root_strategy_id && s.root_strategy_id !== s.id ? " · revision" : ""}
+                                  {s.version > 1 ? " · revision" : ""}
                                   {s.updated_at_utc ? ` · updated ${String(s.updated_at_utc).slice(0, 10)}` : ""}
                                 </div>
                                 <div style={{ fontSize: "11px", color: colors.textFaint, marginTop: "3px" }}>
@@ -2587,7 +2622,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                         <div style={css(`margin-top:10px; border-top:1px solid ${colors.border}; padding-top:12px;`)}>
                           <div style={{ fontSize: "11.5px", color: colors.textFaint, marginBottom: "8px", lineHeight: 1.5 }}>Paste a spec (schema <code>strategy_spec/v1</code>). Validated server-side — only safe rule blocks, never executable code.</div>
                           <textarea value={specUpload} onChange={(e) => setSpecUpload(e.target.value)} placeholder='{"schema_version":"strategy_spec/v1", "name":"…", …}' rows={5} style={css(`width:100%; box-sizing:border-box; font-family:'JetBrains Mono',monospace; font-size:11px; color:${colors.text}; background:${colors.surfaceRaised}; border:1px solid ${colors.border}; border-radius:9px; padding:9px; resize:vertical;`)} />
-                          <button onClick={() => void uploadSpec()} style={css(`${newAgentBtnStyle} margin-top:10px; ${specUploadBusy || !specUpload.trim() ? "opacity:0.5; cursor:default;" : ""}`)}>{specUploadBusy ? "Validating…" : "Validate & add"}</button>
+                          <button disabled={specUploadBusy || !specUpload.trim()} onClick={() => void uploadSpec()} style={css(`${newAgentBtnStyle} margin-top:10px; ${specUploadBusy || !specUpload.trim() ? "opacity:0.5; cursor:default;" : ""}`)}>{specUploadBusy ? "Validating…" : "Validate & add"}</button>
                           {specUploadMsg ? <div style={{ fontSize: "12px", color: specUploadMsg.ok ? colors.gain : colors.loss, marginTop: "8px", lineHeight: 1.45 }}>{specUploadMsg.text}</div> : null}
                         </div>
                       ) : null}
@@ -2646,7 +2681,15 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                     {builderApproved ? (
                       <div style={css(`background:oklch(from ${colors.gain} l c h / 0.12); border:1px solid oklch(from ${colors.gain} l c h / 0.4); border-radius:11px; padding:11px 13px;`)}>
                         <div style={{ fontSize: "12.5px", fontWeight: 600, color: colors.text }}>✓ Added “{builderApproved.name}” to your library.</div>
-                        <button style={css(`${newAgentBtnStyle} margin-top:10px;`)} onClick={() => { setSelectedStrategy(builderApproved.name); setBuilderMode("browse"); navigateTo("flask"); }}>
+                        <button style={css(`${newAgentBtnStyle} margin-top:10px;`)} onClick={() => {
+                          const defaults = catalogBacktestDefaults(builderApproved);
+                          setSelectedStrategy(builderApproved.name);
+                          if (defaults.symbols.length) setBacktestSymbols(defaults.symbols);
+                          setBacktestInterval(defaults.interval);
+                          setBtParamRows(defaults.parameters);
+                          setBuilderMode("browse");
+                          navigateTo("flask");
+                        }}>
                           <Icon html={ICONS.plus} style={{ width: "14px", height: "14px" }} /> Backtest it now
                         </button>
                       </div>
@@ -2663,9 +2706,14 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                       disabled={builderBusy}
                       style={css(`flex:1; font-family:${font}; font-size:13px; color:${colors.text}; background:${colors.surfaceRaised}; border:1px solid ${colors.border}; border-radius:10px; padding:10px 13px; outline:none;`)}
                     />
-                    <button style={css(`${newAgentBtnStyle} ${builderBusy || !builderInput.trim() ? "opacity:0.5; cursor:default;" : ""}`)} onClick={() => void sendBuilderMessage()}>
+                    <button disabled={builderBusy || !builderInput.trim()} style={css(`${newAgentBtnStyle} ${builderBusy || !builderInput.trim() ? "opacity:0.5; cursor:default;" : ""}`)} onClick={() => void sendBuilderMessage()}>
                       {builderBusy ? "…" : "Send"}
                     </button>
+                    <button
+                      disabled={builderBusy || (!builderMessages.length && !builderDraft)}
+                      onClick={() => { setBuilderMessages([]); setBuilderInput(""); setBuilderResp(null); setBuilderDraft(null); setBuilderApproved(null); setBuilderError(null); }}
+                      style={css(`background:transparent; border:1px solid ${colors.border}; color:${colors.text}; border-radius:10px; padding:0 12px; font-size:12px; font-weight:600; font-family:${font}; cursor:pointer;`)}
+                    >Start over</button>
                   </div>
                 </div>
 
@@ -2692,7 +2740,7 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                       </div>
                       <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", margin: "12px 0", fontSize: "12px" }}>
                         <div><span style={{ color: colors.textFaint }}>Universe </span><b style={{ color: colors.text }}>{builderDraft.asset_universe.symbols.join(", ")}</b></div>
-                        <div><span style={{ color: colors.textFaint }}>Timeframe </span><b style={{ color: colors.text }}>{intervalLabel(builderDraft.timeframe === "short_term" ? "4h" : "1d")}</b></div>
+                        <div><span style={{ color: colors.textFaint }}>Timeframe </span><b style={{ color: colors.text }}>{builderDraft.timeframe === "short_term" ? "1-hour execution + 4-hour confirmation" : intervalLabel("1d")}</b></div>
                         <div><span style={{ color: colors.textFaint }}>Side </span><b style={{ color: colors.text }}>{builderDraft.side.replace("_", " ")}</b></div>
                       </div>
                       {builderResp?.generation_summary ? (
@@ -2743,6 +2791,11 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
                       {builderResp?.validation?.warnings?.length ? (
                         <div style={{ fontSize: "11.5px", color: "oklch(70% 0.15 80)", marginTop: "10px", lineHeight: 1.4 }}>⚠ {builderResp.validation.warnings.join(" ")}</div>
                       ) : null}
+                      <details style={{ marginTop: "10px" }}>
+                        <summary style={{ fontSize: "11.5px", fontWeight: 700, color: colors.textFaint, cursor: "pointer" }}>Full validated StrategySpec JSON</summary>
+                        <pre style={css(`max-height:240px; overflow:auto; white-space:pre-wrap; font-size:10.5px; color:${colors.text}; background:${colors.surfaceRaised}; border:1px solid ${colors.border}; border-radius:9px; padding:9px;`)}>{JSON.stringify(builderDraft, null, 2)}</pre>
+                      </details>
+                      {builderResp ? <div style={{ fontSize: "10.5px", color: colors.textFaint, marginTop: "7px" }}>{builderResp.generation_mode === "llm" ? "AI-assisted" : "Rule-generated"} · {builderResp.generation_path ?? builderResp.prompt_version}{builderResp.model ? ` · ${builderResp.model}` : ""}</div> : null}
                       <button
                         style={css(`${newAgentBtnStyle} margin-top:14px; justify-content:center; ${builderResp?.state !== "ready_for_approval" || builderBusy ? "opacity:0.5; cursor:default;" : ""}`)}
                         onClick={() => { if (builderResp?.state === "ready_for_approval" && !builderBusy) void approveBuilderDraft(); }}
@@ -2784,7 +2837,6 @@ export function ApolloDashboard(props: ApolloDashboardProps = {}) {
               <input type="date" value={backtestEnd} onChange={(e) => setBacktestEnd(e.target.value)} style={css(`font-family:${font}; font-size:13px; font-weight:600; color:${colors.text}; background:${colors.surface}; border:1px solid ${colors.border}; border-radius:10px; padding:8px 10px; box-sizing:border-box;`)} />
               <select style={css(selectStyle)} value={backtestInterval} onChange={(e) => setBacktestInterval(e.target.value as typeof backtestInterval)}>
                 <option value="1d">Daily bars</option>
-                <option value="4h">4-hour bars</option>
                 <option value="1h">1-hour bars</option>
                 <option value="1mo">Monthly bars</option>
               </select>

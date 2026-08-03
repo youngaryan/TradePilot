@@ -60,7 +60,16 @@ type PipelineExample = {
   sector_map_path?: unknown;
   event_file?: unknown;
   name?: unknown;
+  train_bars?: unknown;
+  trading_mode?: unknown;
+  interval?: unknown;
 };
+
+const MAX_BUILDER_MESSAGES = 20;
+
+export function appendBuilderMessage(messages: StrategyBuilderMessage[], message: StrategyBuilderMessage): StrategyBuilderMessage[] {
+  return [...messages, message].slice(-MAX_BUILDER_MESSAGES);
+}
 
 function asStringArray(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
@@ -178,6 +187,9 @@ export function BacktestLab({
     const isCommitteeSignalPipeline = pipeline === COMMITTEE_SIGNAL_PIPELINE;
     const rawParams = asParameterObject(example.params) ?? {};
     const params = SENTIMENT_PIPELINES.has(pipeline) ? { ...DEFAULT_SENTIMENT_PARAMETERS, ...rawParams } : rawParams;
+    const configuredTrainBars = Number(example.train_bars);
+    const configuredMode = asOptionalString(example.trading_mode);
+    const configuredInterval = asOptionalString(example.interval);
     const next: BacktestRunRequest = {
       ...request,
       pipeline,
@@ -188,7 +200,9 @@ export function BacktestLab({
       include_sec_filings: false,
       edgar_user_agent: isEventPipeline ? request.edgar_user_agent : null,
       experiment_name: asOptionalString(example.name) ?? `${pipeline}_ui`,
-      train_bars: isCommitteeSignalPipeline ? 1 : request.train_bars,
+      train_bars: isCommitteeSignalPipeline ? 1 : Number.isFinite(configuredTrainBars) ? configuredTrainBars : request.train_bars,
+      trading_mode: configuredMode === "short_term" || configuredMode === "daily" ? configuredMode : request.trading_mode,
+      interval: configuredInterval ?? request.interval,
       purge_bars: isCommitteeSignalPipeline ? 0 : request.purge_bars,
       parameters: params
     };
@@ -265,7 +279,7 @@ export function BacktestLab({
   async function sendBuilderMessage() {
     const content = builderInput.trim();
     if (!content) return;
-    const nextMessages: StrategyBuilderMessage[] = [...builderMessages, { role: "user", content }];
+    const nextMessages = appendBuilderMessage(builderMessages, { role: "user", content });
     setBuilderMessages(nextMessages);
     setBuilderInput("");
     setBuilderError(null);
@@ -274,8 +288,8 @@ export function BacktestLab({
     try {
       const response = await chatStrategyBuilder(nextMessages, draftSpec as unknown as Record<string, unknown> | null);
       setBuilderResponse(response);
-      setDraftSpec(response.draft_spec ?? null);
-      setBuilderMessages([...nextMessages, { role: "assistant", content: response.assistant_message }]);
+      setDraftSpec(response.draft_spec ?? (response.state === "needs_clarification" ? draftSpec : null));
+      setBuilderMessages(appendBuilderMessage(nextMessages, { role: "assistant", content: response.assistant_message }));
     } catch (caught) {
       setBuilderError(caught instanceof Error ? caught.message : "The strategy builder could not process that request.");
     } finally {
@@ -294,6 +308,10 @@ export function BacktestLab({
       onCatalogChange(nextCatalog);
       applyPipeline(response.catalog_item.pipeline);
       setBuilderNotice(`Saved ${response.strategy.name}. It is now available only in your strategy list.`);
+      setBuilderMessages([]);
+      setBuilderInput("");
+      setBuilderResponse(null);
+      setDraftSpec(null);
     } catch (caught) {
       setBuilderError(caught instanceof Error ? caught.message : "The strategy could not be approved.");
     } finally {
@@ -772,6 +790,9 @@ export function BacktestLab({
               <button type="button" className="primary-button" onClick={() => void sendBuilderMessage()} disabled={isBuilderBusy || !builderInput.trim()}>
                 {isBuilderBusy ? <Loader2 size={17} /> : <Send size={17} />}
                 Send
+              </button>
+              <button type="button" onClick={() => { setBuilderMessages([]); setBuilderInput(""); setBuilderResponse(null); setDraftSpec(null); setBuilderError(null); setBuilderNotice(null); }} disabled={isBuilderBusy || (!builderMessages.length && !draftSpec)}>
+                Start over
               </button>
             </div>
 

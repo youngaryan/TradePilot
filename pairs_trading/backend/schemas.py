@@ -295,7 +295,7 @@ class StrategyBuilderApprovalRequest(BaseModel):
     spec: dict[str, Any]
     approved: bool = Field(default=False)
     approval_text: str = Field(default="", max_length=500)
-    provenance_token: str | None = Field(default=None, max_length=4096)
+    provenance_token: str | None = Field(default=None, max_length=32768)
 
 
 class AdminStrategyStatusUpdateRequest(BaseModel):
@@ -306,6 +306,7 @@ class AdminQuotaUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backtest_job: int | None = Field(default=None, ge=0, le=1_000_000)
+    strategy_builder_generation: int | None = Field(default=None, ge=0, le=1_000_000)
     market_research_job: int | None = Field(default=None, ge=0, le=1_000_000)
     sentiment_job: int | None = Field(default=None, ge=0, le=1_000_000)
     paper_job: int | None = Field(default=None, ge=0, le=1_000_000)

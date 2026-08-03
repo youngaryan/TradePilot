@@ -625,6 +625,10 @@ export interface StrategyCatalogItem {
   status?: string;
   version?: number;
   risk_level?: string;
+  community_strategy?: boolean;
+  generation_mode?: "rules" | "llm";
+  generation_label?: string;
+  required_train_bars?: number;
 }
 
 export interface StrategyBuilderMessage {
@@ -642,6 +646,8 @@ export interface StrategySpec {
   required_indicators: Array<{ name: string; kind: string; parameters: Record<string, unknown> }>;
   entry_rules: Array<{ kind: string; parameters: Record<string, unknown>; description?: string | null }>;
   exit_rules: Array<{ kind: string; parameters: Record<string, unknown>; description?: string | null }>;
+  entry_logic?: "all" | "any";
+  exit_logic?: "all" | "any";
   position_sizing: Record<string, unknown>;
   risk_controls: Record<string, unknown>;
   rebalancing: Record<string, unknown>;
