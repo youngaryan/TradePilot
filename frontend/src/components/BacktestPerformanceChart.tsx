@@ -245,12 +245,12 @@ export const BacktestPerformanceChart = memo(function BacktestPerformanceChart({
     refs.current.strategyDrawdown.setData(prepared.strategyDrawdown);
     refs.current.baselineDrawdown.setData(prepared.baselineDrawdown);
     refs.current.markers.setMarkers(prepared.markers);
+    // Distribute pane height with stretch factors rather than absolute pixels:
+    // absolute `setHeight` calls fight each other inside a fixed-height chart and
+    // collapse the indicator panes to a few unreadable pixels.
     const panes = refs.current.chart.panes();
-    panes[0]?.setHeight(230);
-    panes[1]?.setHeight(190);
-    panes[2]?.setHeight(130);
-    panes[3]?.setHeight(130);
-    panes[4]?.setHeight(140);
+    const stretch = [26, 22, 15, 15, 16];
+    panes.forEach((pane, index) => pane.setStretchFactor(stretch[index] ?? 15));
     if (prepared.strategy.length > 0) refs.current.chart.timeScale().fitContent();
   }, [prepared]);
 
@@ -270,6 +270,7 @@ export const BacktestPerformanceChart = memo(function BacktestPerformanceChart({
         <div>
           <strong>{payload?.status === "running" || isRunning ? "Backtest updating" : "Backtest complete"}</strong>
           <span>
+            {" "}
             {formatNumber(payload?.completed_folds ?? 0, 0)} / {formatNumber(payload?.total_folds ?? 0, 0)} folds
             {payload?.sampled ? ` | showing ${formatNumber(payload.equity.length, 0)} of ${formatNumber(payload.source_points, 0)} points` : ""}
           </span>
@@ -292,7 +293,7 @@ export const BacktestPerformanceChart = memo(function BacktestPerformanceChart({
 
       <div className="backtest-pane-key">
         <span>Pane 1: strategy vs baseline equity</span>
-        <span>Pane 2: close, SMA 20, SMA 50, trade markers</span>
+        <span>Pane 2: close, SMA 20, SMA 50, and {formatNumber(prepared.markers.length, 0)} trade markers</span>
         <span>Pane 3: position, forecast, turnover</span>
         <span>Pane 4: RSI and MACD histogram</span>
         <span>Pane 5: strategy vs baseline drawdown</span>

@@ -439,7 +439,11 @@ function ResearchResultView({ result }: { result: MarketResearchReport | MultiSt
   return <ReportView report={result} />;
 }
 
-export function MarketResearchLab() {
+export function MarketResearchLab({ runGate }: {
+  /** When the server would refuse a new research run, the control is disabled and explained. */
+  runGate?: { allowed: boolean; reason?: string };
+} = {}) {
+  const runBlocked = runGate ? !runGate.allowed : false;
   const [tickerText, setTickerText] = useState("AAPL");
   const [analysisDate, setAnalysisDate] = useState("");
   const [horizon, setHorizon] = useState("swing");
@@ -761,7 +765,13 @@ export function MarketResearchLab() {
             </div>
           ) : null}
           <div className="button-row">
-            <button type="button" className="primary-button" onClick={() => void runResearch()} disabled={isRunning}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void runResearch()}
+              disabled={isRunning || runBlocked}
+              title={runBlocked ? "Running the research committee requires an active paid plan for this workspace." : undefined}
+            >
               {isRunning ? <Loader2 size={17} /> : <Play size={17} />}
               {isRunning ? "Running committee" : "Run research committee"}
             </button>

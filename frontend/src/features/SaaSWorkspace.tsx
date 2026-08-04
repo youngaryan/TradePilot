@@ -70,6 +70,17 @@ function equityPoints(experiment: ExperimentRecord | null) {
     .filter((point) => point.timestamp !== "n/a");
 }
 
+/** Title-cased tab labels so the workspace sections read consistently. */
+const WORKSPACE_SECTION_LABELS: Record<WorkspaceSection, string> = {
+  onboarding: "Setup checklist",
+  experiments: "Experiments",
+  agents: "Paper agents",
+  reports: "Reports",
+  data: "Data sources",
+  operations: "Operations",
+  billing: "Billing"
+};
+
 export function SaaSWorkspace({
   auth,
   activeOrganizationId,
@@ -304,10 +315,17 @@ export function SaaSWorkspace({
         </section>
       ) : null}
 
-      <div className="section-tabs">
+      <div className="section-tabs" role="tablist" aria-label="Workspace sections">
         {(["onboarding", "experiments", "agents", "reports", "data", "operations", "billing"] as WorkspaceSection[]).map((item) => (
-          <button key={item} type="button" className={section === item ? "chip chip--active" : "chip"} onClick={() => setSection(item)}>
-            {item === "onboarding" ? "Launch wizard" : item === "reports" ? "Reports" : item}
+          <button
+            key={item}
+            type="button"
+            role="tab"
+            aria-selected={section === item}
+            className={section === item ? "chip chip--active" : "chip"}
+            onClick={() => setSection(item)}
+          >
+            {WORKSPACE_SECTION_LABELS[item]}
           </button>
         ))}
       </div>
@@ -335,9 +353,9 @@ export function SaaSWorkspace({
               </button>
             </div>
             <div className="button-cluster">
-              <button type="button" className="ghost-button" onClick={() => onNavigate("sentiment")}>Build sentiment data</button>
-              <button type="button" className="ghost-button" onClick={() => onNavigate("backtests")}>Run first backtest</button>
-              <button type="button" className="ghost-button" onClick={() => onNavigate("live")}>Deploy fake-money agent</button>
+              <button type="button" className="secondary-button" onClick={() => onNavigate("sentiment")}>Build sentiment data</button>
+              <button type="button" className="secondary-button" onClick={() => onNavigate("backtests")}>Run first backtest</button>
+              <button type="button" className="secondary-button" onClick={() => onNavigate("live")}>Deploy a paper agent</button>
             </div>
           </Panel>
 

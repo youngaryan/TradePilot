@@ -341,7 +341,11 @@ function AnalysisList({ title, rows, empty }: { title: string; rows: string[]; e
   );
 }
 
-export function SentimentLab() {
+export function SentimentLab({ runGate }: {
+  /** When the server would refuse a new dataset build, the control is disabled and explained. */
+  runGate?: { allowed: boolean; reason?: string };
+} = {}) {
+  const runBlocked = runGate ? !runGate.allowed : false;
   const [request, setRequest] = useState<SentimentAccumulationRequest>(() => defaultRequest());
   const [symbolsText, setSymbolsText] = useState(() => defaultRequest().symbols.join(" "));
   const [dataset, setDataset] = useState<SentimentDatasetPayload | null>(null);
@@ -901,7 +905,7 @@ export function SentimentLab() {
             <small>For weak hardware, leave FinBERT unchecked. The fallback scorer is fast and runs locally without model downloads.</small>
           </div>
           <div className="button-row">
-            <button type="button" className="primary-button" onClick={() => void runAccumulator()} disabled={jobIsRunning} title={jobIsRunning ? "A sentiment job is already running." : "Start a tracked sentiment accumulation job."}>
+            <button type="button" className="primary-button" onClick={() => void runAccumulator()} disabled={jobIsRunning || runBlocked} title={runBlocked ? "Building a sentiment dataset requires an active paid plan for this workspace." : jobIsRunning ? "A sentiment job is already running." : "Start a tracked sentiment accumulation job."}>
               {jobIsRunning ? <Loader2 size={17} /> : <Play size={17} />}
               {jobIsRunning ? "Accumulating" : "Run sentiment accumulator"}
             </button>

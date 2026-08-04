@@ -63,13 +63,13 @@ export function AccountSecurity({
             </div>
           </div>
           <div className="button-cluster">
-            <button type="button" className="ghost-button" disabled={isBusy} onClick={() => void run(async () => {
+            <button type="button" className="secondary-button" disabled={isBusy} onClick={() => void run(async () => {
               await requestEmailVerification(auth.user.email);
               setNotice("Verification email requested. In development, check artifacts/email_outbox.");
             })}>
               Send verification email
             </button>
-            <button type="button" className="ghost-button" disabled={isBusy} onClick={() => void run(async () => {
+            <button type="button" className="secondary-button" disabled={isBusy} onClick={() => void run(async () => {
               await requestPasswordReset(auth.user.email);
               setNotice("Password reset requested. In development, check artifacts/email_outbox.");
             })}>

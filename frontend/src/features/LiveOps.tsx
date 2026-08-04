@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Building2, CalendarDays, CheckCircle2, Loader2, Newspaper, Play, Plus, Route } from "lucide-react";
+import { AlertTriangle, Building2, CalendarDays, CheckCircle2, Circle, Loader2, Newspaper, Play, Plus, Route } from "lucide-react";
 
 import { getPaperRunJob, listPaperRunJobs, startPaperRunJob } from "../api/client";
 import type { PaperAgentConfig, PaperDashboardPayload, PaperExecutionConfig, PaperRunJob, PaperRunRequest, StrategyCatalogItem } from "../api/types";
@@ -8,7 +8,7 @@ import { Badge } from "../components/Badge";
 import { ExposureBars, OrderNotionalBars, PortfolioEquityChart, RiskReturnMap } from "../components/Charts";
 import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
-import { formatCurrency, formatNumber, formatPercent, jobDisplayStatus, statusTone } from "../utils/format";
+import { formatCurrency, formatNumber, jobDisplayStatus, statusTone } from "../utils/format";
 import { agentHasSentiment, defaultAgentId, getAllOrders, parseJsonObject } from "../utils/quant";
 
 type DateMode = "single" | "range";
@@ -80,7 +80,8 @@ export function LiveOps({
   paperJobs,
   onJobsChange,
   onPaperPayload,
-  onRefresh
+  onRefresh,
+  runGate
 }: {
   payload: PaperDashboardPayload;
   catalog: StrategyCatalogItem[];
@@ -88,7 +89,10 @@ export function LiveOps({
   onJobsChange: (jobs: PaperRunJob[]) => void;
   onPaperPayload: (payload: PaperDashboardPayload) => void;
   onRefresh: () => void;
+  /** When the server would refuse a deployment, the launch control is disabled and explained. */
+  runGate?: { allowed: boolean; reason?: string };
 }) {
+  const runBlocked = runGate ? !runGate.allowed : false;
   const launchCatalog = useMemo(() => catalogLaunchItems(catalog), [catalog]);
   const [initialAgents] = useState<PaperAgentConfig[]>(() => starterAgents());
   const [agents, setAgents] = useState<PaperAgentConfig[]>(() => initialAgents);
@@ -294,7 +298,13 @@ export function LiveOps({
           )}
 
           <div className="button-row">
-            <button type="button" className="primary-button" onClick={() => void launch()} disabled={isLaunching}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void launch()}
+              disabled={isLaunching || runBlocked}
+              title={runBlocked ? "Deploying a simulated agent requires an active paid plan for this workspace." : undefined}
+            >
               {isLaunching ? <Loader2 size={17} /> : <Play size={17} />}
               {isLaunching ? "Launching" : "Deploy agents"}
             </button>
@@ -320,12 +330,24 @@ export function LiveOps({
             </div>
             <p>{activeJob?.message ?? "Configure agents and launch a paper job."}</p>
             <div className="execution-path">
-              {["Load config", "Build signals", "Simulate orders", "Save ledgers"].map((step, index) => (
-                <div key={step} className={(activeJob?.progress ?? 0) >= (index + 1) / 4 ? "path-step path-step--done" : "path-step"}>
-                  <CheckCircle2 size={16} />
-                  {step}
-                </div>
-              ))}
+              {["Load config", "Build signals", "Simulate orders", "Save ledgers"].map((step, index) => {
+                // A failed run must not show every stage as completed just because
+                // progress reached 100%: the last reported stage is where it stopped.
+                const failed = activeJob?.status === "failed" || activeJob?.status === "interrupted";
+                const reached = (activeJob?.progress ?? 0) >= (index + 1) / 4;
+                const done = reached && !failed;
+                const stopped = failed && reached && (index === 3 || (activeJob?.progress ?? 0) < (index + 2) / 4);
+                return (
+                  <div
+                    key={step}
+                    className={done ? "path-step path-step--done" : stopped ? "path-step path-step--failed" : "path-step"}
+                  >
+                    {done ? <CheckCircle2 size={16} /> : stopped ? <AlertTriangle size={16} /> : <Circle size={16} />}
+                    {step}
+                    {stopped ? <span className="ui-sr-only"> — stopped here</span> : null}
+                  </div>
+                );
+              })}
             </div>
           </div>
           <Explainer

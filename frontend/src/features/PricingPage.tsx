@@ -54,7 +54,18 @@ export function PricingPage({
     String(subscription?.plan ?? "free") !== "free"
   );
   const hasAccess = Boolean(isAdminAccess || isPremium);
-  const accessLabel = isAdminAccess || billing?.access === "admin" ? "Admin access" : isPremium ? "Premium active" : "Free access";
+  // Distinguish "never subscribed" from "paid plan whose billing is blocking
+  // access": the second is a billing problem, not a free tier.
+  const planNeedsAttention = Boolean(subscription)
+    && ["pro", "team", "enterprise", "pro_trial"].includes(String(subscription?.plan ?? "").toLowerCase())
+    && !["active", "trialing"].includes(String(subscription?.status ?? "").toLowerCase());
+  const accessLabel = isAdminAccess || billing?.access === "admin"
+    ? "Administrator access"
+    : isPremium
+      ? "Premium active"
+      : planNeedsAttention
+        ? "Billing attention required"
+        : "Free access";
   const premiumDetail = isAdminAccess || billing?.access === "admin" ? "Unlocked by admin role" : "Checked server-side on premium APIs";
 
   async function handleCheckout(plan: PricingPlan) {

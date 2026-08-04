@@ -8,12 +8,34 @@ import { MetricCard, Panel, SectionHeader } from "../components/Cards";
 import { HorizontalBars, TelemetryTimelineChart } from "../components/Charts";
 import { DataTable } from "../components/Table";
 import { formatDateTime, formatNumber, formatPercent, statusTone } from "../utils/format";
+import {
+  ADMIN_SEGMENTS,
+  ORG_ROLE_SHORT,
+  accountMatchesSegment,
+  isAdminRole,
+  isWorkspaceManagerRole,
+  normalizeOrgRole,
+  summarizeSubscription,
+  type AdminSegmentId
+} from "../access/model";
 
 type UserSort = "created_at_utc" | "email" | "role" | "status" | "last_login_at_utc" | "plan" | "subscription_status";
 
 function userTone(user: AdminUserRecord) {
   if (user.status !== "active") return "bad";
-  return user.role === "admin" ? "good" : "neutral";
+  return isAdminRole(user.role) ? "good" : "neutral";
+}
+
+/**
+ * Subscription summary for an admin user row, built only from the plan and
+ * subscription_status fields the API actually returns.
+ */
+function accountSubscription(user: AdminUserRecord) {
+  return summarizeSubscription(
+    user.plan == null && user.subscription_status == null
+      ? null
+      : ({ plan: String(user.plan ?? "free"), status: String(user.subscription_status ?? "") } as never)
+  );
 }
 
 export function AdminDashboard({ auth }: { auth: AuthResponse }) {
@@ -25,6 +47,7 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
   const [status, setStatus] = useState("");
   const [strategyStatus, setStrategyStatus] = useState("");
   const [strategyRisk, setStrategyRisk] = useState("");
+  const [segment, setSegment] = useState<AdminSegmentId>("all");
   const [sortBy, setSortBy] = useState<UserSort>("created_at_utc");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [landingSearch, setLandingSearch] = useState("");
@@ -174,8 +197,14 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
       ? `deactivate ${user.email}`
       : change.status === "active"
         ? `reactivate ${user.email}`
-        : `change ${user.email}'s role to ${change.role}`;
-    if (!window.confirm(`Confirm you want to ${action}. This affects access immediately.`)) return;
+        : `change ${user.email}'s PLATFORM role to ${change.role}`;
+    if (!window.confirm(
+      `Confirm you want to ${action}.
+
+This affects access immediately across every workspace. `
+      + "Platform role is separate from workspace membership and from subscription status: this change does not "
+      + "alter any subscription, and it does not alter workspace roles."
+    )) return;
     setIsLoading(true);
     setNotice(null);
     setError(null);
@@ -305,7 +334,28 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
         />
       </Panel>
 
-      <Panel title="Search and manage users" subtitle="Filter, sort, deactivate, reactivate, and change roles with confirmation prompts.">
+      <Panel
+        title="Accounts"
+        subtitle="Subscription segment and organizational role are separate dimensions. A paying customer is not an administrator, and an administrator is not necessarily paying."
+      >
+        <div className="section-tabs" role="tablist" aria-label="Account audience segments">
+          {ADMIN_SEGMENTS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="tab"
+              aria-selected={segment === option.id}
+              aria-pressed={segment === option.id}
+              title={option.description}
+              onClick={() => setSegment(option.id)}
+            >
+              {option.label}
+              {" "}
+              <span className="table-count">{users.filter((user) => accountMatchesSegment(user, option.id)).length}</span>
+            </button>
+          ))}
+        </div>
+        <p className="chart-subtitle">{ADMIN_SEGMENTS.find((option) => option.id === segment)?.description}</p>
         <div className="admin-toolbar">
           <label htmlFor="admin-user-search">
             Search
@@ -357,19 +407,50 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
           getKey={(user) => user.id}
           columns={[
             { key: "user", header: "User", render: (user) => <strong>{user.display_name}<br /><small>{user.email}</small></strong> },
-            { key: "role", header: "Role", render: (user) => <Badge label={user.role} tone={userTone(user)} /> },
+            { key: "platform_role", header: "Platform role", render: (user) => <Badge label={isAdminRole(user.role) ? "administrator" : "standard"} tone={userTone(user)} /> },
+            {
+              key: "workspace_role",
+              header: "Workspace role",
+              render: (user) => {
+                const orgRole = normalizeOrgRole(user.organization_role);
+                return (
+                  <Badge
+                    label={ORG_ROLE_SHORT[orgRole]}
+                    tone={isWorkspaceManagerRole(orgRole) ? "info" : "neutral"}
+                  />
+                );
+              }
+            },
             { key: "status", header: "Status", render: (user) => <Badge label={user.status} tone={statusTone(user.status)} /> },
             { key: "workspace", header: "Workspace", render: (user) => user.organization_name ?? "No workspace" },
-            { key: "subscription", header: "Subscription", render: (user) => `${user.plan ?? "free"} / ${user.subscription_status ?? "unknown"}` },
+            {
+              key: "plan",
+              header: "Plan",
+              render: (user) => {
+                const subscription = accountSubscription(user);
+                return (
+                  <span className="stacked-cell">
+                    <strong>{subscription.planLabel}</strong>
+                    <span>{subscription.stateLabel}</span>
+                  </span>
+                );
+              }
+            },
             { key: "last_login", header: "Last login", render: (user) => formatDateTime(user.last_login_at_utc) },
             {
               key: "actions",
               header: "Actions",
               render: (user) => (
                 <div className="table-actions">
-                  <button type="button" className="ghost-button" onClick={() => void updateUser(user, { role: user.role === "admin" ? "user" : "admin" })} disabled={isLoading || user.id === auth.user.id}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    title="Changes the platform role only. Subscription status and workspace membership are unaffected."
+                    onClick={() => void updateUser(user, { role: isAdminRole(user.role) ? "user" : "admin" })}
+                    disabled={isLoading || user.id === auth.user.id}
+                  >
                     <UserCog size={14} />
-                    {user.role === "admin" ? "Make user" : "Make admin"}
+                    {isAdminRole(user.role) ? "Revoke platform admin" : "Grant platform admin"}
                   </button>
                   <button type="button" className="ghost-button danger-button" onClick={() => void updateUser(user, { status: user.status === "active" ? "inactive" : "active" })} disabled={isLoading || user.id === auth.user.id}>
                     <UserX size={14} />
@@ -379,8 +460,13 @@ export function AdminDashboard({ auth }: { auth: AuthResponse }) {
               )
             }
           ]}
-          rows={users}
+          rows={users.filter((user) => accountMatchesSegment(user, segment))}
         />
+        <p className="chart-subtitle">
+          Showing {users.filter((user) => accountMatchesSegment(user, segment)).length} of {users.length} loaded
+          accounts. Segments are computed from the role, status, plan, and subscription-status fields returned by the
+          API — never inferred from unrelated data.
+        </p>
       </Panel>
 
       <Panel title="User-created strategies" subtitle="Audit AI-generated specs, ownership, approval history, usage, and safety status.">

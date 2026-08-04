@@ -10,15 +10,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class FrontendContractTests(unittest.TestCase):
     def test_market_research_lab_exposes_committee_api_and_disclaimer(self) -> None:
         app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        routes_source = PROJECT_ROOT.joinpath("frontend/src/app/AppRoutes.tsx").read_text(encoding="utf-8")
         lab_source = PROJECT_ROOT.joinpath("frontend/src/features/MarketResearchLab.tsx").read_text(encoding="utf-8")
         reports_source = PROJECT_ROOT.joinpath("frontend/src/features/workspace/MarketResearchReports.tsx").read_text(encoding="utf-8")
         client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
         type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
         style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
 
+        # The legacy view registry still resolves `#/app/research`; the unified
+        # router is what mounts the screen.
         self.assertIn('id: "research"', app_source)
-        self.assertIn("MarketResearchLab", app_source)
         self.assertIn('"research"', app_source)
+        self.assertIn("MarketResearchLab", routes_source)
+        self.assertIn('path="/research"', routes_source)
         self.assertIn("For research and educational purposes only. Not financial advice.", lab_source)
         self.assertIn("startMarketResearchJob", lab_source)
         self.assertIn("getMarketResearchJob", lab_source)
@@ -234,6 +238,7 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_saas_frontend_exposes_login_workspace_and_detail_pages(self) -> None:
         app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        routes_source = PROJECT_ROOT.joinpath("frontend/src/app/AppRoutes.tsx").read_text(encoding="utf-8")
         workspace_source = PROJECT_ROOT.joinpath("frontend/src/features/SaaSWorkspace.tsx").read_text(encoding="utf-8")
         client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
         type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
@@ -241,7 +246,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('id: "workspace"', app_source)
         self.assertIn("LoginScreen", app_source)
         self.assertIn("setApiAuth", app_source)
-        self.assertIn("SaaSWorkspace", app_source)
+        self.assertIn("SaaSWorkspace", routes_source)
+        self.assertIn('path="/workspace"', routes_source)
         self.assertIn("Launch first strategy wizard", workspace_source)
         self.assertIn("MarketResearchReports", workspace_source)
         self.assertIn('"reports"', workspace_source)
@@ -259,6 +265,8 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_frontend_exposes_admin_pricing_and_payment_wall_contracts(self) -> None:
         app_source = PROJECT_ROOT.joinpath("frontend/src/App.tsx").read_text(encoding="utf-8")
+        routes_source = PROJECT_ROOT.joinpath("frontend/src/app/AppRoutes.tsx").read_text(encoding="utf-8")
+        data_source = PROJECT_ROOT.joinpath("frontend/src/app/useWorkspaceData.ts").read_text(encoding="utf-8")
         login_source = PROJECT_ROOT.joinpath("frontend/src/features/LoginScreen.tsx").read_text(encoding="utf-8")
         admin_source = PROJECT_ROOT.joinpath("frontend/src/features/AdminDashboard.tsx").read_text(encoding="utf-8")
         pricing_source = PROJECT_ROOT.joinpath("frontend/src/features/PricingPage.tsx").read_text(encoding="utf-8")
@@ -295,8 +303,9 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("/api/billing/pricing", client_source)
         self.assertIn("/api/billing/status", client_source)
         self.assertIn("/api/system/admin-counts", client_source)
-        self.assertIn("React.lazy", app_source)
-        self.assertIn("getSystemAdminCounts", app_source)
+        # Screens are still code-split, now from the unified router.
+        self.assertIn("React.lazy", routes_source)
+        self.assertIn("getSystemAdminCounts", data_source)
         self.assertIn("export interface AdminUserRecord", type_source)
         self.assertIn("export interface AdminOverviewPayload", type_source)
         self.assertIn("export interface PricingPlan", type_source)
@@ -405,7 +414,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn(".backtest-chart-canvas", style_source)
 
     def test_strategy_builder_clears_stale_response_before_next_request(self) -> None:
-        source = PROJECT_ROOT.joinpath("frontend/src/features/ApolloDashboard.tsx").read_text(encoding="utf-8")
+        source = PROJECT_ROOT.joinpath("frontend/src/features/strategies/StrategyBuilder.tsx").read_text(encoding="utf-8")
         type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
         request_start = source.index("const sendBuilderMessage = useCallback")
         request_end = source.index("const approveBuilderDraft = useCallback", request_start)
@@ -417,6 +426,130 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("requirement_trace", type_source)
         self.assertIn("semantic_repair_count", type_source)
         self.assertIn("How the AI interpreted this request", source)
+
+
+    def test_access_model_separates_subscription_from_organizational_role(self) -> None:
+        model_source = PROJECT_ROOT.joinpath("frontend/src/access/model.ts").read_text(encoding="utf-8")
+        nav_source = PROJECT_ROOT.joinpath("frontend/src/shell/navigation.ts").read_text(encoding="utf-8")
+        session_source = PROJECT_ROOT.joinpath("frontend/src/session/useAppSession.ts").read_text(encoding="utf-8")
+        client_source = PROJECT_ROOT.joinpath("frontend/src/api/client.ts").read_text(encoding="utf-8")
+
+        # Both dimensions come from server-provided data.
+        self.assertIn("export type OrgRole", model_source)
+        self.assertIn("export type PlatformRole", model_source)
+        self.assertIn("organization_members.role", model_source)
+        self.assertIn("export function isWorkspaceManagerRole", model_source)
+        self.assertIn("export function isAdminRole", model_source)
+        self.assertIn("export function summarizeSubscription", model_source)
+        self.assertIn("needsBillingAttention", model_source)
+        self.assertIn("premiumViaAdminOverride", model_source)
+
+        # Entitlement is read from the billing endpoint, not inferred from the role.
+        self.assertIn("getBillingStatus", session_source)
+        self.assertIn("/api/billing/status", client_source)
+
+        # Only management and administration are role-gated in navigation.
+        self.assertIn('requires: "viewManagement"', nav_source)
+        self.assertIn('requires: "administerPlatform"', nav_source)
+
+        # The strategy builder is authentication-gated by the API, so it must not
+        # be presented as a paid feature.
+        self.assertIn("useStrategyBuilder: isAuthenticated ? ALLOWED", model_source)
+
+    def test_admin_user_segmentation_uses_real_role_and_subscription_fields(self) -> None:
+        model_source = PROJECT_ROOT.joinpath("frontend/src/access/model.ts").read_text(encoding="utf-8")
+        admin_source = PROJECT_ROOT.joinpath("frontend/src/features/AdminDashboard.tsx").read_text(encoding="utf-8")
+        type_source = PROJECT_ROOT.joinpath("frontend/src/api/types.ts").read_text(encoding="utf-8")
+
+        self.assertIn("export const ADMIN_SEGMENTS", model_source)
+        self.assertIn("export function accountMatchesSegment", model_source)
+        for segment in ('"free"', '"paid"', '"managers"', '"admins"', '"billing_attention"', '"restricted"'):
+            self.assertIn(segment, model_source)
+
+        self.assertIn("accountMatchesSegment", admin_source)
+        self.assertIn("ADMIN_SEGMENTS", admin_source)
+        self.assertIn('header: "Platform role"', admin_source)
+        self.assertIn('header: "Workspace role"', admin_source)
+        self.assertIn("normalizeOrgRole", admin_source)
+        self.assertIn("window.confirm", admin_source)
+
+        # The segmentation fields must exist on the admin record contract.
+        self.assertIn("organization_role?: string | null", type_source)
+        self.assertIn("subscription_status?: string | null", type_source)
+
+    def test_unified_shell_replaces_the_separate_apollo_and_classic_experiences(self) -> None:
+        root_source = PROJECT_ROOT.joinpath("frontend/src/app/AppRoot.tsx").read_text(encoding="utf-8")
+        routes_source = PROJECT_ROOT.joinpath("frontend/src/app/AppRoutes.tsx").read_text(encoding="utf-8")
+        shell_source = PROJECT_ROOT.joinpath("frontend/src/shell/AppShell.tsx").read_text(encoding="utf-8")
+        main_source = PROJECT_ROOT.joinpath("frontend/src/main.tsx").read_text(encoding="utf-8")
+        apollo_source = PROJECT_ROOT.joinpath("frontend/src/features/ApolloDashboard.tsx").read_text(encoding="utf-8")
+
+        # One shell for every authenticated surface.
+        self.assertIn("AppShell", root_source)
+        self.assertIn("AppRoutes", root_source)
+        self.assertIn("BrowserRouter", main_source)
+
+        # Legacy addresses still resolve.
+        for path in ('path="/apollo"', 'path="/classic"', 'path="/"'):
+            self.assertTrue(path in routes_source or path in root_source, path)
+        self.assertIn("LEGACY_HASH_ROUTES", routes_source)
+        self.assertIn("hashchange", routes_source)
+
+        # Public legal and auth-utility routes stay reachable while signed out.
+        for path in ("/privacy", "/terms", "/risk-disclaimer", "/compliance", "/password-reset", "/verify-email"):
+            self.assertIn(path, root_source)
+
+        # Compatibility exports survive the decomposition.
+        for symbol in (
+            "JobPollingTimeoutError",
+            "pollJobUntilTerminal",
+            "buildProductionSentimentRequest",
+            "buildSentimentNewsMatrix",
+            "sentimentWindowCutoff",
+            "sentimentHeadlineKey",
+            "boundedBuilderMessages",
+            "catalogBacktestDefaults",
+        ):
+            self.assertIn(symbol, apollo_source)
+
+        # Role-aware navigation lives in the shell.
+        self.assertIn("visibleNavItems", shell_source)
+        self.assertIn("administerPlatform", shell_source)
+        self.assertIn("viewManagement", shell_source)
+
+    def test_design_system_tokens_and_simulation_disclosure_exist(self) -> None:
+        style_source = PROJECT_ROOT.joinpath("frontend/src/styles.css").read_text(encoding="utf-8")
+        ui_source = PROJECT_ROOT.joinpath("frontend/src/ui/ui.css").read_text(encoding="utf-8")
+        shell_source = PROJECT_ROOT.joinpath("frontend/src/shell/AppShell.tsx").read_text(encoding="utf-8")
+
+        for token in (
+            "--surface-1",
+            "--surface-sunken",
+            "--text-primary",
+            "--text-secondary",
+            "--border-default",
+            "--brand",
+            "--positive",
+            "--negative",
+            "--warning",
+            "--info",
+            "--elevated",
+            "--focus-ring",
+            "--chart-1",
+            "--radius-md",
+            "--space-4",
+            "--motion-base",
+        ):
+            self.assertIn(token, style_source)
+        self.assertIn(':root[data-theme="dark"]', style_source)
+
+        # Reusable component layer.
+        for selector in (".ui-btn", ".ui-field", ".ui-table", ".ui-access", ".ui-notice", ".ui-job", ".ui-empty"):
+            self.assertIn(selector, ui_source)
+
+        # The simulation boundary is stated in the shell, not only in disclaimers.
+        self.assertIn("Simulated capital only.", shell_source)
+        self.assertIn("No broker is connected", shell_source)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ import { BacktestPerformanceChart } from "../components/BacktestPerformanceChart
 import { BacktestEquityChart } from "../components/Charts";
 import { Explainer, MetricCard, Panel } from "../components/Cards";
 import { DataTable } from "../components/Table";
+import { Pagination } from "../ui";
+import { CandlestickPanel } from "../charts/CandlestickPanel";
 import { formatNumber, formatPercent, jobDisplayStatus, pipelineLabel, splitList, splitSymbols, statusTone, toneFromNumber, toNumber } from "../utils/format";
 import { parseJsonObject } from "../utils/quant";
 
@@ -126,13 +128,16 @@ function templateToRequest(template: BacktestTemplate): BacktestRunRequest {
   };
 }
 
+const TRADE_ROWS_PER_PAGE = 25;
+
 export function BacktestLab({
   catalog,
   templates,
   jobs,
   onJobsChange,
   onCatalogChange,
-  strategyBuilderMode = "rules"
+  strategyBuilderMode = "rules",
+  runGate
 }: {
   catalog: StrategyCatalogItem[];
   templates: BacktestTemplate[];
@@ -140,12 +145,16 @@ export function BacktestLab({
   onJobsChange: (jobs: BacktestJob[]) => void;
   onCatalogChange: (catalog: StrategyCatalogItem[]) => void;
   strategyBuilderMode?: "rules" | "llm";
+  /** When the server would refuse a new run, the launch control is disabled and explained. */
+  runGate?: { allowed: boolean; reason?: string };
 }) {
+  const runBlocked = runGate ? !runGate.allowed : false;
   const builderIsLlm = strategyBuilderMode === "llm";
   const [request, setRequest] = useState<BacktestRunRequest>(defaultRequest);
   const [symbolsText, setSymbolsText] = useState(defaultRequest.symbols.join(" "));
   const [parametersText, setParametersText] = useState(JSON.stringify(defaultRequest.parameters, null, 2));
   const [activeJob, setActiveJob] = useState<BacktestJob | null>(jobs[0] ?? null);
+  const [tradePage, setTradePage] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
   const [builderMessages, setBuilderMessages] = useState<StrategyBuilderMessage[]>([]);
@@ -319,6 +328,11 @@ export function BacktestLab({
     }
   }
 
+  // A new inspected run means a new trade ledger.
+  useEffect(() => {
+    setTradePage(1);
+  }, [activeJob?.id]);
+
   useEffect(() => {
     if (!activeJob || !["queued", "running"].includes(activeJob.status)) return;
     const timer = window.setInterval(() => {
@@ -349,7 +363,20 @@ export function BacktestLab({
         benchmark_outperformance: summary.benchmark_outperformance ?? visualMetrics.benchmark_outperformance
       }
     : visualMetrics;
+  // Candlestick view of the run's primary symbol. Only offered once a job has a
+  // recorded universe and window, so the request can never be a guess.
+  const candleWindow = (() => {
+    const request = (activeJob?.request ?? null) as { symbols?: string[]; start?: string; end?: string; interval?: string } | null;
+    const symbol = visualization?.primary_symbol ?? (Array.isArray(request?.symbols) ? request?.symbols[0] : undefined);
+    if (!symbol || !request?.start || !request?.end) return null;
+    return { symbol, start: request.start, end: request.end, interval: request.interval ?? "1d" };
+  })();
   const tradeRows = visualization?.trade_summary ?? result?.trade_summary ?? [];
+  // A completed run can produce hundreds of trades; page them so the evidence
+  // stays reachable without turning the results screen into an endless scroll.
+  const tradePageCount = Math.max(1, Math.ceil(tradeRows.length / TRADE_ROWS_PER_PAGE));
+  const safeTradePage = Math.min(tradePage, tradePageCount);
+  const pagedTradeRows = tradeRows.slice((safeTradePage - 1) * TRADE_ROWS_PER_PAGE, safeTradePage * TRADE_ROWS_PER_PAGE);
   const comparisonRows = result?.comparison?.leaderboard ?? [];
 
   return (
@@ -366,7 +393,7 @@ export function BacktestLab({
         <Badge label="validation first" tone="info" />
       </section>
 
-      <div className="content-grid">
+      <div className="content-grid content-grid--lab">
         <Panel title="Backtest Setup" subtitle={activeStrategy?.name ?? "Custom strategy"}>
           <div className="template-grid">
             {templates.map((template) => (
@@ -668,7 +695,13 @@ export function BacktestLab({
           </label>
 
           <div className="button-row">
-            <button type="button" className="primary-button" onClick={() => void launch()} disabled={isLaunching}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void launch()}
+              disabled={isLaunching || runBlocked}
+              title={runBlocked ? "Starting a backtest requires an active paid plan for this workspace." : undefined}
+            >
               {isLaunching ? <Loader2 size={17} /> : <Play size={17} />}
               {isLaunching ? "Launching" : "Launch backtest agent"}
             </button>
@@ -912,10 +945,22 @@ export function BacktestLab({
         </Panel>
       ) : null}
 
+      {candleWindow ? (
+        <Panel title="Price Candles" subtitle="Open/high/low/close bars for the primary symbol in this run's window">
+          <CandlestickPanel
+            symbol={candleWindow.symbol}
+            start={candleWindow.start}
+            end={candleWindow.end}
+            interval={candleWindow.interval}
+            caption="Fetched from the same market-data provider the backtest used, so the bars line up with the equity curve above."
+          />
+        </Panel>
+      ) : null}
+
       {visualization ? (
         <Panel title="Trade-Level Summary" subtitle="Closed trades from the fill ledger">
           <DataTable
-            rows={tradeRows}
+            rows={pagedTradeRows}
             empty="No entry or exit events were produced by the current backtest."
             getKey={(row) => row.id}
             columns={[
@@ -928,6 +973,13 @@ export function BacktestLab({
               { key: "return", header: "Return", align: "right", render: (row) => formatPercent(row.return_pct) },
               { key: "status", header: "Status", render: (row) => <Badge label={row.status} tone={row.status === "closed" ? "neutral" : "warn"} /> }
             ]}
+          />
+          <Pagination
+            page={safeTradePage}
+            pageCount={tradePageCount}
+            onChange={setTradePage}
+            itemLabel="closed trades"
+            total={tradeRows.length}
           />
         </Panel>
       ) : null}
